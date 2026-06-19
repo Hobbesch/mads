@@ -17,6 +17,9 @@ export default function App() {
   const pollProject = useStore((s) => s.pollProject);
   const resumables = useStore((s) => s.resumables);
   const resumeAgent = useStore((s) => s.resumeAgent);
+  const collisions = useStore((s) => s.collisions);
+  const autonomy = useStore((s) => s.autonomy);
+  const setAutonomy = useStore((s) => s.setAutonomy);
   const [showNew, setShowNew] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
 
@@ -52,9 +55,25 @@ export default function App() {
                 : sidecar.status}
             </span>
             {project && (
-              <button onClick={() => void pollProject()} title="Git-/PR-Status jetzt aktualisieren">
-                ↻
-              </button>
+              <>
+                <button
+                  className={`toggle ${autonomy.autoSync ? "on" : ""}`}
+                  onClick={() => void setAutonomy({ ...autonomy, autoSync: !autonomy.autoSync })}
+                  title="Sub-Branches automatisch onto origin/main rebasen"
+                >
+                  Auto-Sync {autonomy.autoSync ? "an" : "aus"}
+                </button>
+                <button
+                  className={`toggle ${autonomy.collisionScan ? "on" : ""}`}
+                  onClick={() => void setAutonomy({ ...autonomy, collisionScan: !autonomy.collisionScan })}
+                  title="Code-Kollisionen zwischen aktiven Agenten erkennen"
+                >
+                  Kollisions-Scan {autonomy.collisionScan ? "an" : "aus"}
+                </button>
+                <button onClick={() => void pollProject()} title="Git-/PR-Status jetzt aktualisieren">
+                  ↻
+                </button>
+              </>
             )}
             <button className="primary" onClick={() => setShowNew(true)}>
               + Neuer Stream
@@ -76,6 +95,18 @@ export default function App() {
                 {r.label}
                 {r.branch ? ` · ${r.branch}` : ""}
               </button>
+            ))}
+          </div>
+        )}
+
+        {collisions.length > 0 && (
+          <div className="collision-banner">
+            <span className="collision-label">⚠︎ {collisions.length} mögliche Code-Kollision(en):</span>
+            {collisions.map((c, i) => (
+              <span key={i} className="collision-item">
+                {c.labelA} ⟷ {c.labelB} · {c.path}
+                {c.symbols?.length ? `:${c.symbols.join(",")}` : c.severity === "file" ? " (gleiche Datei)" : ""}
+              </span>
             ))}
           </div>
         )}

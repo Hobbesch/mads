@@ -11,10 +11,11 @@
     "release:mac": "bash scripts/build-signed.sh",
     "sidecar:build": "npm --prefix sidecar run build",
     "sidecar:install": "npm --prefix sidecar install",
-    "test": "npm run test:ownership && npm run test:merge && npm run test:secrets",
+    "test": "npm run test:ownership && npm run test:merge && npm run test:secrets && npm run test:collision",
     "test:ownership": "esbuild shared/ownership.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/ownership.test.mjs && node node_modules/.cache/ownership.test.mjs",
     "test:merge": "esbuild shared/merge.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/merge.test.mjs && node node_modules/.cache/merge.test.mjs",
-    "test:secrets": "esbuild shared/secrets.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/secrets.test.mjs && node node_modules/.cache/secrets.test.mjs"
+    "test:secrets": "esbuild shared/secrets.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/secrets.test.mjs && node node_modules/.cache/secrets.test.mjs",
+    "test:collision": "esbuild shared/collision.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/collision.test.mjs && node node_modules/.cache/collision.test.mjs"
   },
   "dependencies": {
     "react": "^19.1.0",

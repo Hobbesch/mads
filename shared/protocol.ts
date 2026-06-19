@@ -10,6 +10,8 @@
  * Sidecar und Frontend, damit beide denselben Vertrag sprechen.
  */
 
+import type { Collision } from "./collision";
+
 export const PROTOCOL_VERSION = 1 as const;
 
 export type AgentStatus =
@@ -44,6 +46,7 @@ export type HostMessage =
   | SyncBranchMsg
   | GateTaskMsg
   | IntegratePrMsg
+  | SetAutonomyMsg
   | PollProjectMsg
   | ShutdownMsg;
 
@@ -116,6 +119,16 @@ export interface GateTaskMsg extends BaseMsg {
   agentId: string;
 }
 
+/** Halb-autonomer Integrator: Auto-Sync + Kollisions-Scan an/aus. */
+export interface AutonomyConfig {
+  autoSync: boolean; // Sub-Branches automatisch onto origin/<default> rebasen
+  collisionScan: boolean; // Code-Kollisionen zwischen aktiven Agenten erkennen
+}
+export interface SetAutonomyMsg extends BaseMsg {
+  type: "set_autonomy";
+  config: AutonomyConfig;
+}
+
 export interface PollProjectMsg extends BaseMsg {
   type: "poll_project"; // git-/PR-Status aller Agenten jetzt aktualisieren
 }
@@ -177,6 +190,7 @@ export type SidecarMessage =
   | MergeResultMsg
   | GateResultMsg
   | ResumableAgentsMsg
+  | CollisionWarningMsg
   | SidecarErrorMsg;
 
 export interface SidecarReadyMsg extends BaseMsg {
@@ -343,6 +357,12 @@ export interface ResumableAgent {
 export interface ResumableAgentsMsg extends BaseMsg {
   type: "resumable_agents";
   agents: ResumableAgent[];
+}
+
+/** Laufzeit-Kollisionen zwischen aktiven Agenten (leeres Array = aufgeräumt). */
+export interface CollisionWarningMsg extends BaseMsg {
+  type: "collision_warning";
+  collisions: Collision[];
 }
 
 export type EscalationKind =

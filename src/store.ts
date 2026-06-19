@@ -18,7 +18,9 @@ import type {
   PullRequestInfo,
   GateStep,
   ResumableAgent,
+  AutonomyConfig,
 } from "../shared/protocol";
+import type { Collision } from "../shared/collision";
 
 const C = {
   dim: "\x1b[90m",
@@ -70,10 +72,13 @@ interface MadsState {
   permissions: PermissionRequestMsg[];
   escalations: SidecarErrorMsg[];
   resumables: ResumableAgent[];
+  collisions: Collision[];
+  autonomy: AutonomyConfig;
   selectedId?: string;
   debugLog: string[];
 
   init: () => Promise<void>;
+  setAutonomy: (config: AutonomyConfig) => Promise<void>;
   openProject: () => Promise<void>;
   createAgent: (opts: {
     label: string;
@@ -179,6 +184,10 @@ export const useStore = create<MadsState>((set) => {
         set({ resumables: msg.agents });
         break;
 
+      case "collision_warning":
+        set({ collisions: msg.collisions });
+        break;
+
       case "agent_event": {
         const ev = msg.event;
         if (ev.kind === "assistant_text" || ev.kind === "assistant_delta") {
@@ -257,8 +266,15 @@ export const useStore = create<MadsState>((set) => {
     permissions: [],
     escalations: [],
     resumables: [],
+    collisions: [],
+    autonomy: { autoSync: true, collisionScan: true },
     selectedId: undefined,
     debugLog: [],
+
+    setAutonomy: async (config) => {
+      set({ autonomy: config });
+      await sendHost({ ...envelope(), type: "set_autonomy", config });
+    },
 
     init: async () => {
       set({ sidecar: { status: "starting", sdkAvailable: false } });

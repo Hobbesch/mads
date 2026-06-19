@@ -13,7 +13,8 @@ import { createPr, getRepoInfo, gitStatus, mergePr, prStatus, removeWorktree, ru
 import { runGate } from "./gate.js";
 import { loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
-import type { HostMessage, ProjectInfo, EscalationKind } from "../../shared/protocol.js";
+import { parseDiffRegions, detectCollisions, type AgentRegions } from "../../shared/collision.js";
+import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig } from "../../shared/protocol.js";
 
 const POLL_INTERVAL_MS = 25_000;
 
@@ -21,6 +22,11 @@ export class Orchestrator {
   private readonly pool = new Map<string, AgentSession>();
   private project?: ProjectInfo;
   private pollTimer?: ReturnType<typeof setInterval>;
+  // Halb-autonomer Integrator (P-Halb): Auto-Sync + Kollisions-Scan.
+  private autonomy: AutonomyConfig = { autoSync: true, collisionScan: true };
+  private readonly gitState = new Map<string, { behind: number; ahead: number; dirty: boolean }>();
+  private readonly syncing = new Set<string>(); // läuft gerade ein Auto-Sync?
+  private readonly autoSyncConflicted = new Set<string>(); // Auto-Sync pausiert bis manuell gelöst
 
   async dispatch(msg: HostMessage): Promise<void> {
     switch (msg.type) {
@@ -100,6 +106,11 @@ export class Orchestrator {
         await this.handleGate(msg.agentId);
         break;
 
+      case "set_autonomy":
+        this.autonomy = msg.config;
+        log(`[orchestrator] autonomy: autoSync=${msg.config.autoSync} collisionScan=${msg.config.collisionScan}`);
+        break;
+
       case "integrate_pr":
         await this.handleIntegrate(msg.agentId, msg.method ?? "squash");
         break;
@@ -168,6 +179,7 @@ export class Orchestrator {
       this.emitError(agentId, res.kind, `Sync fehlgeschlagen: ${res.error}`);
       return;
     }
+    this.autoSyncConflicted.delete(agentId); // manuell gelöst → Auto-Sync wieder erlauben
     log(`[orchestrator] Branch ${s.branch} rebaset onto origin/${this.project.defaultBranch}`);
     await this.pollAgent(s);
   }
@@ -299,18 +311,73 @@ export class Orchestrator {
     // einmal pro Zyklus fetchen, dann pro Agent rev-list (spart Netz).
     await run("git", ["-C", this.project.repoRoot, "fetch", "origin"], this.project.repoRoot);
     for (const s of this.pool.values()) await this.pollAgent(s, true);
+    if (this.autonomy.autoSync) await this.autoSyncPass();
+    if (this.autonomy.collisionScan) await this.collisionPass();
   }
 
   private async pollAgent(s: AgentSession, skipFetch = false): Promise<void> {
     if (!this.project || !s.repoRoot || !s.branch || !s.worktreePath) return;
     try {
       const status = await gitStatus(s.repoRoot, s.worktreePath, s.branch, this.project.defaultBranch, skipFetch);
+      this.gitState.set(s.agentId, status);
       this.emit({ ...envelope(), type: "git_status", agentId: s.agentId, ...status });
       const pr = await prStatus(s.repoRoot, s.branch);
       if (pr) this.emit({ ...envelope(), type: "pr_update", agentId: s.agentId, pr });
     } catch (e) {
       log(`[orchestrator] poll ${s.agentId} failed:`, String(e));
     }
+  }
+
+  /** Auto-Sync: idle, saubere Sub-Branches, die hinter origin/<default> liegen, automatisch rebasen. */
+  private async autoSyncPass(): Promise<void> {
+    if (!this.project) return;
+    for (const s of this.pool.values()) {
+      if (s.role !== "sub" || !s.worktreePath || !s.branch) continue;
+      if (s.status === "running") continue; // nicht unter laufender Arbeit rebasen
+      if (this.syncing.has(s.agentId) || this.autoSyncConflicted.has(s.agentId)) continue;
+      const st = this.gitState.get(s.agentId);
+      if (!st || st.behind <= 0 || st.dirty) continue; // nur saubere, zurückliegende Branches
+      this.syncing.add(s.agentId);
+      const res = await syncBranch(s.worktreePath, s.branch, this.project.defaultBranch);
+      this.syncing.delete(s.agentId);
+      if (res.ok) {
+        this.emit({
+          ...envelope(),
+          type: "agent_event",
+          agentId: s.agentId,
+          event: {
+            kind: "assistant_text",
+            text: `↻ Auto-Sync: rebaset onto origin/${this.project.defaultBranch} (war ${st.behind} behind).`,
+          },
+        });
+        await this.pollAgent(s, true);
+      } else {
+        // semantischer/Push-Konflikt → an den Menschen eskalieren, Auto-Sync pausieren
+        this.autoSyncConflicted.add(s.agentId);
+        this.emitError(s.agentId, res.kind, `Auto-Sync gestoppt (manuell „Sync" nötig): ${res.error}`);
+      }
+    }
+  }
+
+  /** Kollisions-Scan: paarweiser Region-Overlap der aktiven Sub-Agenten. */
+  private async collisionPass(): Promise<void> {
+    if (!this.project) return;
+    const agentsRegions: AgentRegions[] = [];
+    for (const s of this.pool.values()) {
+      if (s.role !== "sub" || !s.worktreePath || s.status === "done") continue;
+      try {
+        const diff = await run(
+          "git",
+          ["-C", s.worktreePath, "diff", "--merge-base", `origin/${this.project.defaultBranch}`, "--unified=0"],
+          s.worktreePath,
+        );
+        const regions = parseDiffRegions(diff.stdout);
+        if (regions.length) agentsRegions.push({ agentId: s.agentId, label: s.label ?? s.agentId, regions });
+      } catch {
+        /* einzelner Diff-Fehler ignorieren */
+      }
+    }
+    this.emit({ ...envelope(), type: "collision_warning", collisions: detectCollisions(agentsRegions) });
   }
 
   private emitError(agentId: string, code: EscalationKind, message: string): void {

@@ -72,10 +72,14 @@ Die Recherche-Grundlagen liegen in [`docs/research/`](docs/research/).
 - **P7 — Persistenz/Resume:** Agenten-Registry in `<repo>/.mads/agents.json`; nach App-Neustart
   bietet mads **fortsetzbare Agenten** an (Worktree + Claude-Session bleiben erhalten).
 - **Distribution:** Developer-ID-signiert + notarisiert + gestapelt (`npm run release:mac`).
+- **Halb-autonomer Integrator:** **Auto-Sync** rebaset saubere, idle Sub-Branches automatisch
+  onto origin/main (tötet stale base, bevor er entsteht); ein Laufzeit-**Kollisions-Scan** warnt,
+  wenn zwei Agenten dieselbe Code-Region anfassen (gleiche Datei + verschiedene Funktionen bleibt
+  erlaubt). Beides in der Titelleiste schaltbar; der Merge bleibt dein Ein-Klick „Integrieren".
 
-Noch nicht im Prototyp (Roadmap P8+): Update-Bereich (Claude-Code-Feature-Monitoring),
-LLM-`security-review`-Subagent (über den deterministischen Gate hinaus), Merge-Queue,
-Multi-Window, Region-Ownership-Trespass *zur Laufzeit*. Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap--phasen-mvp--vollausbau).
+Noch nicht im Prototyp (Roadmap P8+): voll-autonomes Auto-Integrate (Merge ohne Klick),
+Update-Bereich (Claude-Code-Feature-Monitoring), LLM-`security-review`-Subagent, Merge-Queue,
+Multi-Window. Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap--phasen-mvp--vollausbau).
 
 ## An einem echten Projekt (z. B. PAIX) testen
 

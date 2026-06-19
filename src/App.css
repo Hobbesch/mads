@@ -483,6 +483,40 @@ button.primary:hover {
 .resume-banner button:hover {
   background: var(--panel-2);
 }
+.collision-banner {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+  border-bottom: 1px solid rgba(255, 176, 32, 0.3);
+  padding: 8px 16px;
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+.collision-label {
+  font-weight: 700;
+}
+.collision-item {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* Autonomie-Toggles in der Titelleiste */
+.titlebar-right button.toggle {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text-faint);
+  border-radius: 20px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.titlebar-right button.toggle.on {
+  background: rgba(48, 209, 88, 0.16);
+  color: #28a745;
+  border-color: transparent;
+}
 
 /* ---------------- Body split ---------------- */
 .body {
