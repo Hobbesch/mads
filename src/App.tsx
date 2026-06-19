@@ -15,6 +15,8 @@ export default function App() {
   const sidecar = useStore((s) => s.sidecar);
   const project = useStore((s) => s.project);
   const pollProject = useStore((s) => s.pollProject);
+  const resumables = useStore((s) => s.resumables);
+  const resumeAgent = useStore((s) => s.resumeAgent);
   const [showNew, setShowNew] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
 
@@ -63,6 +65,18 @@ export default function App() {
         {lastEscalation && (
           <div className="escalation-banner">
             ▲ Eskalation ({lastEscalation.code}): {lastEscalation.message}
+          </div>
+        )}
+
+        {resumables.length > 0 && (
+          <div className="resume-banner">
+            <span className="resume-label">↩︎ {resumables.length} Agent(en) fortsetzbar:</span>
+            {resumables.map((r) => (
+              <button key={r.agentId} onClick={() => void resumeAgent(r)}>
+                {r.label}
+                {r.branch ? ` · ${r.branch}` : ""}
+              </button>
+            ))}
           </div>
         )}
 

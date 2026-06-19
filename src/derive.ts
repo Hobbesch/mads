@@ -12,6 +12,7 @@ export interface Badge {
 export function agentBadges(a: AgentVM): Badge[] {
   const out: Badge[] = [];
   const merged = a.pr?.state === "MERGED";
+  if (a.gate && !merged) out.push({ label: a.gate.ok ? "Gate grün" : "Gate rot", tone: a.gate.ok ? "ok" : "err" });
   if (a.behind > 0 && !merged) out.push({ label: `stale base · ${a.behind} behind`, tone: "warn" });
   if (a.dirty && !merged) out.push({ label: "uncommitted", tone: "info" });
   const pr = a.pr;

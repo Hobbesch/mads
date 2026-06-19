@@ -16,6 +16,8 @@ import type {
   SidecarErrorMsg,
   ProjectInfo,
   PullRequestInfo,
+  GateStep,
+  ResumableAgent,
 } from "../shared/protocol";
 
 const C = {
@@ -50,6 +52,7 @@ export interface AgentVM {
   ahead: number;
   dirty: boolean;
   pr?: PullRequestInfo;
+  gate?: { ok: boolean; steps: GateStep[] };
 }
 
 export interface SidecarInfo {
@@ -66,6 +69,7 @@ interface MadsState {
   order: string[];
   permissions: PermissionRequestMsg[];
   escalations: SidecarErrorMsg[];
+  resumables: ResumableAgent[];
   selectedId?: string;
   debugLog: string[];
 
@@ -87,7 +91,9 @@ interface MadsState {
   createPr: (id: string) => Promise<void>;
   syncBranch: (id: string) => Promise<void>;
   integratePr: (id: string) => Promise<void>;
+  runGate: (id: string) => Promise<void>;
   pollProject: () => Promise<void>;
+  resumeAgent: (r: ResumableAgent) => Promise<void>;
 }
 
 function slugifyBranch(label: string): string {
@@ -152,6 +158,25 @@ export const useStore = create<MadsState>((set) => {
             `${C.red}${C.bold}⛔ Merge blockiert:${C.reset}${C.red} ${msg.reasons.join(" · ")}${C.reset}`,
           );
         }
+        break;
+
+      case "gate_result":
+        patchAgent(msg.agentId, { gate: { ok: msg.ok, steps: msg.steps } });
+        writeLine(
+          msg.agentId,
+          `${C.bold}${msg.ok ? C.green : C.red}▣ Clean-Code-Gate: ${msg.ok ? "grün" : "rot"}${C.reset}`,
+        );
+        for (const st of msg.steps) {
+          const icon = st.status === "pass" ? `${C.green}✓` : st.status === "fail" ? `${C.red}✖` : `${C.dim}–`;
+          writeLine(
+            msg.agentId,
+            `  ${icon} ${st.name}${C.reset}${st.summary ? ` ${C.dim}${st.summary}${C.reset}` : ""}`,
+          );
+        }
+        break;
+
+      case "resumable_agents":
+        set({ resumables: msg.agents });
         break;
 
       case "agent_event": {
@@ -231,6 +256,7 @@ export const useStore = create<MadsState>((set) => {
     order: [],
     permissions: [],
     escalations: [],
+    resumables: [],
     selectedId: undefined,
     debugLog: [],
 
@@ -282,6 +308,8 @@ export const useStore = create<MadsState>((set) => {
         type: "start_agent",
         agentId: id,
         prompt,
+        label,
+        role,
         model,
         mock,
         permissionMode: "default",
@@ -337,8 +365,56 @@ export const useStore = create<MadsState>((set) => {
       await sendHost({ ...envelope(), type: "integrate_pr", agentId: id, method: "squash" });
     },
 
+    runGate: async (id) => {
+      writeLine(id, `${C.cyan}⏵ Clean-Code-Gate…${C.reset}`);
+      await sendHost({ ...envelope(), type: "gate_task", agentId: id });
+    },
+
     pollProject: async () => {
       await sendHost({ ...envelope(), type: "poll_project" });
+    },
+
+    resumeAgent: async (r) => {
+      const project = useStore.getState().project;
+      const agent: AgentVM = {
+        id: r.agentId,
+        label: r.label,
+        role: r.role,
+        status: "starting",
+        costUsd: 0,
+        numTurns: 0,
+        sessionId: r.sessionId,
+        mock: false,
+        createdAt: Date.now(),
+        lastEventAt: Date.now(),
+        branch: r.branch,
+        worktreePath: r.worktreePath,
+        behind: 0,
+        ahead: 0,
+        dirty: false,
+      };
+      set((s) => ({
+        agents: { ...s.agents, [r.agentId]: agent },
+        order: s.order.includes(r.agentId) ? s.order : [...s.order, r.agentId],
+        selectedId: r.agentId,
+        resumables: s.resumables.filter((x) => x.agentId !== r.agentId),
+      }));
+      writeLine(r.agentId, `${C.magenta}${C.bold}▌ ${r.label}${C.reset} ${C.dim}(fortgesetzt${r.branch ? ` · ${r.branch}` : ""})${C.reset}`);
+      await sendHost({
+        ...envelope(),
+        type: "start_agent",
+        agentId: r.agentId,
+        prompt: "Setze die Arbeit fort. Fasse zuerst kurz den aktuellen Stand zusammen, dann mach weiter.",
+        label: r.label,
+        role: r.role,
+        model: r.model,
+        mock: false,
+        permissionMode: "default",
+        resumeSessionId: r.sessionId,
+        resumeWorktreePath: r.worktreePath,
+        repoRoot: project?.repoRoot,
+        branch: r.branch,
+      });
     },
   };
 });

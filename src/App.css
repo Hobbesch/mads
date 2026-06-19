@@ -457,6 +457,32 @@ button.primary:hover {
   font-size: 12px;
   font-weight: 550;
 }
+.resume-banner {
+  background: var(--accent-weak);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.resume-label {
+  font-weight: 600;
+  color: var(--accent);
+}
+.resume-banner button {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.resume-banner button:hover {
+  background: var(--panel-2);
+}
 
 /* ---------------- Body split ---------------- */
 .body {

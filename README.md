@@ -46,7 +46,7 @@ Die Recherche-Grundlagen liegen in [`docs/research/`](docs/research/).
 
 ---
 
-## Prototyp — was schon funktioniert (P0–P5)
+## Prototyp — was schon funktioniert (P0–P7)
 
 - **Rust-Core** spawnt den Node-Sidecar (`std::process`) und forwarded dessen stdout/stderr
   zeilenweise über einen `tauri::ipc::Channel` ans Frontend; stdin trägt die HostMessages.
@@ -66,11 +66,16 @@ Die Recherche-Grundlagen liegen in [`docs/research/`](docs/research/).
 - **P5 — Integrator-Merge:** rollen-gegatetes „Integrieren" — hartes Vor-Merge-Gate
   (CI grün · nicht stale · kein Konflikt · kein Draft/Block) → `gh pr merge --squash
   --delete-branch` → Worktree-Cleanup. Nur diese Op landet auf `main`; Sub-Agents nie.
+- **P6 — Clean-Code-Gate:** vor jedem PR ein projekt-erkanntes Gate (lint/type/test, je nach
+  Ökosystem) + deterministischer **Secret-Scan** im Worktree; ein rotes Gate **blockiert die
+  PR-Erstellung**.
+- **P7 — Persistenz/Resume:** Agenten-Registry in `<repo>/.mads/agents.json`; nach App-Neustart
+  bietet mads **fortsetzbare Agenten** an (Worktree + Claude-Session bleiben erhalten).
 - **Distribution:** Developer-ID-signiert + notarisiert + gestapelt (`npm run release:mac`).
 
-Noch nicht im Prototyp (Roadmap P6+): Clean-Code-Gates (lint/type/test + security-review)
-als erzwungene Kette, Region-Ownership-Trespass *zur Laufzeit*, Persistenz/Resume,
-Update-Bereich. Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap--phasen-mvp--vollausbau).
+Noch nicht im Prototyp (Roadmap P8+): Update-Bereich (Claude-Code-Feature-Monitoring),
+LLM-`security-review`-Subagent (über den deterministischen Gate hinaus), Merge-Queue,
+Multi-Window, Region-Ownership-Trespass *zur Laufzeit*. Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap--phasen-mvp--vollausbau).
 
 ## An einem echten Projekt (z. B. PAIX) testen
 
@@ -79,10 +84,13 @@ Update-Bereich. Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap--phase
 3. **„+ Neuer Stream"** → Rolle **Sub-Agent**, Mock-Haken **aus**, Aufgabe beschreiben →
    mads legt einen Worktree+Branch an und startet einen echten Claude-Agenten darin.
 4. Mehrere Sub-Agenten parallel anlegen — jeder arbeitet isoliert auf eigener Branch.
-5. Im Inspector: Live-Terminal mitlesen, Rückfragen/Permissions beantworten, **PR erstellen**,
-   bei „stale base" **Sync** drücken; Eskalations-Badges zeigen CI/Merge-Status.
+5. Im Inspector: Live-Terminal mitlesen, Rückfragen/Permissions beantworten; mit **„Gate"** das
+   Clean-Code-Gate (lint/type/test + Secret-Scan) prüfen; **PR erstellen** (läuft das Gate
+   automatisch — rot ⇒ kein PR); bei „stale base" **Sync** drücken.
 6. Ist der PR grün & nicht stale: **„Integrieren"** → mads merged ihn gegated nach `main`
    (`squash`, `--delete-branch`) und räumt den Worktree auf. Sonst nennt der Button den Grund.
+7. **Resume:** mads beenden & neu starten → Projekt öffnen → oben erscheint ein Banner mit
+   **fortsetzbaren Agenten** („Fortsetzen") — Worktree + Claude-Session bleiben erhalten.
 
 > **Sicherheit:** Agenten laufen in `permissionMode: default` — **jede** schreibende/Bash-/
 > gh-Aktion (commit, push, `gh pr create`) wird im Dashboard zur Bestätigung vorgelegt

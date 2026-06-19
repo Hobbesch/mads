@@ -6,9 +6,12 @@
  *     Polling-Loop, der git-Status (behind/ahead/dirty) + PR-Status (Checks,
  *     mergeable, review) je Agent meldet → Eskalations-Signale fürs Dashboard.
  */
+import { existsSync } from "node:fs";
 import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
 import { createPr, getRepoInfo, gitStatus, mergePr, prStatus, removeWorktree, run, syncBranch } from "./git.js";
+import { runGate } from "./gate.js";
+import { loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
 import type { HostMessage, ProjectInfo, EscalationKind } from "../../shared/protocol.js";
 
@@ -43,6 +46,7 @@ export class Orchestrator {
         this.project = { projectId: msg.projectId, repoRoot: msg.repoRoot, ...info };
         this.emit({ ...envelope(), type: "project_resolved", project: this.project });
         log(`[orchestrator] project resolved: ${info.owner}/${info.repo} (default ${info.defaultBranch})`);
+        this.offerResumable(msg.repoRoot);
         this.startPolling();
         break;
       }
@@ -52,9 +56,10 @@ export class Orchestrator {
           log(`[orchestrator] agent ${msg.agentId} existiert bereits`);
           return;
         }
-        const session = new AgentSession(msg.agentId);
+        const session = new AgentSession(msg.agentId, () => this.persist());
         this.pool.set(msg.agentId, session);
         await session.start(msg);
+        this.persist();
         void this.pollAgent(session); // initialer Status
         break;
       }
@@ -79,6 +84,7 @@ export class Orchestrator {
         const s = this.pool.get(msg.agentId);
         await s?.stop(msg.removeWorktree ?? false);
         this.pool.delete(msg.agentId);
+        this.persist();
         break;
       }
 
@@ -88,6 +94,10 @@ export class Orchestrator {
 
       case "sync_branch":
         await this.handleSync(msg.agentId);
+        break;
+
+      case "gate_task":
+        await this.handleGate(msg.agentId);
         break;
 
       case "integrate_pr":
@@ -117,6 +127,19 @@ export class Orchestrator {
       this.emitError(agentId, "spawn_failed", "Kein Worktree/Projekt für diesen Agenten — PR nicht möglich.");
       return;
     }
+
+    // P6: kein roter PR — erst das Clean-Code-Gate.
+    const gate = await this.handleGate(agentId);
+    if (!gate.ok) {
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: { kind: "assistant_text", text: "⛔ PR nicht erstellt — Clean-Code-Gate ist rot (siehe oben)." },
+      });
+      return;
+    }
+
     const res = await createPr(
       s.worktreePath,
       s.repoRoot,
@@ -196,11 +219,73 @@ export class Orchestrator {
         log(`[orchestrator] worktree cleanup after merge failed: ${String(e)}`);
       }
     }
+    s.status = "done";
     await s.stop(false); // Query schließen; Karte bleibt als "merged" sichtbar
+    this.persist(); // gemergten Agenten aus der Resume-Registry entfernen
   }
 
   private emitMergeResult(agentId: string, ok: boolean, reasons: string[], prNumber?: number): void {
     this.emit({ ...envelope(), type: "merge_result", agentId, ok, merged: ok, reasons, prNumber });
+  }
+
+  // ---------------------------------------------------------------- Gate (P6)
+  private async handleGate(agentId: string): Promise<{ ok: boolean }> {
+    const s = this.pool.get(agentId);
+    if (!s || !s.worktreePath || !this.project) {
+      this.emit({
+        ...envelope(),
+        type: "gate_result",
+        agentId,
+        ok: false,
+        steps: [{ name: "gate", status: "fail", summary: "Kein Worktree/Projekt" }],
+      });
+      return { ok: false };
+    }
+    const res = await runGate(s.worktreePath, this.project.defaultBranch);
+    this.emit({ ...envelope(), type: "gate_result", agentId, ok: res.ok, steps: res.steps });
+    return { ok: res.ok };
+  }
+
+  // ---------------------------------------------------------- Persistenz/Resume (P7)
+  private persist(): void {
+    if (!this.project) return;
+    const agents: RegistryEntry[] = [];
+    for (const s of this.pool.values()) {
+      if (s.mock || !s.sessionId || s.status === "done") continue; // nur resumebare, echte Agenten
+      agents.push({
+        agentId: s.agentId,
+        label: s.label ?? s.agentId,
+        role: s.role ?? "sub",
+        sessionId: s.sessionId,
+        branch: s.branch,
+        worktreePath: s.worktreePath,
+        lastPrompt: s.lastPrompt,
+        status: s.status,
+        model: s.model,
+        mock: false,
+        updatedAt: Date.now(),
+      });
+    }
+    try {
+      saveRegistry(this.project.repoRoot, agents);
+    } catch (e) {
+      log(`[orchestrator] persist failed: ${String(e)}`);
+    }
+  }
+
+  private offerResumable(repoRoot: string): void {
+    const resumable = loadRegistry(repoRoot).filter(
+      (e) =>
+        e.sessionId &&
+        e.status !== "done" &&
+        !!e.worktreePath &&
+        existsSync(e.worktreePath) &&
+        !this.pool.has(e.agentId),
+    );
+    if (resumable.length > 0) {
+      this.emit({ ...envelope(), type: "resumable_agents", agents: resumable });
+      log(`[orchestrator] ${resumable.length} resumebare Agenten gefunden`);
+    }
   }
 
   // ---------------------------------------------------------------- Polling

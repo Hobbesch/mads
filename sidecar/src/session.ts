@@ -51,15 +51,21 @@ export class AgentSession {
   repoRoot?: string;
   branch?: string;
   worktreePath?: string;
+  // P7: UI-Kontext für Persistenz/Resume.
+  label?: string;
+  role?: "integrator" | "sub";
+  model?: string;
+  lastPrompt?: string;
+  mock = false;
 
   private readonly inbox = new AsyncQueue<SdkUserMessage>();
   private readonly pending = new Map<string, (r: PermissionResult) => void>();
   private q?: QueryHandle;
-  private mock = false;
-  private mockStep = 0;
+  private readonly onChange?: () => void;
 
-  constructor(agentId: string) {
+  constructor(agentId: string, onChange?: () => void) {
     this.agentId = agentId;
+    this.onChange = onChange;
   }
 
   // --------------------------------------------------------------------------
@@ -67,6 +73,10 @@ export class AgentSession {
     this.mock = msg.mock ?? false;
     this.repoRoot = msg.repoRoot;
     this.branch = msg.branch;
+    this.label = msg.label;
+    this.role = msg.role;
+    this.model = msg.model;
+    this.lastPrompt = msg.prompt;
     this.inbox.push(userMsg(msg.prompt));
     this.setStatus("running", "starting up");
 
@@ -75,9 +85,12 @@ export class AgentSession {
       return;
     }
 
-    // P3: isolierten Worktree anlegen (außerhalb des Repos), Agent arbeitet dort.
+    // P3: isolierten Worktree anlegen; P7: bei Resume vorhandenen weiterverwenden.
     let cwd = msg.cwd ?? process.cwd();
-    if (msg.repoRoot && msg.branch) {
+    if (msg.resumeWorktreePath) {
+      this.worktreePath = msg.resumeWorktreePath;
+      cwd = msg.resumeWorktreePath;
+    } else if (msg.repoRoot && msg.branch) {
       const baseRef = msg.baseRef ?? "origin/main";
       const wt = await createWorktree(msg.repoRoot, this.agentId, msg.branch, baseRef);
       if (!wt.ok) {
@@ -218,7 +231,10 @@ export class AgentSession {
         const m = raw as Record<string, unknown>;
         switch (m.type) {
           case "system":
-            if (m.subtype === "init") this.sessionId = m.session_id as string;
+            if (m.subtype === "init") {
+              this.sessionId = m.session_id as string;
+              this.onChange?.();
+            }
             break;
           case "assistant": {
             const content = ((m.message as { content?: unknown[] })?.content ?? []) as Array<Record<string, unknown>>;
@@ -326,6 +342,7 @@ export class AgentSession {
   private setStatus(status: AgentStatus, currentStep?: string): void {
     this.status = status;
     this.emit({ ...envelope(), type: "status_update", agentId: this.agentId, status, currentStep });
+    this.onChange?.();
   }
   private fail(code: string, message: string, recoverable: boolean): void {
     this.emit({ ...envelope(), type: "error", agentId: this.agentId, scope: "agent", code, message, recoverable });

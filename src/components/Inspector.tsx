@@ -15,6 +15,7 @@ export function Inspector() {
   const createPr = useStore((s) => s.createPr);
   const syncBranch = useStore((s) => s.syncBranch);
   const integratePr = useStore((s) => s.integratePr);
+  const runGate = useStore((s) => s.runGate);
   const termRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
 
@@ -63,6 +64,11 @@ export function Inspector() {
           </span>
         </div>
         <div className="inspector-actions">
+          {agent.role === "sub" && agent.worktreePath && (
+            <button onClick={() => void runGate(selectedId)} title="Clean-Code-Gate: lint/type/test + Secret-Scan">
+              Gate{agent.gate ? (agent.gate.ok ? " ✓" : " ✖") : ""}
+            </button>
+          )}
           {agent.behind > 0 && (
             <button onClick={() => void syncBranch(selectedId)} title="Rebase onto origin/main">
               Sync ({agent.behind})

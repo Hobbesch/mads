@@ -42,6 +42,7 @@ export type HostMessage =
   | StopAgentMsg
   | CreatePrMsg
   | SyncBranchMsg
+  | GateTaskMsg
   | IntegratePrMsg
   | PollProjectMsg
   | ShutdownMsg;
@@ -80,6 +81,11 @@ export interface StartAgentMsg extends BaseMsg {
   disallowedTools?: string[];
   resumeSessionId?: string;
   forkSession?: boolean;
+  /** Resume (P7): vorhandenen Worktree weiterverwenden statt neu anlegen. */
+  resumeWorktreePath?: string;
+  /** UI-Kontext für agents.json-Persistenz/Resume. */
+  label?: string;
+  role?: "integrator" | "sub";
   /** Demo ohne echte Claude-Auth: scripted Stream statt query(). */
   mock?: boolean;
 }
@@ -102,6 +108,12 @@ export interface IntegratePrMsg extends BaseMsg {
   type: "integrate_pr";
   agentId: string;
   method?: "squash" | "merge" | "rebase"; // default squash (lineare main)
+}
+
+/** P6: Clean-Code-Gate im Worktree ausführen (lint/type/test + Secret-Scan). */
+export interface GateTaskMsg extends BaseMsg {
+  type: "gate_task";
+  agentId: string;
 }
 
 export interface PollProjectMsg extends BaseMsg {
@@ -163,6 +175,8 @@ export type SidecarMessage =
   | GitStatusMsg
   | PrUpdateMsg
   | MergeResultMsg
+  | GateResultMsg
+  | ResumableAgentsMsg
   | SidecarErrorMsg;
 
 export interface SidecarReadyMsg extends BaseMsg {
@@ -297,6 +311,38 @@ export interface MergeResultMsg extends BaseMsg {
   merged: boolean;
   reasons: string[]; // bei !ok: die blockierenden Gründe
   prNumber?: number;
+}
+
+// ---- P6: Clean-Code-Gate ----
+export type GateStepStatus = "pass" | "fail" | "skip";
+export interface GateStep {
+  name: string; // z.B. "lint", "type-check", "test", "secret-scan"
+  status: GateStepStatus;
+  summary?: string; // Kurzfassung (Befehl / erste Fehlerzeile)
+}
+export interface GateResultMsg extends BaseMsg {
+  type: "gate_result";
+  agentId: string;
+  ok: boolean; // true = kein Step fehlgeschlagen (skips erlaubt)
+  steps: GateStep[];
+}
+
+// ---- P7: Resume nach App-Neustart ----
+export interface ResumableAgent {
+  agentId: string;
+  label: string;
+  role: "integrator" | "sub";
+  sessionId: string;
+  branch?: string;
+  worktreePath?: string;
+  lastPrompt?: string;
+  status: AgentStatus;
+  model?: string;
+  mock: boolean;
+}
+export interface ResumableAgentsMsg extends BaseMsg {
+  type: "resumable_agents";
+  agents: ResumableAgent[];
 }
 
 export type EscalationKind =
