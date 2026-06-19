@@ -124,6 +124,22 @@ docs/design/    Die sechs Design-Dokumente + Index
 docs/research/  Recherche-Grundlagen (Claude Code, Tauri, GitHub, macOS-HIG)
 ```
 
+## Signierte & notarisierte Builds (macOS-Distribution)
+
+mads wird mit der **Developer-ID** signiert (`bundle.macOS.signingIdentity` in
+`src-tauri/tauri.conf.json`) — dadurch bleiben einmal erteilte macOS-Berechtigungen
+(z. B. Datei-/Ordnerzugriff) dauerhaft erhalten. Für die Weitergabe an **andere** Macs
+(kein Gatekeeper-Warnhinweis) zusätzlich **notarisieren**:
+
+1. `.env.notarize.example` → `.env.notarize` kopieren und die Apple-Credentials eintragen
+   (App-Store-Connect-API-Key empfohlen; Datei + `.p8` sind in `.gitignore`).
+2. Bauen:
+   ```bash
+   npm run release:mac            # signiert + (mit Credentials) notarisiert + stapled
+   ```
+   Ohne `.env.notarize` wird nur signiert (lokal nutzbar). `tauri build` notarisiert
+   automatisch, sobald die `APPLE_*`-Variablen gesetzt sind.
+
 ## Lizenz
 
 Siehe [LICENSE](LICENSE).

@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "release:mac": "bash scripts/build-signed.sh",
     "sidecar:build": "npm --prefix sidecar run build",
     "sidecar:install": "npm --prefix sidecar install",
     "test": "npm run test:ownership",

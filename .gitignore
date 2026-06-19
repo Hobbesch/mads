@@ -33,3 +33,6 @@ sidecar/dist/
 src-tauri/binaries/
 # Local, machine-specific Claude Code settings (permissions etc.)
 .claude/settings.local.json
+# Apple notarization credentials — NEVER commit
+.env.notarize
+*.p8
