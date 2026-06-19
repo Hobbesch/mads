@@ -65,6 +65,21 @@ button {
   cursor: pointer;
 }
 
+/* Fenster über Drag-Regionen verschiebbar machen (kein nativer Titlebar bei
+   titleBarStyle: Overlay). Braucht zusätzlich core:window:allow-start-dragging. */
+*[data-tauri-drag-region] {
+  app-region: drag;
+  -webkit-app-region: drag;
+}
+/* Interaktive Elemente innerhalb von Drag-Regionen klickbar halten */
+[data-tauri-drag-region] button,
+[data-tauri-drag-region] input,
+[data-tauri-drag-region] select,
+[data-tauri-drag-region] a {
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
+}
+
 /* ---------------- App shell ---------------- */
 .app {
   display: flex;
