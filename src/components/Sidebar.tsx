@@ -44,7 +44,7 @@ export function Sidebar({ onNewStream }: { onNewStream: () => void }) {
   return (
     <aside className="sidebar" data-tauri-drag-region>
       <div className="brand">
-        <div className="brand-mark">m</div>
+        <img className="brand-logo" src="/mads-logo.png" alt="mads" />
         <div className="brand-text">
           <div className="brand-name">mads</div>
           <div className="brand-tag">multi-agent surface</div>
