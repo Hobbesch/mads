@@ -192,6 +192,7 @@ export type EscalationKind =
   | "auth_broken"
   | "spawn_failed"
   | "consume_failed"
+  | "ownership_trespass" // Agent editiert eine Region, die einem anderen Stream gehört
   | "max_budget";
 
 export interface SidecarErrorMsg extends BaseMsg {
@@ -201,6 +202,48 @@ export interface SidecarErrorMsg extends BaseMsg {
   code: EscalationKind | string;
   message: string;
   recoverable: boolean;
+}
+
+// ============================================================================
+// Region-Ownership & Koordination (docs/design/06-ownership-and-coordination.md)
+//
+// Datei-grobes Ownership reicht nicht: zwei Streams dürfen DIESELBE Datei in
+// VERSCHIEDENEN Funktionen anfassen. Eine OwnershipRule ankert deshalb auf
+// Symbol/Pattern (NICHT Zeile — Zeilen driften). Konfliktvermeidungs-Klassen
+// aus _paix-multi-agent-reference §6 / _paix-ownership-reference.
+// ============================================================================
+export type OwnershipKind =
+  | "exclusive" // gehört einem Stream allein (ganze Datei oder benannte Symbole)
+  | "shared_seam" // geteilte Region, genau EINEM Owner zugewiesen; andere fassen sie nicht an
+  | "land_first"; // unvermeidbarer geteilter Edit → erst als winziger PR auf main landen
+
+export interface OwnershipRule {
+  id: string;
+  path: string; // Datei oder Glob, z.B. "src/mail/pst/**" oder "src/mail/mail.py"
+  symbols?: string[]; // Funktions-/Symbol-Anker innerhalb der Datei (bevorzugt vor lineHint)
+  pattern?: string; // Regex-Heuristik für eine Region (z.B. "is_pst"-Branches)
+  lineHint?: [number, number]; // optionaler Zeilen-Hinweis — driftet, nur informativ
+  ownerAgentId?: string; // der Single-Owner-Stream (undefined = frei/unowned)
+  ownerBranch?: string;
+  kind: OwnershipKind;
+  note?: string;
+}
+
+export interface CoordinationArtifact {
+  id: string;
+  projectId: string;
+  path: string; // committet unter docs/coordination/<name>.md (transient)
+  streams: string[]; // teilnehmende agentIds/branches
+  baseCommit: string; // Branch-Punkt-Anker
+  rules: OwnershipRule[];
+  status: "active" | "resolved"; // resolved → Artefakt nach Merge beider löschen
+  createdAt: number;
+}
+
+/** Eine geänderte Region eines Agenten (aus git-diff: Datei + umgebende Symbole). */
+export interface ChangedRegion {
+  path: string;
+  symbols: string[];
 }
 
 // ============================================================================

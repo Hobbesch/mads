@@ -2,7 +2,7 @@
 
 > **Status:** Design, implementierungsreif. Stand: 2026-06-19.
 > **Sprache:** Deutsch (Fließtext), Englisch (Code/Identifier).
-> Dieser Index bündelt die fünf Design-Dokumente von **mads**, erklärt die zentralen
+> Dieser Index bündelt die sechs Design-Dokumente von **mads**, erklärt die zentralen
 > Begriffe und sammelt alle offenen Entscheidungen an einem Ort.
 
 ---
@@ -31,7 +31,7 @@ mads **operationalisiert** die Invarianten des Multi-Agent-Leitfadens
 
 ---
 
-## Die fünf Design-Dokumente
+## Die sechs Design-Dokumente
 
 | # | Dokument | In einem Satz |
 |---|---|---|
@@ -40,6 +40,7 @@ mads **operationalisiert** die Invarianten des Multi-Agent-Leitfadens
 | 03 | [Main-Agent (Integrator)](./03-main-agent.md) | Der Integrator als Hybrid aus deterministischer `IntegratorEngine` (Guards, Merge-Mechanik) und LLM-`query()`-Session (Urteilsfragen), inkl. Merge-Prozedur, Gates, Cron-Jobs und Eskalation. |
 | 04 | [Sub-Agents](./04-sub-agents.md) | Der produzierende Entwicklungs-Stream: eine `query()`-Session pro Worktree/Branch, Lebenszyklus-Zustandsmaschine, Rückfrage-Protokoll, GitHub-Interaktion, Detailansicht (xterm-Pane; Detach Post-MVP), Permissions und Crash-Recovery. |
 | 05 | [Update-Bereich](./05-update-area.md) | Read-mostly-Beobachter, der neue Claude-Code-/SDK-Fähigkeiten erkennt, LLM-bewertet und als GitHub-Issue vorschlägt; plus mads-Self-Update und Versions-Pinning. |
+| 06 | [Region-Ownership & Koordination](./06-ownership-and-coordination.md) | Ownership auf Sub-Datei-Ebene (`OwnershipRule`/`CoordinationArtifact`) mit mechanischem Trespass-Gate (`detectTrespass` → `ownership_trespass`), das fremde Region-Edits *vor* dem Merge als Eskalation sichtbar macht. |
 
 **Recherche-Inputs** (normative bzw. technische Quellen, referenziert von allen Docs):
 
@@ -51,7 +52,7 @@ mads **operationalisiert** die Invarianten des Multi-Agent-Leitfadens
 - [macos-design](../research/macos-design.md) — HIG, Sidebar/Content/Inspector, Vibrancy, Update-Monitoring.
 
 > **Verlinkung:** Die Docs verweisen untereinander mit `[[wikilink]]`s auf die tatsächlichen
-> Dateinamen — Design-Docs als `[[01-architecture]]`…`[[05-update-area]]`, Recherche-Inputs als
+> Dateinamen — Design-Docs als `[[01-architecture]]`…`[[06-ownership-and-coordination]]`, Recherche-Inputs als
 > `[[claude-code-capabilities]]`, `[[tauri2-stack]]`, `[[sidecar-orchestration]]`,
 > `[[github-multiagent]]`, `[[macos-design]]`, `[[_paix-multi-agent-reference]]`.
 
@@ -66,7 +67,10 @@ mads **operationalisiert** die Invarianten des Multi-Agent-Leitfadens
 | **Helper-Subagent** | SDK-interner Subagent (über das `Agent`-Tool), läuft *innerhalb* einer Session, committet nicht, gibt ein Resultat zurück (z. B. `security-reviewer`). Kann **kein** `AskUserQuestion` nutzen — deshalb sind die parallelen Streams **keine** Helper-Subagents, sondern eigene Sessions. |
 | **Worktree** | Zweites Arbeitsverzeichnis mit eigenem `HEAD`/Index/Working-Tree, aber geteiltem Objekt-Store/Refs. Ein Worktree pro Sub-Stream = die mechanische Isolation (kein `index.lock`-Kampf, kein `git add -A`-Übergriff). Ablageort (OE-1 entschieden): `~/mads-worktrees/<repo-slug>/<agentId>`, außerhalb des Repos. |
 | **Stream** | Synonym für einen parallelen Entwicklungs-Arbeitsstrom = ein Agent + sein Worktree + seine Branch. Im UI „Stream"; im Datenmodell `Agent`. |
-| **Eskalation** | Persistenter Zustand „Agent/Item braucht Hilfe", der sichtbar bleibt, bis er behandelt ist (CI rot, Merge-Konflikt, stale base, push rejected, Protection-Block, gh-Auth kaputt, Spawn-Crash, Budget). Quelle: GraphQL-Signale + lokaler git-Exit + `SidecarErrorMsg`. Abzugrenzen von der transienten „braucht Input"-Notification. |
+| **Eskalation** | Persistenter Zustand „Agent/Item braucht Hilfe", der sichtbar bleibt, bis er behandelt ist (CI rot, Merge-Konflikt, stale base, push rejected, Protection-Block, gh-Auth kaputt, Spawn-Crash, Budget, **Ownership-Trespass**). Quelle: GraphQL-Signale + lokaler git-Exit + `SidecarErrorMsg`. Abzugrenzen von der transienten „braucht Input"-Notification. |
+| **Region-Ownership** | Ownership auf **Sub-Datei-Ebene** statt nur datei-grob (`Task.ownedFiles`): eine `OwnershipRule` ankert auf **Symbol/Pattern** (nicht Zeile — Zeilen driften) und gehört genau einem Stream (`kind`: `exclusive` \| `shared_seam` \| `land_first`). Kernregel: dieselbe Datei + verschiedene Symbole = erlaubt; fremdes Symbol/Pattern/ganze fremde Datei = Trespass. Logik: `detectTrespass` (`shared/ownership.ts`). Siehe [06](./06-ownership-and-coordination.md). |
+| **Koordinations-Artefakt** (`CoordinationArtifact`) | Committetes, **transientes** Markdown-Dokument unter `docs/coordination/<name>.md`, das die teilnehmenden Streams, den `baseCommit` und die `OwnershipRule[]` hält. **Single-Writer = Integrator**; Sub-Agents lesen es. Nach Merge beider Streams `status: "resolved"` → löschen. Hebt das narrative paix-Koordinations-Doc auf eine maschinen-prüfbare Eigenschaft. Siehe [06](./06-ownership-and-coordination.md). |
+| **Trespass-Gate** | Mechanische Prüfung (`detectTrespass(changes, rules, self)`), die aus `git diff` die geänderten Regionen extrahiert und gegen das Koordinations-Artefakt prüft. Timing: Sub-Agent **Pre-PR-Self-Check** + Integrator **periodisch** (Cron). Treffer → `EscalationKind: "ownership_trespass"` (Befund: Datei · Symbol · Owner-Stream); Auflösung via **Owner-Handoff** oder **land-first-PR**. Siehe [06](./06-ownership-and-coordination.md). |
 | **stream-json** | Das strukturierte Event-Ausgabeformat von Claude Code / dem Agent SDK (typisierte `SDKMessage`-Events: `assistant_text`/`delta`, `tool_use`/`tool_result`, `thinking`, `system`, `result`). Quelle des Live-Terminals und der Status-/Kosten-Ableitung. Es gibt **keinen** nativen Fortschritts-Prozentwert. |
 | **NDJSON (über stdio)** | Newline-delimited JSON: eine JSON-Nachricht pro Zeile (`\n`-terminiert) über das stdin/stdout des Sidecars. Transportiert alle Orchestrierungs-Nachrichten zwischen Rust-Core und Sidecar (`HostMessage`/`SidecarMessage`). stdout ist **nur** Protokoll, alle Logs gehen auf stderr. |
 | **Channel** (Tauri) | `tauri::ipc::Channel<AgentOutput>` — geordneter High-Throughput-Kanal Core→Frontend für den Terminal-/Token-Stream (1 pro Agent). Gegenstück zu `emit`/`emit_to` für seltene, kleine Payloads. |
@@ -150,8 +154,11 @@ Sie sind vor bzw. zu Beginn der Implementierung zu klären.
   oder persistent in `.claude/settings.local.json` pro Worktree? (§4.4)
 - **OE-21 `bypassPermissions` für CI-artige Hintergrund-Streams.** Opt-in-Profil für rein mechanische,
   vorab freigegebene Aufgaben — mit welchen harten Leitplanken? (§8.3)
-- **OE-22 Granularität von `ownedFiles` im Prompt.** Feste Liste/Glob (riskiert Veralten) vs. Verweis auf
-  `CODEOWNERS`/Ownership-Map zur Laufzeit (robuster gegen Drift)? (§10)
+- **OE-22 ✅ ENTSCHIEDEN — Granularität von `ownedFiles`.** Statt fester Datei-Liste im Prompt:
+  **Region-Ownership** via `OwnershipRule`/`CoordinationArtifact` + `detectTrespass` (Symbol-/Pattern-Anker,
+  zur Laufzeit aus dem committeten Artefakt gelesen, robuster gegen Drift). Siehe
+  [06](./06-ownership-and-coordination.md); Typen in `shared/protocol.ts`/`shared/ownership.ts` vorhanden,
+  Behavior ab Roadmap P3/P4. (Doc 04 §6.4/§10)
 
 ### Update-Bereich (Doc 05)
 
@@ -179,5 +186,6 @@ Sie sind vor bzw. zu Beginn der Implementierung zu klären.
 
 1. **01 Architektur** (Dach: Schichten, Invarianten, Datenmodell, IPC).
 2. **04 Sub-Agents** und **03 Main-Agent** (die zwei Rollen des Integrator-Modells).
-3. **02 Dashboard** (die UI über dem Event-Bus).
-4. **05 Update-Bereich** (das Querschnitts-Beobachter-Subsystem).
+3. **06 Region-Ownership & Koordination** (wie die beiden Rollen Konflikte *vor* dem Merge vermeiden).
+4. **02 Dashboard** (die UI über dem Event-Bus).
+5. **05 Update-Bereich** (das Querschnitts-Beobachter-Subsystem).

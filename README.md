@@ -40,6 +40,7 @@ Vollständiges Design in **[`docs/design/`](docs/design/README.md)**:
 | 03 | [Main-Agent (Integrator)](docs/design/03-main-agent.md) | Merge-Prozedur, Gates, Cron-Jobs |
 | 04 | [Sub-Agents](docs/design/04-sub-agents.md) | Lebenszyklus, Rückfragen, GitHub, Cleanup |
 | 05 | [Update-Bereich](docs/design/05-update-area.md) | Claude-Code-Feature-Monitoring → GitHub-Issue-Vorschlag |
+| 06 | [Region-Ownership & Koordination](docs/design/06-ownership-and-coordination.md) | Ownership auf Sub-Datei-Ebene + Trespass-Erkennung vor dem Merge |
 
 Die Recherche-Grundlagen liegen in [`docs/research/`](docs/research/).
 
@@ -97,7 +98,7 @@ src/            React/TS-Frontend (Dashboard, xterm, Dialoge, zustand-Store)
 src-tauri/      Rust-Core (Sidecar-Supervisor, IPC-Commands)
 sidecar/        Node-Orchestrator + Claude Agent SDK (NDJSON über stdio)
 shared/         Geteilte TS-Typen: das Protokoll (Single Source of Truth)
-docs/design/    Die fünf Design-Dokumente + Index
+docs/design/    Die sechs Design-Dokumente + Index
 docs/research/  Recherche-Grundlagen (Claude Code, Tauri, GitHub, macOS-HIG)
 ```
 

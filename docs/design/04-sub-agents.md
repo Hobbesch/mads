@@ -468,7 +468,7 @@ Eskalations-Nachricht ans Dashboard/den Main-Agent.
 | Klasse | Auslöser | Protokoll |
 | --- | --- | --- |
 | **Contract-Änderung** | Der Sub-Agent merkt, dass er eine **geteilte Signatur/Schnittstelle** (API, DB-Schema, Event-Format) ändern muss. | **Stop-the-world** (Referenz §8): Der Sub-Agent ändert die Signatur **nicht** still. Er eskaliert → der Main-Agent updatet das ADR (`docs/decisions/`), benachrichtigt alle abhängigen Streams, re-baselined. Erst danach codet der Sub-Agent gegen den neuen Contract. |
-| **Geteilte Datei** | Der Sub-Agent muss eine Datei berühren, die laut Ownership-Map/`CODEOWNERS` einem anderen Stream gehört oder ein Seam ist (lockfile, Registry, i18n). | **Shared-File-Protokoll** (Referenz §6): Option A (Main-Agent landet die geteilte Edit zuerst als winzigen PR, dann rebasen alle) **oder** Option B (genau ein Owner-Branch). Der Sub-Agent **wartet** bzw. **fordert an**, editiert nicht parallel. |
+| **Geteilte Datei / Region** | Der Sub-Agent muss eine Datei oder **Region** (Symbol/Pattern) berühren, die laut `CoordinationArtifact`/`CODEOWNERS` einem anderen Stream gehört oder ein Seam ist (lockfile, Registry, i18n). | **Shared-File-Protokoll** (Referenz §6): Option A (Main-Agent landet die geteilte Edit zuerst als winzigen PR, dann rebasen alle) **oder** Option B (genau ein Owner-Branch). Der Sub-Agent **wartet** bzw. **fordert an**, editiert nicht parallel. Mechanisch geprüft durch das Trespass-Self-Check vor jedem push/PR (§6.4, [[06-ownership-and-coordination]]). |
 | **Semantischer Rebase-Konflikt** | `git rebase origin/main` führt zu einem Konflikt, dessen Auflösung **Domänen-Wissen** über fremden Code braucht. | Der Sub-Agent löst **mechanische** Konflikte selbst (rerere hilft). **Semantische** Konflikte → Eskalation; der Integrator entscheidet (Referenz §7: „der Integrator rät nicht"). |
 
 ### 6.2 Eskalations-Sequenz
@@ -504,6 +504,29 @@ sequenceDiagram
 - Append-Dateien (ADR-Liste, `BACKLOG.md`) sind selbst Shared-Files und folgen dem
   Shared-File-Protokoll (Referenz §8 Warnung) — daher schreibt sie der Integrator
   serialisiert, nicht N Sub-Agenten parallel.
+
+### 6.4 Region-Ownership: Lesen, Scopen, Trespass-Self-Check
+
+Der Sub-Agent verfeinert das datei-grobe Ownership zur **Region-Ownership** (vollständiges
+Modell: [[06-ownership-and-coordination]]). Er ist hier **Leser**, nie Schreiber des
+Koordinations-Artefakts:
+
+- **Regionen lesen.** Beim `scoping` liest der Sub-Agent seine eigenen Regionen aus dem
+  committeten `CoordinationArtifact` (`docs/coordination/<name>.md`, im Worktree als Teil
+  der Branch-History sichtbar) und **scopt** seine Edits darauf.
+- **Trespass-Self-Check vor push/PR.** Als Teil des **Pre-PR-Gates** (neben
+  lint/typecheck/test, §5/§9) extrahiert mads aus `git diff --merge-base origin/main` die
+  `ChangedRegion[]` (Datei + umgebende Symbole) und ruft `detectTrespass(changes, rules,
+  self)`. Leeres Ergebnis = sauber → push/PR erlaubt.
+- **Bei Trespass eskalieren.** Findet das Gate eine fremde Region, gibt es **kein** push/PR,
+  sondern eine Eskalation `EscalationKind: "ownership_trespass"` (mit Befund: Datei, Symbol,
+  Owner-Stream). Der Sub-Agent ändert die **fremde Naht NICHT heimlich** — Auflösung läuft
+  über den Integrator: **Owner-Handoff** (Region wird neu zugewiesen) **oder** **land-first**
+  (geteilte Änderung als winziger PR zuerst auf `main`, [[06-ownership-and-coordination]] §5.3).
+
+> **Noch nicht im Prototyp verdrahtet** (Behavior ab Roadmap P3/P4, [[01-architecture]] §10);
+> Typen (`OwnershipRule`/`CoordinationArtifact`/`ChangedRegion`) + `detectTrespass` existieren
+> bereits in `shared/protocol.ts`/`shared/ownership.ts`.
 
 ---
 
@@ -810,11 +833,11 @@ Wenn Aufgabe erledigt + Gate grün + gepusht + PR offen: melde Zusammenfassung u
 Der Integrator merged. Du räumst NICHT selbst `main` auf und mergst NICHT selbst.
 ```
 
-> **OFFENE FRAGE — Granularität von `ownedFiles` im Prompt.** Sollen die „owned files"
-> als feste Liste/Glob im Prompt stehen (deklarativ, riskiert Veralten bei wachsendem
-> Feature) oder als Verweis auf `CODEOWNERS`/Ownership-Map, die der Agent zur Laufzeit
-> liest? Letzteres ist robuster gegen Drift, erfordert aber, dass die Map im Worktree
-> lesbar ist.
+> **✅ ENTSCHIEDEN (OE-22) — Granularität von `ownedFiles`.** Statt einer festen Datei-Liste
+> im Prompt (die veraltet) liest der Sub-Agent zur Laufzeit das committete
+> `CoordinationArtifact` (`OwnershipRule[]` mit Symbol-/Pattern-Anker) und prüft sich vor
+> push/PR mit `detectTrespass` (§6.4, [[06-ownership-and-coordination]]) — robuster gegen
+> Drift und mechanisch erzwingbar. Voraussetzung: Die Map liegt committet im Worktree (gegeben).
 
 ---
 

@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "sidecar:build": "npm --prefix sidecar run build",
-    "sidecar:install": "npm --prefix sidecar install"
+    "sidecar:install": "npm --prefix sidecar install",
+    "test": "npm run test:ownership",
+    "test:ownership": "esbuild shared/ownership.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/ownership.test.mjs && node node_modules/.cache/ownership.test.mjs"
   },
   "dependencies": {
     "react": "^19.1.0",
@@ -26,6 +28,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
-    "@tauri-apps/cli": "^2"
+    "@tauri-apps/cli": "^2",
+    "esbuild": "^0.24.0"
   }
 }

@@ -38,6 +38,7 @@ ausführbar und im UI sichtbar**.
 | [[03-main-agent]] | Integrator-Rolle, `IntegratorEngine`, Merge-Prozedur, Gates, Cron-Jobs | Detailliert die Integrator-Mechanik aus §4 hier |
 | [[04-sub-agents]] | Sub-Agent-Lebenszyklus, Worktree-Stream, Rückfrage-Protokoll, Crash-Recovery | Detailliert die Sub-Stream-Schicht aus §3 hier |
 | [[05-update-area]] | Update-Monitor, Relevanz-Agent, Issue-Erstellung, Self-Update, Versions-Pinning | Detailliert den Update-Job aus §10 hier |
+| [[06-ownership-and-coordination]] | Region-Ownership (`OwnershipRule`, `CoordinationArtifact`), Trespass-Erkennung (`detectTrespass`), `EscalationKind: "ownership_trespass"` | Verfeinert die datei-grobe Ownership-Map aus §5.1/§8 hier auf Sub-Datei-Ebene |
 | [[sidecar-orchestration]] | Node-Sidecar, `AgentSession`-Pool, NDJSON-Protokoll-Details, State-Maschine, Backpressure | Recherche-Input zur Sidecar-Schicht aus §2/§6 hier |
 | [[github-multiagent]] | gh/Octokit, Eskalations-Signale, Branch-Protection, Merge-Queue, Auth | Recherche-Input zur GitHub-/Integrator-Mechanik aus §3/§7 hier |
 | [[claude-code-capabilities]] | Agent SDK, `canUseTool`, Hooks, Permission-Modes, Modelle, Auth | Recherche-Input zur Agenten-Schicht + Permission-Gating aus §2/§7 hier |
@@ -389,7 +390,7 @@ interface Task {
   agentId?: string;                    // claimt die Task
   title: string;
   prompt: string;                      // initiale Instruktion an den Agenten
-  ownedFiles: string[];                // Ownership-Map (paix §6): berührte Dateien
+  ownedFiles: string[];                // GROBE (datei-weite) Erst-Zuordnung beim Task-Schnitt (paix §6); verfeinert zu Region-Ownership (OwnershipRule[], siehe [[06-ownership-and-coordination]])
   exitCriteria?: string;
   dependsOn: string[];                 // Stack-Reihenfolge für Integration
   status: "backlog" | "claimed" | "in_progress" | "in_review" | "merged" | "abandoned";
@@ -467,7 +468,8 @@ interface AskQuestion {
 type EscalationKind =
   | "ci_red" | "merge_conflict" | "stale_base"
   | "push_rejected" | "review_required" | "protection_blocked"
-  | "auth_broken" | "spawn_failed" | "max_budget";
+  | "auth_broken" | "spawn_failed" | "max_budget"
+  | "ownership_trespass";   // Region-Ownership: Edit berührt eine fremde Region (Symbol/Pattern/Datei) — siehe [[06-ownership-and-coordination]]
 
 interface Escalation {
   id: string;
@@ -486,6 +488,14 @@ interface Escalation {
 > `costUsd` das Budget, stoppt das SDK den Agenten und der Sidecar meldet eine
 > `Escalation{ kind: "max_budget", recoverable: true }` ans UI — der Mensch entscheidet, ob
 > er das Budget anhebt oder den Stream beendet (kein stilles Auto-Allow).
+
+> **Region-Ownership (Verfeinerung von `Task.ownedFiles`):** `ownedFiles` ist nur die
+> datei-grobe Erst-Zuordnung. Für die mechanische Konfliktvermeidung *vor* dem Merge
+> verfeinert mads sie auf **Sub-Datei-Ebene** (`OwnershipRule[]` mit Symbol-/Pattern-Anker,
+> committet im `CoordinationArtifact`); ein `detectTrespass`-Gate erkennt fremde Region-Edits
+> und löst `EscalationKind: "ownership_trespass"` aus. Typen leben bereits in
+> `shared/protocol.ts`/`shared/ownership.ts`, das vollständige Modell in
+> [[06-ownership-and-coordination]] (Behavior verdrahtet ab Roadmap P3/P4).
 
 ### 5.2 Rust-Core-Spiegel (Auszug — was der Core selbst hält)
 
@@ -599,7 +609,9 @@ stateDiagram-v2
 Quellen der Zustandssignale ([[sidecar-orchestration]] §4, [[github-multiagent]] §4):
 `canUseTool` + `Notification`-Hook (→ `waiting_input`); `assistant`/`PreToolUse`
 (→ `currentStep`); GraphQL `mergeStateStatus`/`reviewDecision`/`statusCheckRollup` +
-`git push`-Exit (→ `escalation`); `SDKResultMessage` (→ `done`).
+`git push`-Exit (→ `escalation`); zusätzlich das Trespass-Gate (`detectTrespass` →
+`ownership_trespass`, [[06-ownership-and-coordination]]) als weitere `escalation`-Quelle;
+`SDKResultMessage` (→ `done`).
 
 ---
 
@@ -797,7 +809,8 @@ mads/
 │  └─ package.json / *-lock      #   JS-Lockfile (committed)
 ├─ shared/                       # geteilte TS-Typen (Datenmodell §5) für FE + Sidecar
 ├─ docs/
-│  ├─ design/                    #   01-architecture.md (dieses) ... 05-update-area.md
+│  ├─ design/                    #   01-architecture.md (dieses) ... 06-ownership-and-coordination.md
+│  ├─ coordination/              #   transiente CoordinationArtifact-Dateien (committet, nach Merge gelöscht) — siehe [[06-ownership-and-coordination]]
 │  ├─ research/                  #   die Recherche-Inputs
 │  └─ decisions/                 #   ADRs (Contracts-first, paix §8)
 ├─ .github/

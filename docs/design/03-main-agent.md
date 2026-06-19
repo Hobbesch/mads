@@ -489,6 +489,7 @@ Worktree entfernen) laufen nur nach mechanischer Sicherheitsprüfung.
 | `branch-cleanup` | nach jedem Merge + 30 min | gemergte Branches (`git merge-base --is-ancestor`) lokal `git branch -d` + remote `git push origin --delete`; refuse bei dirty | §5 Teardown, §12.2 |
 | `rebase-reminder` | 30 min (adaptiv, schneller wenn `main` heiß) | pro aktiver Sub-Branch `behindBy = git rev-list --count origin/main ^HEAD`; > Schwelle → `send_input` „rebase jetzt" + Dashboard-Badge | §5 Cadence (≥1×/Tag), Stale-Base-Killer |
 | `ownership-map-pflege` | bei Spawn/Merge + 60 min | `OWNERSHIP_MAP` mit aktiven Branches/Dateien abgleichen; Überlapp-Erkennung → Warnung/Serialisierung | §6 Ownership-Map |
+| `trespass-scan` | 15 min + vor jedem Merge | aktive Worktrees gegen das `CoordinationArtifact` prüfen (`git diff` → `ChangedRegion[]` → `detectTrespass`); Treffer → `ownership_trespass`-Eskalation, Owner-Handoff/land-first verfügen ([[06-ownership-and-coordination]]) | §6 Konfliktvermeidung |
 | `backlog-sync` | 60 min | `BACKLOG.md` / Task-State (`[[01-architecture]]`) gegen offene PRs/Sessions konsistent halten | §8 Backlog |
 | `dashboard-poll` | 15–30 s adaptiv, Jitter | GraphQL-Batch über alle PRs (`[[github-multiagent]] §4.1`) → Eskalations-Signale | §5 Polling |
 
@@ -501,6 +502,7 @@ const jobs: CronJob[] = [
   { id: "branch-cleanup",       everyMs: 30*60_000, run: cleanupMergedBranches, lastRun: 0 },
   { id: "rebase-reminder",      everyMs: 30*60_000, run: remindStaleBranches, lastRun: 0 },
   { id: "ownership-map-pflege", everyMs: 60*60_000, run: reconcileOwnership, lastRun: 0 },
+  { id: "trespass-scan",        everyMs: 15*60_000, run: scanTrespass, lastRun: 0 },  // [[06-ownership-and-coordination]]
   { id: "backlog-sync",         everyMs: 60*60_000, run: syncBacklog, lastRun: 0 },
   { id: "dashboard-poll",       everyMs: 20_000,    run: pollDashboard, lastRun: 0 },
 ];
@@ -580,6 +582,27 @@ groß & mit Task-Logik verflochten → Option B. Diese Klassifikation („klein/
 self-contained/verflochten") ist eine **Urteilsfrage** → der `OrderPlanner` ruft bei
 Mehrdeutigkeit den `MAIN_AGENT`; klare Fälle (Lockfile-Bump, reine Datei-Existenz)
 entscheidet die Engine selbst.
+
+### 6.2a Koordinations-Artefakt & Region-Ownership (Single-Writer Integrator)
+
+Wo zwei Streams **dieselbe Datei in verschiedenen Regionen** anfassen müssen, reicht
+datei-grobe Ownership nicht — der Integrator verfeinert sie auf **Sub-Datei-Ebene**
+(Symbol-/Pattern-Anker) und macht das Trespass-Gate erzwingbar (vollständiges Modell:
+[[06-ownership-and-coordination]]). Der Integrator ist der **alleinige Bewirtschafter**
+dieses Artefakts (kohärent mit OE-14, Single-Owner für Koordinations-Dateien):
+
+- **Erzeugen & pflegen (Single-Writer).** Beim Dispatch paralleler Streams baut der
+  Integrator die Ownership-Map *bevor* Code geschrieben wird, schneidet Tasks entlang
+  Datei-/Symbol-Grenzen, weist geteilte Nähte **genau einem** Owner zu und committet das
+  `CoordinationArtifact` als `docs/coordination/<name>.md`. Sub-Agents **lesen** es nur.
+- **Trespass-Gate periodisch erzwingen.** Der `CronScheduler` (§5) scannt aktive Worktrees
+  gegen die `OwnershipRule[]` (`detectTrespass`) und warnt früh — noch bevor ein Sub-Agent
+  pushen will (zusätzlich zum Sub-Agent-Pre-PR-Self-Check, [[04-sub-agents]]).
+- **Owner-Handoff verfügen.** Muss ein Nicht-Owner eine fremde Naht ändern, weist der
+  Integrator die Region neu zu (Artefakt-Update) **oder** ordnet einen `land_first`-PR an —
+  statt die Naht heimlich parallel zu ändern.
+- **Nach Merge löschen.** Das Artefakt ist **transient**: nach Merge beider Streams
+  `status: "resolved"` → Datei löschen (nie ein veraltetes Artefakt herumliegen lassen).
 
 ### 6.3 Konkrete Anweisungs-Nachricht (NDJSON)
 

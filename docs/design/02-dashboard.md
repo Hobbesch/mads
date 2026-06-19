@@ -153,7 +153,7 @@ type AgentLifecycle =
   | "idle"             // gestartet, aber kein aktiver Auftrag (Stop-Hook gefeuert) / paused
   | "running"          // arbeitet (Tool-Aufrufe etc.); auch starting/queued
   | "waiting_input"    // canUseTool / AskUserQuestion / idle_prompt offen
-  | "escalation"       // CI rot / Konflikt / push rejected / stale base / gh-Auth / max_budget
+  | "escalation"       // CI rot / Konflikt / push rejected / stale base / gh-Auth / max_budget / ownership_trespass
   | "merging"          // UI-only, NUR Main-Agent: führt gerade einen Merge aus
   | "done"             // result success, Input-Iterator geschlossen
   | "error";           // nicht-recoverable Sidecar-/Spawn-Fehler
@@ -385,6 +385,7 @@ Notification): sie bleiben sichtbar, bis sie behandelt sind. Quelle der Signale:
 | **Review-Gate offen** | `reviewDecision ∈ {REVIEW_REQUIRED, CHANGES_REQUESTED}` | gelb, „Review required" | [Open PR] [Review] (nur Integrator entscheidet) |
 | **Branch-Protection-Block** | `mergeStateStatus == BLOCKED`; `gh pr merge` Protection-Fehler | gelb, „Blocked by protection" | [Show missing gates] |
 | **gh-Auth kaputt** | `gh` Exit `4` (auth required) | rot, „GitHub auth required" | **[Re-authenticate gh]** (öffnet Auth-Flow, [[github-multiagent]] §7) |
+| **Ownership-Trespass** | `SidecarErrorMsg{code:"ownership_trespass"}` (Trespass-Gate, [[06-ownership-and-coordination]]) | rot, „Region owned by other stream" + Befund (Datei · Symbol · Owner-Stream) | **[Request owner handoff]** / **[Land shared change first]** (Integrator verfügt; nie fremde Naht heimlich ändern) |
 | **Spawn/Agent-Crash** | `SidecarErrorMsg{code:"spawn_failed"}` | rot, „Agent crashed" | [Restart agent] [View logs] |
 
 **Wichtig (`github-multiagent.md` §9 Caveat 1):** `UNKNOWN` bei `mergeable`/`mergeStateStatus`
@@ -403,6 +404,11 @@ Positives.
 - **Eskalations-Spalte (optional):** ein View-Toggle in der Toolbar schaltet das Grid in einen
   **Kanban-artigen Modus** mit Spalten `Needs input | Escalation | Running | Done`, sodass alle
   Eskalationen in einer Spalte gesammelt sind.
+- **Koordinations-/Ownership-Panel (optional):** ein Panel, das das aktive
+  `CoordinationArtifact` rendert — „wer besitzt welche Region" (Datei · Symbol/Pattern · Owner-
+  Stream · `kind`) plus Trespass-Marker auf den verletzenden Streams. Liefert dem Menschen den
+  Kontext für die `ownership_trespass`-Auflösung (Handoff / land-first). Quelle:
+  [[06-ownership-and-coordination]]; Single-Writer ist der Integrator ([[03-main-agent]]).
 
 > **Querverweis paix-Invariante:** Die *empfohlenen Aktionen* führen nie selbst zum Merge.
 > „Rebase onto main" + „Re-run CI" sind Sub-Agent-Operationen ([[04-sub-agents]] `sync`/`gate`);
