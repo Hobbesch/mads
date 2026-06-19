@@ -16,7 +16,7 @@ function StreamItem({ agent }: { agent: AgentVM }) {
   );
 }
 
-export function Sidebar({ onNewStream }: { onNewStream: () => void }) {
+export function Sidebar({ onNewStream, onAbout }: { onNewStream: () => void; onAbout: () => void }) {
   const agents = useStore((s) => s.agents);
   const order = useStore((s) => s.order);
   const sidecar = useStore((s) => s.sidecar);
@@ -43,7 +43,7 @@ export function Sidebar({ onNewStream }: { onNewStream: () => void }) {
 
   return (
     <aside className="sidebar" data-tauri-drag-region>
-      <div className="brand">
+      <div className="brand" onClick={onAbout} title="Über mads" role="button">
         <img className="brand-logo" src="/mads-logo.png" alt="mads" />
         <div className="brand-text">
           <div className="brand-name">mads</div>

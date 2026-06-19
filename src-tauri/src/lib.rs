@@ -1,41 +1,16 @@
 mod sidecar;
 
 use sidecar::{sidecar_send, start_sidecar, stop_sidecar, SidecarState};
-use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
+use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
+use tauri::Emitter;
 
-/// Wird im macOS-About-Panel als „credits" gezeigt (das einzige längere Textfeld,
-/// das macOS im About unterstützt — comments/authors/website sind dort ohne Wirkung).
-const ABOUT_CREDITS: &str = "mads — multi-agent development surface\n\
-\n\
-Eine native macOS-App, um parallel mit vielen Claude-Code-Agenten zu entwickeln: \
-ein Main-Agent (Integrator) plus Sub-Agents, jeder in eigenem git-Worktree und Branch, \
-mit voller GitHub-Nutzung — mit Live-Status, Rückfrage-/Eskalations-Übersicht und \
-Terminal-Ausgabe pro Agent.\n\
-\n\
-Invarianten: nur der Integrator merged nach main · main bleibt immer lauffähig · \
-Sub-Agents mergen nie selbst.\n\
-\n\
-Tauri 2 · React · Claude Agent SDK\n\
-https://github.com/Hobbesch/mads";
-
-/// Baut das macOS-Menü (App-Menü mit „Über mads" + Standard-Items, Bearbeiten, Fenster).
+/// Baut das macOS-Menü. „Über mads" öffnet einen eigenen, gestalteten About-Dialog
+/// im Frontend (Event `show-about`) statt des starren nativen About-Panels.
 fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
-    let about = AboutMetadataBuilder::new()
-        .name(Some("mads"))
-        .version(Some(env!("CARGO_PKG_VERSION")))
-        .copyright(Some("© 2026 Alessandro Medici · MIT-Lizenz"))
-        .authors(Some(vec!["Hobbesch".to_string()]))
-        .comments(Some(
-            "Multi-agent development surface — viele Claude-Code-Agenten parallel.",
-        ))
-        .license(Some("MIT"))
-        .website(Some("https://github.com/Hobbesch/mads"))
-        .website_label(Some("github.com/Hobbesch/mads"))
-        .credits(Some(ABOUT_CREDITS))
-        .build();
+    let about_item = MenuItem::with_id(app, "about", "Über mads", true, None::<&str>)?;
 
     let app_menu = SubmenuBuilder::new(app, "mads")
-        .about(Some(about))
+        .item(&about_item)
         .separator()
         .services()
         .separator()
@@ -81,6 +56,11 @@ pub fn run() {
         .setup(|app| {
             build_app_menu(app)?;
             Ok(())
+        })
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "about" {
+                let _ = app.emit("show-about", ());
+            }
         })
         .invoke_handler(tauri::generate_handler![
             start_sidecar,

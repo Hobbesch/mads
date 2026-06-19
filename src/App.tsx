@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useStore } from "./store";
 import { Sidebar } from "./components/Sidebar";
 import { AgentGrid } from "./components/AgentGrid";
 import { Inspector } from "./components/Inspector";
 import { PermissionDialog } from "./components/PermissionDialog";
 import { NewStreamDialog } from "./components/NewStreamDialog";
+import { AboutDialog } from "./components/AboutDialog";
 import "./App.css";
 
 export default function App() {
@@ -14,16 +16,24 @@ export default function App() {
   const project = useStore((s) => s.project);
   const pollProject = useStore((s) => s.pollProject);
   const [showNew, setShowNew] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
 
   useEffect(() => {
     void init();
   }, [init]);
 
+  useEffect(() => {
+    const unlisten = listen("show-about", () => setShowAbout(true));
+    return () => {
+      void unlisten.then((un) => un());
+    };
+  }, []);
+
   const lastEscalation = escalations[escalations.length - 1];
 
   return (
     <div className="app">
-      <Sidebar onNewStream={() => setShowNew(true)} />
+      <Sidebar onNewStream={() => setShowNew(true)} onAbout={() => setShowAbout(true)} />
 
       <div className="main">
         <div className="titlebar" data-tauri-drag-region>
@@ -66,6 +76,7 @@ export default function App() {
       </div>
 
       {showNew && <NewStreamDialog onClose={() => setShowNew(false)} />}
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       <PermissionDialog />
     </div>
   );
