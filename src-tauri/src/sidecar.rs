@@ -36,6 +36,29 @@ pub enum SidecarChannelEvent {
     Exit { code: Option<i32> },
 }
 
+/// GUI-gestartete Apps erben nur einen minimalen PATH (/usr/bin:/bin:…). Homebrew
+/// (/opt/homebrew/bin) ist NICHT dabei — also node/gh/git dort nicht auffindbar.
+/// Wir prepend'en die üblichen Pfade, damit die .app auch per Doppelklick läuft.
+fn augmented_path() -> String {
+    let extra = "/opt/homebrew/bin:/usr/local/bin";
+    match std::env::var("PATH") {
+        Ok(p) if !p.is_empty() => format!("{extra}:{p}"),
+        _ => extra.to_string(),
+    }
+}
+
+fn resolve_node() -> String {
+    if let Ok(n) = std::env::var("MADS_NODE") {
+        return n;
+    }
+    for cand in ["/opt/homebrew/bin/node", "/usr/local/bin/node"] {
+        if std::path::Path::new(cand).exists() {
+            return cand.to_string();
+        }
+    }
+    "node".to_string()
+}
+
 fn resolve_sidecar_js() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("MADS_SIDECAR_JS") {
         return Ok(PathBuf::from(p));
@@ -62,11 +85,13 @@ pub fn start_sidecar(
         return Ok(()); // läuft bereits
     }
 
-    let node = std::env::var("MADS_NODE").unwrap_or_else(|_| "node".to_string());
+    let node = resolve_node();
     let script = resolve_sidecar_js()?;
 
     let mut child = Command::new(&node)
         .arg(&script)
+        // PATH erweitern, damit der Sidecar node/gh/git auch im Finder-Start findet:
+        .env("PATH", augmented_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
