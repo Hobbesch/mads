@@ -3,8 +3,8 @@
 # + gestapelter macOS-Build von mads.
 #
 # Lädt die Credentials aus .env.notarize (gitignored) und ruft `tauri build`.
-# Tauri notarisiert automatisch, sobald entweder APPLE_API_KEY/APPLE_API_ISSUER/
-# APPLE_API_KEY_PATH oder APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID gesetzt sind.
+# Tauri notarisiert/stapelt automatisch die .app; das .dmg notarisiert/stapelt
+# dieses Skript danach nach (Tauri tut das für das DMG nicht).
 #
 # Nutzung:
 #   npm run release:mac                 # alle macOS-Targets (app + dmg)
@@ -31,4 +31,26 @@ if [ "$#" -gt 0 ]; then
   npm run tauri build -- "$@"
 else
   npm run tauri build
+fi
+
+# --- DMG nachträglich notarisieren + stapeln (Tauri notarisiert nur die .app) ---
+notarize_args=()
+if [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ] && [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+  notarize_args=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
+elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+  notarize_args=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+fi
+
+if [ "${#notarize_args[@]}" -gt 0 ]; then
+  shopt -s nullglob
+  for dmg in src-tauri/target/release/bundle/dmg/*.dmg; do
+    if xcrun stapler validate "$dmg" >/dev/null 2>&1; then
+      echo "[release] DMG bereits gestapelt: $dmg"
+    else
+      echo "[release] notarisiere + stapele DMG: $dmg"
+      xcrun notarytool submit "$dmg" "${notarize_args[@]}" --wait
+      xcrun stapler staple "$dmg"
+      xcrun stapler validate "$dmg"
+    fi
+  done
 fi
