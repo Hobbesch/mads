@@ -28,8 +28,8 @@ jobs:
       - run: npm run build
       - run: npm --prefix sidecar run typecheck
       - run: npm run sidecar:build
-      # Unit-Test der Region-Ownership-Trespass-Logik (shared/ownership.ts)
-      - run: npm run test:ownership
+      # Unit-Tests der reinen Logik (Ownership-Trespass + Vor-Merge-Gate)
+      - run: npm test
 
       # Rust-Achse: Cargo.lock committet -> deterministisch
       - uses: dtolnay/rust-toolchain@stable

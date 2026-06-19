@@ -46,7 +46,7 @@ Die Recherche-Grundlagen liegen in [`docs/research/`](docs/research/).
 
 ---
 
-## Prototyp — was schon funktioniert (P0–P4)
+## Prototyp — was schon funktioniert (P0–P5)
 
 - **Rust-Core** spawnt den Node-Sidecar (`std::process`) und forwarded dessen stdout/stderr
   zeilenweise über einen `tauri::ipc::Channel` ans Frontend; stdin trägt die HostMessages.
@@ -63,10 +63,14 @@ Die Recherche-Grundlagen liegen in [`docs/research/`](docs/research/).
   force-with-lease, der stale-base-Killer), periodisches Polling von git-Status
   (behind/ahead/dirty) + PR-Status (Checks, mergeable, review) → **Eskalations-Badges**
   (stale base, CI rot, Merge-Konflikt, Review nötig) live im Dashboard.
+- **P5 — Integrator-Merge:** rollen-gegatetes „Integrieren" — hartes Vor-Merge-Gate
+  (CI grün · nicht stale · kein Konflikt · kein Draft/Block) → `gh pr merge --squash
+  --delete-branch` → Worktree-Cleanup. Nur diese Op landet auf `main`; Sub-Agents nie.
+- **Distribution:** Developer-ID-signiert + notarisiert + gestapelt (`npm run release:mac`).
 
-Noch nicht im Prototyp (Roadmap P5+): Integrator-Merge-Mechanik (serielles Mergen),
-Region-Ownership-Trespass *zur Laufzeit*, Persistenz/Resume, Update-Bereich,
-Signing/Notarization. Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap--phasen-mvp--vollausbau).
+Noch nicht im Prototyp (Roadmap P6+): Clean-Code-Gates (lint/type/test + security-review)
+als erzwungene Kette, Region-Ownership-Trespass *zur Laufzeit*, Persistenz/Resume,
+Update-Bereich. Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap--phasen-mvp--vollausbau).
 
 ## An einem echten Projekt (z. B. PAIX) testen
 
@@ -77,10 +81,12 @@ Signing/Notarization. Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap-
 4. Mehrere Sub-Agenten parallel anlegen — jeder arbeitet isoliert auf eigener Branch.
 5. Im Inspector: Live-Terminal mitlesen, Rückfragen/Permissions beantworten, **PR erstellen**,
    bei „stale base" **Sync** drücken; Eskalations-Badges zeigen CI/Merge-Status.
+6. Ist der PR grün & nicht stale: **„Integrieren"** → mads merged ihn gegated nach `main`
+   (`squash`, `--delete-branch`) und räumt den Worktree auf. Sonst nennt der Button den Grund.
 
 > **Sicherheit:** Agenten laufen in `permissionMode: default` — **jede** schreibende/Bash-/
 > gh-Aktion (commit, push, `gh pr create`) wird im Dashboard zur Bestätigung vorgelegt
-> (`canUseTool`). Nichts wird automatisch nach `main` gemerged (Integrator-Merge ist P5).
+> (`canUseTool`). Nach `main` wird **nur** über die gegatete „Integrieren"-Aktion gemerged — nie automatisch.
 > Worktrees liegen außerhalb des Repos; der PAIX-Haupt-Checkout bleibt unangetastet.
 
 ---

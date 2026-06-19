@@ -3,7 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
-import { agentBadges } from "../derive";
+import { agentBadges, mergeReadiness } from "../derive";
 import { mountTerminal, fitTerminal } from "../terminal";
 
 export function Inspector() {
@@ -14,6 +14,7 @@ export function Inspector() {
   const stopAgent = useStore((s) => s.stopAgent);
   const createPr = useStore((s) => s.createPr);
   const syncBranch = useStore((s) => s.syncBranch);
+  const integratePr = useStore((s) => s.integratePr);
   const termRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
 
@@ -46,6 +47,8 @@ export function Inspector() {
 
   const badges = agentBadges(agent);
   const canPr = !!agent.branch && !agent.pr;
+  const canIntegrate = agent.role === "sub" && !!agent.pr && agent.pr.state === "OPEN";
+  const readiness = mergeReadiness(agent);
 
   return (
     <section className="inspector">
@@ -73,6 +76,16 @@ export function Inspector() {
           {agent.pr && (
             <button onClick={() => void openUrl(agent.pr!.url)} title="PR auf GitHub öffnen">
               PR #{agent.pr.number}
+            </button>
+          )}
+          {canIntegrate && (
+            <button
+              className="integrate"
+              disabled={!readiness.ok}
+              title={readiness.ok ? "PR nach main mergen (Integrator-Aktion)" : `Blockiert: ${readiness.reasons.join(" · ")}`}
+              onClick={() => void integratePr(selectedId)}
+            >
+              Integrieren
             </button>
           )}
           <button onClick={() => void interruptAgent(selectedId)} title="Unterbrechen">

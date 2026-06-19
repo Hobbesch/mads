@@ -42,6 +42,7 @@ export type HostMessage =
   | StopAgentMsg
   | CreatePrMsg
   | SyncBranchMsg
+  | IntegratePrMsg
   | PollProjectMsg
   | ShutdownMsg;
 
@@ -94,6 +95,13 @@ export interface CreatePrMsg extends BaseMsg {
 export interface SyncBranchMsg extends BaseMsg {
   type: "sync_branch"; // rebase onto origin/<default> + force-with-lease (stale-base-Killer)
   agentId: string;
+}
+
+/** Integrator-Aktion: nur diese Op merged nach main (Invariante 1). Gegated. */
+export interface IntegratePrMsg extends BaseMsg {
+  type: "integrate_pr";
+  agentId: string;
+  method?: "squash" | "merge" | "rebase"; // default squash (lineare main)
 }
 
 export interface PollProjectMsg extends BaseMsg {
@@ -154,6 +162,7 @@ export type SidecarMessage =
   | WorktreeCreatedMsg
   | GitStatusMsg
   | PrUpdateMsg
+  | MergeResultMsg
   | SidecarErrorMsg;
 
 export interface SidecarReadyMsg extends BaseMsg {
@@ -279,6 +288,15 @@ export interface PrUpdateMsg extends BaseMsg {
   type: "pr_update";
   agentId: string;
   pr: PullRequestInfo;
+}
+
+export interface MergeResultMsg extends BaseMsg {
+  type: "merge_result";
+  agentId: string;
+  ok: boolean; // true = gemerged; false = durch Gate/gh blockiert
+  merged: boolean;
+  reasons: string[]; // bei !ok: die blockierenden Gründe
+  prNumber?: number;
 }
 
 export type EscalationKind =

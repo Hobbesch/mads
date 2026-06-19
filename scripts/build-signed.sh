@@ -27,6 +27,10 @@ else
   echo "[release]          Kopiere .env.notarize.example → .env.notarize und trage die Credentials ein."
 fi
 
+# Sidecar bauen (tauri build baut nur das Frontend, nicht den Node-Sidecar).
+echo "[release] baue Sidecar (esbuild)…"
+npm run sidecar:build
+
 if [ "$#" -gt 0 ]; then
   npm run tauri build -- "$@"
 else

@@ -86,6 +86,7 @@ interface MadsState {
   stopAgent: (id: string, removeWorktree: boolean) => Promise<void>;
   createPr: (id: string) => Promise<void>;
   syncBranch: (id: string) => Promise<void>;
+  integratePr: (id: string) => Promise<void>;
   pollProject: () => Promise<void>;
 }
 
@@ -137,6 +138,20 @@ export const useStore = create<MadsState>((set) => {
 
       case "pr_update":
         patchAgent(msg.agentId, { pr: msg.pr });
+        break;
+
+      case "merge_result":
+        if (msg.ok) {
+          writeLine(
+            msg.agentId,
+            `${C.green}${C.bold}✔ PR${msg.prNumber ? ` #${msg.prNumber}` : ""} nach main gemerged${C.reset}`,
+          );
+        } else {
+          writeLine(
+            msg.agentId,
+            `${C.red}${C.bold}⛔ Merge blockiert:${C.reset}${C.red} ${msg.reasons.join(" · ")}${C.reset}`,
+          );
+        }
         break;
 
       case "agent_event": {
@@ -315,6 +330,11 @@ export const useStore = create<MadsState>((set) => {
     syncBranch: async (id) => {
       writeLine(id, `${C.cyan}⏵ sync (rebase onto origin)${C.reset}`);
       await sendHost({ ...envelope(), type: "sync_branch", agentId: id });
+    },
+
+    integratePr: async (id) => {
+      writeLine(id, `${C.magenta}${C.bold}⏵ Integrieren${C.reset}${C.magenta} (gh pr merge --squash --delete-branch)${C.reset}`);
+      await sendHost({ ...envelope(), type: "integrate_pr", agentId: id, method: "squash" });
     },
 
     pollProject: async () => {

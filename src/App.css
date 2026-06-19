@@ -656,6 +656,20 @@ button.primary:hover {
 .inspector-actions .danger {
   color: #d33b30;
 }
+.inspector-actions .integrate {
+  background: var(--s-green);
+  color: #fff;
+  border-color: transparent;
+}
+.inspector-actions .integrate:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.inspector-actions .integrate:disabled {
+  background: var(--panel);
+  color: var(--text-faint);
+  border-color: var(--border);
+  cursor: default;
+}
 .terminal-wrap {
   flex: 1;
   min-height: 0;

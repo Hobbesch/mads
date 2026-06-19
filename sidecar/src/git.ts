@@ -147,6 +147,18 @@ export async function createPr(
   return { ok: true, url: r.stdout.trim().split("\n").pop() ?? "" };
 }
 
+/** Integrator-Merge: gh pr merge --squash --delete-branch (lineare main). */
+export async function mergePr(
+  repoRoot: string,
+  branch: string,
+  method: "squash" | "merge" | "rebase" = "squash",
+): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
+  const flag = method === "merge" ? "--merge" : method === "rebase" ? "--rebase" : "--squash";
+  const r = await gh(["pr", "merge", branch, flag, "--delete-branch"], repoRoot);
+  if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout).trim() };
+  return { ok: true, output: r.stdout.trim() };
+}
+
 function rollupState(rollup: unknown): PrChecksState {
   if (!Array.isArray(rollup) || rollup.length === 0) return null;
   let fail = 0;

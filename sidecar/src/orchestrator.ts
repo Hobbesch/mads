@@ -8,7 +8,8 @@
  */
 import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
-import { createPr, getRepoInfo, gitStatus, prStatus, run, syncBranch } from "./git.js";
+import { createPr, getRepoInfo, gitStatus, mergePr, prStatus, removeWorktree, run, syncBranch } from "./git.js";
+import { preMergeGate } from "../../shared/merge.js";
 import type { HostMessage, ProjectInfo, EscalationKind } from "../../shared/protocol.js";
 
 const POLL_INTERVAL_MS = 25_000;
@@ -89,6 +90,10 @@ export class Orchestrator {
         await this.handleSync(msg.agentId);
         break;
 
+      case "integrate_pr":
+        await this.handleIntegrate(msg.agentId, msg.method ?? "squash");
+        break;
+
       case "poll_project":
         await this.pollAll();
         break;
@@ -142,6 +147,60 @@ export class Orchestrator {
     }
     log(`[orchestrator] Branch ${s.branch} rebaset onto origin/${this.project.defaultBranch}`);
     await this.pollAgent(s);
+  }
+
+  /**
+   * Integrator-Merge (Invariante 1: nur diese Op landet auf main). Serialisiert,
+   * gegated: holt frischen git-/PR-Status, prüft das Vor-Merge-Gate, merged nur bei
+   * grün, räumt danach den Worktree auf. Sub-Agents haben KEINE Merge-Op.
+   */
+  private async handleIntegrate(agentId: string, method: "squash" | "merge" | "rebase"): Promise<void> {
+    const s = this.pool.get(agentId);
+    if (!s || !s.repoRoot || !s.branch || !this.project) {
+      this.emitMergeResult(agentId, false, ["Kein Worktree/Projekt — Integration nicht möglich."]);
+      return;
+    }
+
+    // frischen Status holen (die UI kann bis zu einem Poll-Zyklus veraltet sein)
+    let behind = 0;
+    if (s.worktreePath) {
+      const st = await gitStatus(s.repoRoot, s.worktreePath, s.branch, this.project.defaultBranch);
+      behind = st.behind;
+      this.emit({ ...envelope(), type: "git_status", agentId, ...st });
+    }
+    const pr = await prStatus(s.repoRoot, s.branch);
+    if (pr) this.emit({ ...envelope(), type: "pr_update", agentId, pr });
+
+    const gate = preMergeGate(pr ?? undefined, behind);
+    if (!gate.ok) {
+      this.emitMergeResult(agentId, false, gate.reasons, pr?.number);
+      return;
+    }
+
+    const res = await mergePr(s.repoRoot, s.branch, method);
+    if (!res.ok) {
+      this.emitMergeResult(agentId, false, [res.error], pr?.number);
+      return;
+    }
+
+    log(`[orchestrator] PR ${pr?.number ?? s.branch} gemerged (${method})`);
+    this.emitMergeResult(agentId, true, [], pr?.number);
+    if (pr) this.emit({ ...envelope(), type: "pr_update", agentId, pr: { ...pr, state: "MERGED" } });
+    this.emit({ ...envelope(), type: "status_update", agentId, status: "done", currentStep: "merged" });
+
+    // Worktree aufräumen (gh --delete-branch entfernt das Remote; lokal hier).
+    if (s.worktreePath) {
+      try {
+        await removeWorktree(s.repoRoot, s.worktreePath, s.branch);
+      } catch (e) {
+        log(`[orchestrator] worktree cleanup after merge failed: ${String(e)}`);
+      }
+    }
+    await s.stop(false); // Query schließen; Karte bleibt als "merged" sichtbar
+  }
+
+  private emitMergeResult(agentId: string, ok: boolean, reasons: string[], prNumber?: number): void {
+    this.emit({ ...envelope(), type: "merge_result", agentId, ok, merged: ok, reasons, prNumber });
   }
 
   // ---------------------------------------------------------------- Polling
