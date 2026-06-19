@@ -1,0 +1,35 @@
+# Deterministisches CI über alle drei Schichten (frozen installs, beide Lockfile-Achsen).
+# Läuft auf PR UND merge_group, damit eine native GitHub-Merge-Queue nicht "missing checks"
+# stallt. Siehe docs/design/01-architecture.md §8.3 und docs/research/github-multiagent.md.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+
+jobs:
+  quality:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # JS-Achse: frozen installs (kein re-resolve)
+      - run: npm ci
+      - run: npm --prefix sidecar ci
+
+      # Build + Typecheck Frontend (tsc) + Sidecar (tsc) + Sidecar-Bundle (esbuild)
+      - run: npm run build
+      - run: npm --prefix sidecar run typecheck
+      - run: npm run sidecar:build
+
+      # Rust-Achse: Cargo.lock committet -> deterministisch
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --manifest-path src-tauri/Cargo.toml
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
