@@ -32,19 +32,47 @@ export interface BaseMsg {
 // HOST -> SIDECAR
 // ============================================================================
 export type HostMessage =
+  | OpenProjectMsg
+  | SetProjectMsg
   | StartAgentMsg
   | SendInputMsg
   | AnswerPermissionMsg
   | InterruptAgentMsg
   | SetPermissionModeMsg
   | StopAgentMsg
+  | CreatePrMsg
+  | SyncBranchMsg
+  | PollProjectMsg
   | ShutdownMsg;
+
+export interface ProjectInfo {
+  projectId: string;
+  repoRoot: string; // absoluter Pfad zum Haupt-Checkout (z.B. das PAIX-Repo)
+  owner: string; // GitHub owner (aus origin-Remote)
+  repo: string; // GitHub repo
+  defaultBranch: string; // i.d.R. "main"
+}
+
+export interface SetProjectMsg extends BaseMsg {
+  type: "set_project";
+  project: ProjectInfo;
+}
+
+/** Ordner auswählen → Sidecar löst owner/repo/defaultBranch via git/gh auf. */
+export interface OpenProjectMsg extends BaseMsg {
+  type: "open_project";
+  projectId: string;
+  repoRoot: string;
+}
 
 export interface StartAgentMsg extends BaseMsg {
   type: "start_agent";
   agentId: string;
   prompt: string;
-  cwd?: string;
+  cwd?: string; // explizit; sonst wird aus repoRoot+branch ein Worktree erzeugt
+  repoRoot?: string; // P3: Worktree aus diesem Repo anlegen
+  branch?: string; // P3: feat/<task> für den Worktree
+  baseRef?: string; // P3: i.d.R. "origin/<defaultBranch>"
   model?: string;
   permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions" | "dontAsk";
   allowedTools?: string[];
@@ -53,6 +81,23 @@ export interface StartAgentMsg extends BaseMsg {
   forkSession?: boolean;
   /** Demo ohne echte Claude-Auth: scripted Stream statt query(). */
   mock?: boolean;
+}
+
+export interface CreatePrMsg extends BaseMsg {
+  type: "create_pr";
+  agentId: string;
+  title?: string;
+  body?: string;
+  draft?: boolean;
+}
+
+export interface SyncBranchMsg extends BaseMsg {
+  type: "sync_branch"; // rebase onto origin/<default> + force-with-lease (stale-base-Killer)
+  agentId: string;
+}
+
+export interface PollProjectMsg extends BaseMsg {
+  type: "poll_project"; // git-/PR-Status aller Agenten jetzt aktualisieren
 }
 
 export interface SendInputMsg extends BaseMsg {
@@ -99,12 +144,16 @@ export interface ShutdownMsg extends BaseMsg {
 // ============================================================================
 export type SidecarMessage =
   | SidecarReadyMsg
+  | ProjectResolvedMsg
   | AgentEventMsg
   | NeedsInputMsg
   | PermissionRequestMsg
   | StatusUpdateMsg
   | CostUpdateMsg
   | AgentDoneMsg
+  | WorktreeCreatedMsg
+  | GitStatusMsg
+  | PrUpdateMsg
   | SidecarErrorMsg;
 
 export interface SidecarReadyMsg extends BaseMsg {
@@ -180,6 +229,56 @@ export interface AgentDoneMsg extends BaseMsg {
   totalCostUsd: number;
   numTurns: number;
   isError: boolean;
+}
+
+export interface ProjectResolvedMsg extends BaseMsg {
+  type: "project_resolved";
+  project: ProjectInfo;
+}
+
+export interface WorktreeCreatedMsg extends BaseMsg {
+  type: "worktree_created";
+  agentId: string;
+  path: string;
+  branch: string;
+  baseRef: string;
+}
+
+export interface GitStatusMsg extends BaseMsg {
+  type: "git_status";
+  agentId: string;
+  behind: number; // commits hinter origin/<default> (stale-base-Badge)
+  ahead: number;
+  dirty: boolean;
+}
+
+export type PrChecksState = "SUCCESS" | "FAILURE" | "PENDING" | "ERROR" | "EXPECTED" | null;
+export type MergeStateStatus =
+  | "BEHIND"
+  | "BLOCKED"
+  | "CLEAN"
+  | "DIRTY"
+  | "DRAFT"
+  | "HAS_HOOKS"
+  | "UNKNOWN"
+  | "UNSTABLE";
+
+export interface PullRequestInfo {
+  number: number;
+  url: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  isDraft: boolean;
+  headRefName: string;
+  mergeable: "CONFLICTING" | "MERGEABLE" | "UNKNOWN";
+  mergeStateStatus: MergeStateStatus;
+  reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
+  checksState: PrChecksState;
+}
+
+export interface PrUpdateMsg extends BaseMsg {
+  type: "pr_update";
+  agentId: string;
+  pr: PullRequestInfo;
 }
 
 export type EscalationKind =

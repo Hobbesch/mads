@@ -46,7 +46,7 @@ Die Recherche-Grundlagen liegen in [`docs/research/`](docs/research/).
 
 ---
 
-## Prototyp — was schon funktioniert
+## Prototyp — was schon funktioniert (P0–P4)
 
 - **Rust-Core** spawnt den Node-Sidecar (`std::process`) und forwarded dessen stdout/stderr
   zeilenweise über einen `tauri::ipc::Channel` ans Frontend; stdin trägt die HostMessages.
@@ -56,10 +56,32 @@ Die Recherche-Grundlagen liegen in [`docs/research/`](docs/research/).
 - **Dashboard** (macOS-HIG-Stil): Sidebar mit Streams, Agent-Karten mit Status-Ampeln,
   „braucht Input"- und Eskalations-Hervorhebung, Live-Terminal (xterm.js) pro Agent,
   Permission-Dialog, Follow-up-Composer.
+- **P3 — Projekt & Worktrees:** Repo per nativem Ordner-Picker öffnen; **echte Agenten,
+  jeder in eigenem `git worktree` + Branch** (`~/mads-worktrees/<repo-slug>/<agentId>`),
+  mehrere parallel; Cleanup beim Stop.
+- **P4 — GitHub-Workflow:** PR erstellen (`gh pr create`), `Sync` (rebase onto origin +
+  force-with-lease, der stale-base-Killer), periodisches Polling von git-Status
+  (behind/ahead/dirty) + PR-Status (Checks, mergeable, review) → **Eskalations-Badges**
+  (stale base, CI rot, Merge-Konflikt, Review nötig) live im Dashboard.
 
-Noch nicht im Prototyp (Roadmap P3+): Worktree-Anlage, GitHub-Integration/Eskalations-
-Polling, Integrator-Merge-Mechanik, Persistenz/Resume, Signing/Notarization, Update-Bereich.
-Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap--phasen-mvp--vollausbau).
+Noch nicht im Prototyp (Roadmap P5+): Integrator-Merge-Mechanik (serielles Mergen),
+Region-Ownership-Trespass *zur Laufzeit*, Persistenz/Resume, Update-Bereich,
+Signing/Notarization. Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap--phasen-mvp--vollausbau).
+
+## An einem echten Projekt (z. B. PAIX) testen
+
+1. `npm run tauri dev` aus dem Terminal starten (damit `node`/`gh` im PATH sind).
+2. Links **„Projekt öffnen"** → das PAIX-Repo wählen (mads liest owner/repo/default-branch aus `origin`).
+3. **„+ Neuer Stream"** → Rolle **Sub-Agent**, Mock-Haken **aus**, Aufgabe beschreiben →
+   mads legt einen Worktree+Branch an und startet einen echten Claude-Agenten darin.
+4. Mehrere Sub-Agenten parallel anlegen — jeder arbeitet isoliert auf eigener Branch.
+5. Im Inspector: Live-Terminal mitlesen, Rückfragen/Permissions beantworten, **PR erstellen**,
+   bei „stale base" **Sync** drücken; Eskalations-Badges zeigen CI/Merge-Status.
+
+> **Sicherheit:** Agenten laufen in `permissionMode: default` — **jede** schreibende/Bash-/
+> gh-Aktion (commit, push, `gh pr create`) wird im Dashboard zur Bestätigung vorgelegt
+> (`canUseTool`). Nichts wird automatisch nach `main` gemerged (Integrator-Merge ist P5).
+> Worktrees liegen außerhalb des Repos; der PAIX-Haupt-Checkout bleibt unangetastet.
 
 ---
 

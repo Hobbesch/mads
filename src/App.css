@@ -786,3 +786,110 @@ button.primary:hover {
   color: #fff;
   border-color: transparent;
 }
+.modal-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.modal-hint {
+  font-size: 12px;
+  color: #b9791b;
+  background: rgba(255, 176, 32, 0.14);
+  border-radius: 8px;
+  padding: 8px 10px;
+  line-height: 1.4;
+}
+
+/* ---------------- Project box (sidebar) ---------------- */
+.project-box {
+  background: rgba(120, 120, 128, 0.1);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 10px;
+}
+.project-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.project-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0;
+}
+.project-name {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-branch {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* ---------------- Badges (git/PR) ---------------- */
+.card-branch {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.badges,
+.inspector-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.inspector-badges {
+  padding: 8px 16px 0;
+}
+.badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.badge.info {
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--text-dim);
+}
+.badge.ok {
+  background: rgba(48, 209, 88, 0.16);
+  color: #28a745;
+}
+.badge.warn {
+  background: rgba(255, 176, 32, 0.18);
+  color: #b9791b;
+}
+.badge.err {
+  background: rgba(255, 69, 58, 0.16);
+  color: #d33b30;
+}
+.pill.repo {
+  background: rgba(94, 92, 230, 0.16);
+  color: #5e5ce6;
+}
+.titlebar-right > button:not(.primary) {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-weight: 550;
+}

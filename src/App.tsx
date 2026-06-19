@@ -11,6 +11,8 @@ export default function App() {
   const init = useStore((s) => s.init);
   const escalations = useStore((s) => s.escalations);
   const sidecar = useStore((s) => s.sidecar);
+  const project = useStore((s) => s.project);
+  const pollProject = useStore((s) => s.pollProject);
   const [showNew, setShowNew] = useState(false);
 
   useEffect(() => {
@@ -29,6 +31,7 @@ export default function App() {
             Dashboard
           </div>
           <div className="titlebar-right">
+            {project && <span className="pill repo">{project.owner}/{project.repo}</span>}
             <span className={`pill ${sidecar.status}`}>
               {sidecar.status === "ready"
                 ? sidecar.sdkAvailable
@@ -36,6 +39,11 @@ export default function App() {
                   : "Mock-Modus"
                 : sidecar.status}
             </span>
+            {project && (
+              <button onClick={() => void pollProject()} title="Git-/PR-Status jetzt aktualisieren">
+                ↻
+              </button>
+            )}
             <button className="primary" onClick={() => setShowNew(true)}>
               + Neuer Stream
             </button>

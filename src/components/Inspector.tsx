@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
+import { agentBadges } from "../derive";
 import { mountTerminal, fitTerminal } from "../terminal";
 
 export function Inspector() {
@@ -10,6 +12,8 @@ export function Inspector() {
   const sendInput = useStore((s) => s.sendInput);
   const interruptAgent = useStore((s) => s.interruptAgent);
   const stopAgent = useStore((s) => s.stopAgent);
+  const createPr = useStore((s) => s.createPr);
+  const syncBranch = useStore((s) => s.syncBranch);
   const termRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
 
@@ -40,6 +44,9 @@ export function Inspector() {
     setDraft("");
   };
 
+  const badges = agentBadges(agent);
+  const canPr = !!agent.branch && !agent.pr;
+
   return (
     <section className="inspector">
       <header className="inspector-head">
@@ -53,23 +60,49 @@ export function Inspector() {
           </span>
         </div>
         <div className="inspector-actions">
+          {agent.behind > 0 && (
+            <button onClick={() => void syncBranch(selectedId)} title="Rebase onto origin/main">
+              Sync ({agent.behind})
+            </button>
+          )}
+          {canPr && (
+            <button onClick={() => void createPr(selectedId)} title="Pull Request erstellen">
+              PR erstellen
+            </button>
+          )}
+          {agent.pr && (
+            <button onClick={() => void openUrl(agent.pr!.url)} title="PR auf GitHub öffnen">
+              PR #{agent.pr.number}
+            </button>
+          )}
           <button onClick={() => void interruptAgent(selectedId)} title="Unterbrechen">
             Pause
           </button>
-          <button className="danger" onClick={() => void stopAgent(selectedId)} title="Stoppen & schließen">
+          <button
+            className="danger"
+            onClick={() => void stopAgent(selectedId, agent.role === "sub")}
+            title="Stoppen (+ Worktree entfernen bei Sub)"
+          >
             Stop
           </button>
         </div>
       </header>
 
+      {(agent.branch || badges.length > 0) && (
+        <div className="inspector-badges">
+          {agent.branch && <span className="badge info">⎇ {agent.branch}</span>}
+          {badges.map((b, i) => (
+            <span key={i} className={`badge ${b.tone}`}>
+              {b.label}
+            </span>
+          ))}
+        </div>
+      )}
+
       <div className="terminal-wrap" ref={termRef} />
 
       <form className="composer" onSubmit={submit}>
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={`Nachricht an ${agent.label}…`}
-        />
+        <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={`Nachricht an ${agent.label}…`} />
         <button type="submit" disabled={!draft.trim()}>
           Senden
         </button>

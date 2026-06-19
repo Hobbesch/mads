@@ -12,6 +12,7 @@
  */
 import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
+import { createWorktree, removeWorktree } from "./git.js";
 import type {
   StartAgentMsg,
   PermissionDecision,
@@ -46,6 +47,10 @@ export class AgentSession {
   sessionId?: string;
   costUsd = 0;
   numTurns = 0;
+  // P3: gesetzt, sobald ein Worktree für diesen Agenten existiert.
+  repoRoot?: string;
+  branch?: string;
+  worktreePath?: string;
 
   private readonly inbox = new AsyncQueue<SdkUserMessage>();
   private readonly pending = new Map<string, (r: PermissionResult) => void>();
@@ -60,12 +65,28 @@ export class AgentSession {
   // --------------------------------------------------------------------------
   async start(msg: StartAgentMsg): Promise<void> {
     this.mock = msg.mock ?? false;
+    this.repoRoot = msg.repoRoot;
+    this.branch = msg.branch;
     this.inbox.push(userMsg(msg.prompt));
     this.setStatus("running", "starting up");
 
     if (this.mock) {
       void this.runMock(msg.prompt);
       return;
+    }
+
+    // P3: isolierten Worktree anlegen (außerhalb des Repos), Agent arbeitet dort.
+    let cwd = msg.cwd ?? process.cwd();
+    if (msg.repoRoot && msg.branch) {
+      const baseRef = msg.baseRef ?? "origin/main";
+      const wt = await createWorktree(msg.repoRoot, this.agentId, msg.branch, baseRef);
+      if (!wt.ok) {
+        this.fail("spawn_failed", `Worktree-Anlage fehlgeschlagen: ${wt.error}`, true);
+        return;
+      }
+      this.worktreePath = wt.path;
+      cwd = wt.path;
+      this.emit({ ...envelope(), type: "worktree_created", agentId: this.agentId, path: wt.path, branch: msg.branch, baseRef });
     }
 
     try {
@@ -76,7 +97,7 @@ export class AgentSession {
       this.q = sdk.query({
         prompt: this.inbox,
         options: {
-          cwd: msg.cwd ?? process.cwd(),
+          cwd,
           model: msg.model,
           permissionMode: msg.permissionMode ?? "default",
           includePartialMessages: false,
@@ -177,9 +198,16 @@ export class AgentSession {
     await this.q?.setPermissionMode?.(mode);
   }
 
-  stop(): void {
+  async stop(removeWt = false): Promise<void> {
     this.inbox.close();
     this.q?.close?.();
+    if (removeWt && this.repoRoot && this.worktreePath) {
+      try {
+        await removeWorktree(this.repoRoot, this.worktreePath, this.branch);
+      } catch (e) {
+        log(`[${this.agentId}] worktree cleanup failed:`, String(e));
+      }
+    }
   }
 
   // --------------------------------------------------------------------------

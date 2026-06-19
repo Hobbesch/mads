@@ -1,13 +1,11 @@
 /**
  * mads UI-Store (zustand).
  *
- * WICHTIG (Single Source of Truth, docs/design/01-architecture.md §5.3):
- * Der Sidecar-Pool ist autoritativ für den Agenten-State. Dieser Store ist nur ein
- * SPIEGEL der vom Sidecar gemeldeten Events — er trifft selbst keine Wahrheits-
- * Entscheidungen, sondern rendert, was über den Channel hereinkommt.
+ * Single Source of Truth (docs/design/01-architecture.md §5.3): der Sidecar-Pool ist
+ * autoritativ; dieser Store SPIEGELT nur die über den Channel gemeldeten Events.
  */
 import { create } from "zustand";
-import { startSidecar, sendHost, envelope } from "./ipc";
+import { startSidecar, sendHost, envelope, pickFolder } from "./ipc";
 import { writeLine } from "./terminal";
 import type {
   AgentStatus,
@@ -16,9 +14,10 @@ import type {
   PermissionRequestMsg,
   PermissionDecision,
   SidecarErrorMsg,
+  ProjectInfo,
+  PullRequestInfo,
 } from "../shared/protocol";
 
-// ANSI-Farben für die Terminal-Ausgabe (Claude-Code-ähnlich).
 const C = {
   dim: "\x1b[90m",
   cyan: "\x1b[36m",
@@ -44,6 +43,13 @@ export interface AgentVM {
   mock: boolean;
   createdAt: number;
   lastEventAt: number;
+  // P3/P4:
+  branch?: string;
+  worktreePath?: string;
+  behind: number;
+  ahead: number;
+  dirty: boolean;
+  pr?: PullRequestInfo;
 }
 
 export interface SidecarInfo {
@@ -54,6 +60,8 @@ export interface SidecarInfo {
 
 interface MadsState {
   sidecar: SidecarInfo;
+  project?: ProjectInfo;
+  projectStatus: "none" | "opening" | "ready" | "error";
   agents: Record<string, AgentVM>;
   order: string[];
   permissions: PermissionRequestMsg[];
@@ -62,12 +70,33 @@ interface MadsState {
   debugLog: string[];
 
   init: () => Promise<void>;
-  createAgent: (opts: { label: string; prompt: string; role: AgentRole; mock: boolean; model?: string }) => Promise<void>;
+  openProject: () => Promise<void>;
+  createAgent: (opts: {
+    label: string;
+    prompt: string;
+    role: AgentRole;
+    mock: boolean;
+    model?: string;
+    branch?: string;
+  }) => Promise<void>;
   selectAgent: (id: string) => void;
   answerPermission: (req: PermissionRequestMsg, decision: PermissionDecision) => Promise<void>;
   sendInput: (id: string, text: string) => Promise<void>;
   interruptAgent: (id: string) => Promise<void>;
-  stopAgent: (id: string) => Promise<void>;
+  stopAgent: (id: string, removeWorktree: boolean) => Promise<void>;
+  createPr: (id: string) => Promise<void>;
+  syncBranch: (id: string) => Promise<void>;
+  pollProject: () => Promise<void>;
+}
+
+function slugifyBranch(label: string): string {
+  const slug = label
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+  return `mads/${slug || "task"}`;
 }
 
 export const useStore = create<MadsState>((set) => {
@@ -85,12 +114,29 @@ export const useStore = create<MadsState>((set) => {
         set({ sidecar: { status: "ready", sdkAvailable: msg.sdkAvailable, sdkVersion: msg.sdkVersion } });
         break;
 
+      case "project_resolved":
+        set({ project: msg.project, projectStatus: "ready" });
+        break;
+
       case "status_update":
         patchAgent(msg.agentId, { status: msg.status, currentStep: msg.currentStep });
         break;
 
       case "cost_update":
         patchAgent(msg.agentId, { costUsd: msg.totalCostUsd, numTurns: msg.numTurns });
+        break;
+
+      case "worktree_created":
+        patchAgent(msg.agentId, { branch: msg.branch, worktreePath: msg.path });
+        writeLine(msg.agentId, `${C.dim}⌥ worktree ${msg.path} (${msg.branch} off ${msg.baseRef})${C.reset}`);
+        break;
+
+      case "git_status":
+        patchAgent(msg.agentId, { behind: msg.behind, ahead: msg.ahead, dirty: msg.dirty });
+        break;
+
+      case "pr_update":
+        patchAgent(msg.agentId, { pr: msg.pr });
         break;
 
       case "agent_event": {
@@ -133,10 +179,14 @@ export const useStore = create<MadsState>((set) => {
 
       case "error":
         if (msg.agentId) {
-          patchAgent(msg.agentId, { status: "error" });
+          // recoverable = Eskalation (sichtbar, behebbar); sonst harter Fehler
+          patchAgent(msg.agentId, { status: msg.recoverable ? "escalation" : "error" });
           writeLine(msg.agentId, `${C.red}✖ ${msg.code}: ${msg.message}${C.reset}`);
         }
-        set((s) => ({ escalations: [...s.escalations, msg] }));
+        set((s) => ({
+          // dedupe je agentId+code (letzter gewinnt)
+          escalations: [...s.escalations.filter((e) => !(e.agentId === msg.agentId && e.code === msg.code)), msg],
+        }));
         break;
     }
   }
@@ -160,6 +210,8 @@ export const useStore = create<MadsState>((set) => {
 
   return {
     sidecar: { status: "down", sdkAvailable: false },
+    project: undefined,
+    projectStatus: "none",
     agents: {},
     order: [],
     permissions: [],
@@ -179,8 +231,16 @@ export const useStore = create<MadsState>((set) => {
       }
     },
 
-    createAgent: async ({ label, prompt, role, mock, model }) => {
+    openProject: async () => {
+      const repoRoot = await pickFolder();
+      if (!repoRoot) return;
+      set({ projectStatus: "opening" });
+      await sendHost({ ...envelope(), type: "open_project", projectId: crypto.randomUUID(), repoRoot });
+    },
+
+    createAgent: async ({ label, prompt, role, mock, model, branch }) => {
       const id = crypto.randomUUID();
+      const project = useStore.getState().project;
       const agent: AgentVM = {
         id,
         label,
@@ -191,11 +251,31 @@ export const useStore = create<MadsState>((set) => {
         mock,
         createdAt: Date.now(),
         lastEventAt: Date.now(),
+        behind: 0,
+        ahead: 0,
+        dirty: false,
       };
       set((s) => ({ agents: { ...s.agents, [id]: agent }, order: [...s.order, id], selectedId: id }));
       writeLine(id, `${C.magenta}${C.bold}▌ ${label}${C.reset} ${C.dim}(${role}${mock ? ", mock" : ""})${C.reset}`);
       writeLine(id, `${C.dim}› ${prompt}${C.reset}`);
-      await sendHost({ ...envelope(), type: "start_agent", agentId: id, prompt, model, mock, permissionMode: "default" });
+
+      // Echter Agent + Projekt vorhanden → eigener Worktree/Branch.
+      const useWorktree = !mock && !!project && role === "sub";
+      const finalBranch = branch?.trim() || slugifyBranch(label);
+      await sendHost({
+        ...envelope(),
+        type: "start_agent",
+        agentId: id,
+        prompt,
+        model,
+        mock,
+        permissionMode: "default",
+        ...(useWorktree && project
+          ? { repoRoot: project.repoRoot, branch: finalBranch, baseRef: `origin/${project.defaultBranch}` }
+          : project && !mock
+            ? { cwd: project.repoRoot } // Integrator: Haupt-Checkout (kein eigener Worktree)
+            : {}),
+      });
     },
 
     selectAgent: (id) => set({ selectedId: id }),
@@ -216,14 +296,29 @@ export const useStore = create<MadsState>((set) => {
       await sendHost({ ...envelope(), type: "interrupt_agent", agentId: id });
     },
 
-    stopAgent: async (id) => {
-      await sendHost({ ...envelope(), type: "stop_agent", agentId: id, removeWorktree: false });
+    stopAgent: async (id, removeWorktree) => {
+      await sendHost({ ...envelope(), type: "stop_agent", agentId: id, removeWorktree });
       set((s) => {
         const agents = { ...s.agents };
         delete agents[id];
         const order = s.order.filter((x) => x !== id);
         return { agents, order, selectedId: s.selectedId === id ? order[0] : s.selectedId };
       });
+    },
+
+    createPr: async (id) => {
+      const a = useStore.getState().agents[id];
+      writeLine(id, `${C.cyan}⏵ gh pr create${C.reset}`);
+      await sendHost({ ...envelope(), type: "create_pr", agentId: id, title: a ? `mads: ${a.label}` : undefined });
+    },
+
+    syncBranch: async (id) => {
+      writeLine(id, `${C.cyan}⏵ sync (rebase onto origin)${C.reset}`);
+      await sendHost({ ...envelope(), type: "sync_branch", agentId: id });
+    },
+
+    pollProject: async () => {
+      await sendHost({ ...envelope(), type: "poll_project" });
     },
   };
 });

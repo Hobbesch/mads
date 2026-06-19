@@ -22,6 +22,9 @@ export function Sidebar({ onNewStream }: { onNewStream: () => void }) {
   const sidecar = useStore((s) => s.sidecar);
   const permissions = useStore((s) => s.permissions);
   const escalations = useStore((s) => s.escalations);
+  const project = useStore((s) => s.project);
+  const projectStatus = useStore((s) => s.projectStatus);
+  const openProject = useStore((s) => s.openProject);
 
   const list = order.map((id) => agents[id]).filter(Boolean);
   const integrators = list.filter((a) => a.role === "integrator");
@@ -46,6 +49,23 @@ export function Sidebar({ onNewStream }: { onNewStream: () => void }) {
           <div className="brand-name">mads</div>
           <div className="brand-tag">multi-agent surface</div>
         </div>
+      </div>
+
+      <div className="project-box">
+        <div className="project-line">
+          <span className="project-label">Projekt</span>
+          <button className="link-btn" onClick={() => void openProject()}>
+            {project ? "wechseln" : "öffnen"}
+          </button>
+        </div>
+        <div className="project-name" title={project?.repoRoot}>
+          {projectStatus === "opening"
+            ? "öffne…"
+            : project
+              ? `${project.owner}/${project.repo}`
+              : "kein Projekt gewählt"}
+        </div>
+        {project && <div className="project-branch">default: {project.defaultBranch}</div>}
       </div>
 
       <button className="new-stream" onClick={onNewStream}>

@@ -6,6 +6,7 @@ use sidecar::{sidecar_send, start_sidecar, stop_sidecar, SidecarState};
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(SidecarState::default())
         .invoke_handler(tauri::generate_handler![
             start_sidecar,
