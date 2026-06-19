@@ -1,4 +1,4 @@
-# mads — multi-agent development surface
+# mads — multi-agent development studio
 
 Eine native **macOS-Desktop-App**, in der ein Mensch **parallel mit vielen
 Claude-Code-Agenten** entwickelt: ein **Main-Agent (Integrator)** plus **Sub-Agents 1..N**,

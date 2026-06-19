@@ -7,7 +7,7 @@
 
 ## 0. Zusammenfassung & Einordnung
 
-**mads** (*multi-agent development surface*) ist eine native macOS-Desktop-App, in
+**mads** (*multi-agent development studio*) ist eine native macOS-Desktop-App, in
 der **ein Mensch parallel mit vielen Claude-Code-Agenten** arbeitet. Genau **ein**
 Main-Agent fungiert als **Integrator**, daneben laufen **Sub-Agents 1..N**, jeder auf
 **eigener Git-Branch in eigenem Worktree**, mit voller GitHub-Nutzung (PR-Lifecycle,

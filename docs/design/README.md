@@ -9,7 +9,7 @@
 
 ## Projektvision
 
-**mads** (*multi-agent development surface*) ist eine native macOS-Desktop-App, in der
+**mads** (*multi-agent development studio*) ist eine native macOS-Desktop-App, in der
 **ein Mensch parallel mit vielen Claude-Code-Agenten** entwickelt. Genau **ein** Main-Agent
 fungiert als **Integrator** (der Einzige, der nach `main` merged), daneben laufen
 **Sub-Agents 1..N**, jeder auf **eigener Git-Branch in eigenem Worktree**, mit voller
