@@ -161,6 +161,29 @@ mads wird mit der **Developer-ID** signiert (`bundle.macOS.signingIdentity` in
    Ohne `.env.notarize` wird nur signiert (lokal nutzbar). `tauri build` notarisiert
    automatisch, sobald die `APPLE_*`-Variablen gesetzt sind.
 
+## Versionierung & Releases
+
+mads folgt **SemVer**. Die Versionsnummer hat **eine Quelle der Wahrheit**
+(`package.json`); ein Helfer hält alle Manifeste synchron:
+
+```bash
+npm run version:set 0.2.0          # bumpt package.json, sidecar/package.json,
+                                   # src-tauri/tauri.conf.json und Cargo.toml
+npm run version:set 0.2.0-beta.1   # Pre-Release-Channel
+```
+
+- **Channel-Logik** (`src/version.ts`): alles `< 1.0.0` ist **Pre-Release**; ein Suffix
+  wie `-beta.1`/`-rc.1` definiert einen eigenen Channel.
+- **Build-Identifier ("Patch"):** `vite.config.ts` friert zur Build-Zeit **Git-Commit,
+  Branch, Dirty-Flag und Build-Datum** ein. Die Semver-Nummer bleibt über viele lokale
+  Builds gleich — der Commit unterscheidet sie. `*` markiert einen Build mit uncommitteten
+  Änderungen.
+- **Sichtbar in der App:** Versions-Pill in der Titelleiste (`v0.1.0 · <commit>`) und
+  vollständig im **Über-mads**-Dialog (Version, Channel, Commit, Branch, Build-Datum).
+
+Release-Ablauf: `npm run version:set <x.y.z>` → committen → `npm run tauri build`
+(bzw. `release:mac`).
+
 ## Lizenz
 
 Siehe [LICENSE](LICENSE).

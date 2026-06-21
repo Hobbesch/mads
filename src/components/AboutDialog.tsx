@@ -1,7 +1,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { RELEASE, buildDateLocal } from "../version";
 
 const REPO = "https://github.com/Hobbesch/mads";
-const VERSION = "0.1.0"; // hält mit package.json / Cargo.toml Schritt
 
 export function AboutDialog({ onClose }: { onClose: () => void }) {
   return (
@@ -12,7 +12,14 @@ export function AboutDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div className="about-name">mads</div>
         <div className="about-tagline">multi-agent development studio</div>
-        <span className="about-version">Version {VERSION}</span>
+        <div className="about-version-row">
+          <span className="about-version">Version {RELEASE.version}</span>
+          {RELEASE.isPreRelease && <span className="badge prerelease">{RELEASE.channel}</span>}
+        </div>
+        <div className="about-build" title={`gebaut ${buildDateLocal()}`}>
+          {RELEASE.commit}
+          {RELEASE.dirty ? "*" : ""} · {RELEASE.branch} · {buildDateLocal()}
+        </div>
 
         <p className="about-desc">
           Eine native macOS-App, um parallel mit vielen <b>Claude-Code-Agenten</b> zu entwickeln: ein Main-Agent

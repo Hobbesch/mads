@@ -7,6 +7,7 @@ import { Inspector } from "./components/Inspector";
 import { PermissionDialog } from "./components/PermissionDialog";
 import { NewStreamDialog } from "./components/NewStreamDialog";
 import { AboutDialog } from "./components/AboutDialog";
+import { RELEASE, buildDateLocal } from "./version";
 import "./App.css";
 
 export default function App() {
@@ -46,6 +47,14 @@ export default function App() {
             Dashboard
           </div>
           <div className="titlebar-right">
+            <button
+              className={`pill version${RELEASE.isPreRelease ? " prerelease" : ""}`}
+              onClick={() => setShowAbout(true)}
+              title={`${RELEASE.label} · Commit ${RELEASE.commit}${RELEASE.dirty ? "* (uncommittete Änderungen)" : ""} · Branch ${RELEASE.branch} · gebaut ${buildDateLocal()}`}
+            >
+              v{RELEASE.version} · {RELEASE.commit}
+              {RELEASE.dirty ? "*" : ""}
+            </button>
             {project && <span className="pill repo">{project.owner}/{project.repo}</span>}
             <span className={`pill ${sidecar.status}`}>
               {sidecar.status === "ready"

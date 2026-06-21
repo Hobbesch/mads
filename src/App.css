@@ -164,15 +164,27 @@ button {
   color: var(--text-faint);
   margin-top: 2px;
 }
+.about-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
+}
 .about-version {
   display: inline-block;
-  margin-top: 12px;
   font-size: 11px;
   font-weight: 600;
   color: var(--text-dim);
   background: rgba(120, 120, 128, 0.16);
   padding: 3px 10px;
   border-radius: 20px;
+}
+.about-build {
+  margin-top: 6px;
+  font-size: 10.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-faint);
 }
 .about-desc {
   font-size: 12.5px;
@@ -436,6 +448,25 @@ button {
 .pill.error {
   background: rgba(255, 69, 58, 0.16);
   color: #d33b30;
+}
+button.pill.version {
+  border: none;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: -0.01em;
+}
+button.pill.version:hover {
+  filter: brightness(1.08);
+}
+.pill.version.prerelease {
+  background: rgba(255, 176, 32, 0.18);
+  color: #b9791b;
+}
+.badge.prerelease {
+  background: rgba(255, 176, 32, 0.18);
+  color: #b9791b;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 button.primary {
   background: var(--accent);
