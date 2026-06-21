@@ -26,6 +26,7 @@ import type {
 } from "../shared/protocol";
 import type { Collision } from "../shared/collision";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
+import { toolCommand } from "./toolText";
 
 export type AgentRole = "integrator" | "sub";
 
@@ -141,13 +142,6 @@ function slugifyBranch(label: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 32);
   return `mads/${slug || "task"}`;
-}
-
-function toolCommand(input: Record<string, unknown>): string | undefined {
-  const cmd = input.command ?? input.path ?? input.file_path ?? input.pattern;
-  if (typeof cmd === "string") return cmd;
-  const keys = Object.keys(input);
-  return keys.length ? JSON.stringify(input).slice(0, 600) : undefined;
 }
 
 export const useStore = create<MadsState>((set) => {

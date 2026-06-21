@@ -1213,6 +1213,13 @@ button.primary:hover {
   color: var(--text-dim);
   margin-bottom: 6px;
 }
+.perm-desc {
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--text);
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
 .perm-tool code,
 .perm-cmd {
   font-family: var(--mono);

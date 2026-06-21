@@ -1,19 +1,21 @@
 import { useMemo, useState } from "react";
 import { useStore } from "../store";
+import { toolDescription, toolCommand } from "../toolText";
 import type { PermissionRequestMsg } from "../../shared/protocol";
 
 function ToolApproval({ req }: { req: PermissionRequestMsg }) {
   const answer = useStore((s) => s.answerPermission);
   const agent = useStore((s) => s.agents[req.agentId]);
-  const command = (req.input?.command ?? req.input?.path ?? "") as string;
+  const description = toolDescription(req.toolName, req.input);
+  const command = toolCommand(req.input);
 
   return (
     <div className="perm-body">
       <div className="perm-tool">
         Tool: <code>{req.toolName}</code>
       </div>
+      <div className="perm-desc">{description}</div>
       {command && <pre className="perm-cmd">{command}</pre>}
-      {!command && <pre className="perm-cmd">{JSON.stringify(req.input, null, 2)}</pre>}
       {req.decisionReason && <div className="perm-reason">{req.decisionReason}</div>}
       {req.blockedPath && <div className="perm-reason">Pfad: {req.blockedPath}</div>}
       <div className="perm-actions">
