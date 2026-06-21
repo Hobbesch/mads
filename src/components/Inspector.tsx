@@ -5,6 +5,7 @@ import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { agentBadges, mergeReadiness } from "../derive";
 import { MessageTimeline } from "./MessageTimeline";
+import { Elapsed } from "./Elapsed";
 import type { PermissionMode, ImageInput } from "../../shared/protocol";
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -76,8 +77,14 @@ export function Inspector() {
           <span className="inspector-label">{agent.label}</span>
           <span className="inspector-sub">
             {STATUS_META[agent.status].label}
-            {agent.currentStep ? ` · ${agent.currentStep}` : ""} · {agent.numTurns} turns · $
-            {agent.costUsd.toFixed(4)}
+            {agent.currentStep ? ` · ${agent.currentStep}` : ""}
+            {(agent.status === "running" || agent.status === "starting") && agent.workStartedAt !== undefined && (
+              <>
+                {" · "}
+                <Elapsed since={agent.workStartedAt} />
+              </>
+            )}{" "}
+            · {agent.numTurns} turns · ${agent.costUsd.toFixed(4)}
           </span>
         </div>
         <div className="inspector-actions">

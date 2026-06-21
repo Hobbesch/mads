@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
+import { Elapsed } from "./Elapsed";
 import type { TimelineEvent, TodoItem } from "../store";
 
 function Md({ text }: { text: string }) {
@@ -136,24 +137,31 @@ function renderEvent(ev: TimelineEvent) {
 export function MessageTimeline({ agentId }: { agentId: string }) {
   const events = useStore((s) => s.events[agentId] ?? []);
   const status = useStore((s) => s.agents[agentId]?.status);
+  const currentStep = useStore((s) => s.agents[agentId]?.currentStep);
+  const workStartedAt = useStore((s) => s.agents[agentId]?.workStartedAt);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
   }, [events.length]);
 
-  const last = events.length ? events[events.length - 1] : undefined;
-  const lastToolRunning = last?.kind === "tool" ? last.running : false;
-  const working = (status === "running" || status === "starting") && !lastToolRunning;
+  const active = status === "running" || status === "starting";
+  const stepLabel =
+    status === "starting" || !currentStep || currentStep === "starting up"
+      ? "startet…"
+      : currentStep;
 
   return (
     <div className="timeline">
-      {events.length === 0 && <div className="tl-empty">Noch keine Ausgabe.</div>}
+      {events.length === 0 && !active && <div className="tl-empty">Noch keine Ausgabe.</div>}
       {events.map(renderEvent)}
-      {working && (
+      {active && (
         <div className="tl-row">
-          <span className="tl-dot running" />
-          <div className="tl-working">arbeitet…</div>
+          <span className="tl-spinner" />
+          <div className="tl-working">
+            <span className="tl-working-label">{stepLabel}</span>
+            {workStartedAt !== undefined && <Elapsed since={workStartedAt} className="tl-working-time" />}
+          </div>
         </div>
       )}
       <div ref={endRef} />

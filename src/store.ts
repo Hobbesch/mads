@@ -68,6 +68,8 @@ export interface AgentVM {
   permissionMode: PermissionMode;
   createdAt: number;
   lastEventAt: number;
+  /** Zeitpunkt, ab dem der aktuelle aktive Lauf zählt (für die Laufzeit-Anzeige). */
+  workStartedAt?: number;
   branch?: string;
   worktreePath?: string;
   behind: number;
@@ -209,7 +211,18 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "status_update":
-        patchAgent(msg.agentId, { status: msg.status, currentStep: msg.currentStep });
+        set((s) => {
+          const a = s.agents[msg.agentId];
+          if (!a) return {};
+          const active = msg.status === "running" || msg.status === "starting";
+          const workStartedAt = active ? (a.workStartedAt ?? Date.now()) : undefined;
+          return {
+            agents: {
+              ...s.agents,
+              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now() },
+            },
+          };
+        });
         break;
 
       case "cost_update":
@@ -408,6 +421,7 @@ export const useStore = create<MadsState>((set) => {
         permissionMode: mode,
         createdAt: Date.now(),
         lastEventAt: Date.now(),
+        workStartedAt: Date.now(),
         behind: 0,
         ahead: 0,
         dirty: false,
@@ -439,13 +453,13 @@ export const useStore = create<MadsState>((set) => {
 
     answerPermission: async (req, decision) => {
       set((s) => ({ permissions: s.permissions.filter((p) => p.requestId !== req.requestId) }));
-      patchAgent(req.agentId, { status: "running" });
+      patchAgent(req.agentId, { status: "running", workStartedAt: Date.now() });
       await sendHost({ ...envelope(), type: "answer_permission", agentId: req.agentId, requestId: req.requestId, decision });
     },
 
     sendInput: async (id, text, images) => {
       pushEvent(id, { id: mkId(), kind: "user", text, images: images?.length });
-      patchAgent(id, { status: "running" });
+      patchAgent(id, { status: "running", workStartedAt: Date.now() });
       await sendHost({ ...envelope(), type: "send_input", agentId: id, text, images });
     },
 
@@ -510,6 +524,7 @@ export const useStore = create<MadsState>((set) => {
         permissionMode: "acceptEdits",
         createdAt: Date.now(),
         lastEventAt: Date.now(),
+        workStartedAt: Date.now(),
         branch: r.branch,
         worktreePath: r.worktreePath,
         behind: 0,

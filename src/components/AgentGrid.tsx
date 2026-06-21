@@ -1,6 +1,7 @@
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
+import { Elapsed } from "./Elapsed";
 import { agentBadges, hasGitEscalation } from "../derive";
 import type { AgentVM } from "../store";
 
@@ -12,6 +13,7 @@ function AgentCard({ agent }: { agent: AgentVM }) {
   const escalated = agent.status === "escalation" || agent.status === "error" || hasGitEscalation(agent);
   const pending = permissions.filter((p) => p.agentId === agent.id).length;
   const badges = agentBadges(agent);
+  const active = agent.status === "running" || agent.status === "starting";
 
   return (
     <button
@@ -35,7 +37,15 @@ function AgentCard({ agent }: { agent: AgentVM }) {
         </div>
       )}
       <div className="card-meta">
-        <span>{STATUS_META[agent.status].label}</span>
+        <span>
+          {STATUS_META[agent.status].label}
+          {active && agent.workStartedAt !== undefined && (
+            <>
+              {" · "}
+              <Elapsed since={agent.workStartedAt} />
+            </>
+          )}
+        </span>
         <span className="card-cost">
           {agent.numTurns} turns · ${agent.costUsd.toFixed(4)}
         </span>
