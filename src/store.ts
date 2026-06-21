@@ -3,10 +3,12 @@
  *
  * Single Source of Truth (docs/design/01-architecture.md §5.3): der Sidecar-Pool ist
  * autoritativ; dieser Store SPIEGELT nur die über den Channel gemeldeten Events.
+ *
+ * Anzeige: strukturierte Nachrichten-Timeline pro Agent (`events`), gerendert im
+ * VS-Code-Claude-Code-Stil (MessageTimeline).
  */
 import { create } from "zustand";
 import { startSidecar, sendHost, envelope, pickFolder } from "./ipc";
-import { writeLine } from "./terminal";
 import type {
   AgentStatus,
   SidecarMessage,
@@ -24,18 +26,33 @@ import type {
 } from "../shared/protocol";
 import type { Collision } from "../shared/collision";
 
-const C = {
-  dim: "\x1b[90m",
-  cyan: "\x1b[36m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  red: "\x1b[31m",
-  magenta: "\x1b[35m",
-  bold: "\x1b[1m",
-  reset: "\x1b[0m",
-};
-
 export type AgentRole = "integrator" | "sub";
+
+export interface TodoItem {
+  content: string;
+  status: string; // "pending" | "in_progress" | "completed"
+  activeForm?: string;
+}
+
+export type NoticeTone = "info" | "warn" | "err" | "ok" | "accent";
+
+export type TimelineEvent =
+  | { id: string; kind: "user"; text: string; images?: number }
+  | { id: string; kind: "assistant"; text: string }
+  | { id: string; kind: "thinking"; text: string }
+  | {
+      id: string;
+      kind: "tool";
+      toolUseId: string;
+      name: string;
+      description?: string;
+      command?: string;
+      output?: string;
+      ok?: boolean;
+      running: boolean;
+    }
+  | { id: string; kind: "todos"; todos: TodoItem[] }
+  | { id: string; kind: "notice"; tone: NoticeTone; text: string };
 
 export interface AgentVM {
   id: string;
@@ -50,7 +67,6 @@ export interface AgentVM {
   permissionMode: PermissionMode;
   createdAt: number;
   lastEventAt: number;
-  // P3/P4:
   branch?: string;
   worktreePath?: string;
   behind: number;
@@ -72,6 +88,7 @@ interface MadsState {
   projectStatus: "none" | "opening" | "ready" | "error";
   agents: Record<string, AgentVM>;
   order: string[];
+  events: Record<string, TimelineEvent[]>;
   permissions: PermissionRequestMsg[];
   escalations: SidecarErrorMsg[];
   resumables: ResumableAgent[];
@@ -106,6 +123,8 @@ interface MadsState {
   resumeAgent: (r: ResumableAgent) => Promise<void>;
 }
 
+const mkId = () => crypto.randomUUID();
+
 function slugifyBranch(label: string): string {
   const slug = label
     .toLowerCase()
@@ -116,12 +135,51 @@ function slugifyBranch(label: string): string {
   return `mads/${slug || "task"}`;
 }
 
+function toolCommand(input: Record<string, unknown>): string | undefined {
+  const cmd = input.command ?? input.path ?? input.file_path ?? input.pattern;
+  if (typeof cmd === "string") return cmd;
+  const keys = Object.keys(input);
+  return keys.length ? JSON.stringify(input).slice(0, 600) : undefined;
+}
+
 export const useStore = create<MadsState>((set) => {
   function patchAgent(id: string, patch: Partial<AgentVM>) {
     set((s) => {
       const a = s.agents[id];
       if (!a) return {};
       return { agents: { ...s.agents, [id]: { ...a, ...patch, lastEventAt: Date.now() } } };
+    });
+  }
+
+  function pushEvent(agentId: string, ev: TimelineEvent) {
+    set((s) => {
+      const prev = s.events[agentId] ?? [];
+      const next = [...prev, ev];
+      if (next.length > 800) next.splice(0, next.length - 800); // Ringpuffer
+      return { events: { ...s.events, [agentId]: next } };
+    });
+  }
+
+  function notice(agentId: string, tone: NoticeTone, text: string) {
+    pushEvent(agentId, { id: mkId(), kind: "notice", tone, text });
+  }
+
+  function completeTool(agentId: string, toolUseId: string, output: string | undefined, ok: boolean) {
+    set((s) => {
+      const list = s.events[agentId];
+      if (!list) return {};
+      let found = false;
+      const next = list.map((e) => {
+        if (e.kind === "tool" && e.toolUseId === toolUseId) {
+          found = true;
+          return { ...e, output, ok, running: false };
+        }
+        return e;
+      });
+      if (!found) {
+        next.push({ id: mkId(), kind: "tool", toolUseId, name: "Tool", output, ok, running: false });
+      }
+      return { events: { ...s.events, [agentId]: next } };
     });
   }
 
@@ -145,7 +203,7 @@ export const useStore = create<MadsState>((set) => {
 
       case "worktree_created":
         patchAgent(msg.agentId, { branch: msg.branch, worktreePath: msg.path });
-        writeLine(msg.agentId, `${C.dim}⌥ worktree ${msg.path} (${msg.branch} off ${msg.baseRef})${C.reset}`);
+        notice(msg.agentId, "info", `Worktree ${msg.branch} (off ${msg.baseRef})`);
         break;
 
       case "git_status":
@@ -157,32 +215,22 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "merge_result":
-        if (msg.ok) {
-          writeLine(
-            msg.agentId,
-            `${C.green}${C.bold}✔ PR${msg.prNumber ? ` #${msg.prNumber}` : ""} nach main gemerged${C.reset}`,
-          );
-        } else {
-          writeLine(
-            msg.agentId,
-            `${C.red}${C.bold}⛔ Merge blockiert:${C.reset}${C.red} ${msg.reasons.join(" · ")}${C.reset}`,
-          );
-        }
+        notice(
+          msg.agentId,
+          msg.ok ? "ok" : "err",
+          msg.ok
+            ? `✔ PR${msg.prNumber ? ` #${msg.prNumber}` : ""} nach main gemerged`
+            : `⛔ Merge blockiert: ${msg.reasons.join(" · ")}`,
+        );
         break;
 
       case "gate_result":
         patchAgent(msg.agentId, { gate: { ok: msg.ok, steps: msg.steps } });
-        writeLine(
+        notice(
           msg.agentId,
-          `${C.bold}${msg.ok ? C.green : C.red}▣ Clean-Code-Gate: ${msg.ok ? "grün" : "rot"}${C.reset}`,
+          msg.ok ? "ok" : "err",
+          `Clean-Code-Gate: ${msg.ok ? "grün" : "rot"} — ${msg.steps.map((s) => `${s.name}:${s.status}`).join(", ")}`,
         );
-        for (const st of msg.steps) {
-          const icon = st.status === "pass" ? `${C.green}✓` : st.status === "fail" ? `${C.red}✖` : `${C.dim}–`;
-          writeLine(
-            msg.agentId,
-            `  ${icon} ${st.name}${C.reset}${st.summary ? ` ${C.dim}${st.summary}${C.reset}` : ""}`,
-          );
-        }
         break;
 
       case "resumable_agents":
@@ -196,26 +244,42 @@ export const useStore = create<MadsState>((set) => {
       case "agent_event": {
         const ev = msg.event;
         if (ev.kind === "assistant_text" || ev.kind === "assistant_delta") {
-          writeLine(msg.agentId, ev.text);
+          if (ev.text.trim()) pushEvent(msg.agentId, { id: mkId(), kind: "assistant", text: ev.text });
         } else if (ev.kind === "thinking") {
-          writeLine(msg.agentId, `${C.dim}· ${ev.text}${C.reset}`);
+          pushEvent(msg.agentId, { id: mkId(), kind: "thinking", text: ev.text });
         } else if (ev.kind === "tool_use") {
-          const arg = ev.input?.command ?? ev.input?.path ?? "";
-          writeLine(msg.agentId, `${C.cyan}⏵ ${ev.name}${C.reset}${arg ? ` ${C.dim}${String(arg)}${C.reset}` : ""}`);
+          if (ev.name === "TodoWrite") {
+            const todos = ((ev.input?.todos as TodoItem[]) ?? []).map((t) => ({
+              content: String(t.content ?? ""),
+              status: String(t.status ?? "pending"),
+              activeForm: t.activeForm,
+            }));
+            pushEvent(msg.agentId, { id: mkId(), kind: "todos", todos });
+          } else {
+            pushEvent(msg.agentId, {
+              id: mkId(),
+              kind: "tool",
+              toolUseId: ev.toolUseId,
+              name: ev.name,
+              description: typeof ev.input?.description === "string" ? ev.input.description : undefined,
+              command: toolCommand(ev.input ?? {}),
+              running: true,
+            });
+          }
         } else if (ev.kind === "tool_result") {
-          writeLine(msg.agentId, `${C.dim}  ↳ ${ev.ok ? "ok" : "fehler"}${ev.summary ? `: ${ev.summary}` : ""}${C.reset}`);
+          completeTool(msg.agentId, ev.toolUseId, ev.output ?? ev.summary, ev.ok);
         }
         break;
       }
 
       case "needs_input":
         patchAgent(msg.agentId, { status: "waiting_input" });
-        writeLine(msg.agentId, `${C.yellow}● wartet auf dich${msg.message ? `: ${msg.message}` : ""}${C.reset}`);
+        notice(msg.agentId, "warn", `● wartet auf dich${msg.message ? `: ${msg.message}` : ""}`);
         break;
 
       case "permission_request":
         patchAgent(msg.agentId, { status: "waiting_input" });
-        writeLine(msg.agentId, `${C.yellow}${C.bold}● Erlaubnis erforderlich:${C.reset}${C.yellow} ${msg.toolName}${C.reset}`);
+        notice(msg.agentId, "warn", `● Erlaubnis erforderlich: ${msg.toolName}`);
         set((s) => ({ permissions: [...s.permissions.filter((p) => p.requestId !== msg.requestId), msg] }));
         break;
 
@@ -225,20 +289,19 @@ export const useStore = create<MadsState>((set) => {
           costUsd: msg.totalCostUsd,
           numTurns: msg.numTurns,
         });
-        writeLine(
+        notice(
           msg.agentId,
-          `${msg.isError ? C.red : C.green}${C.bold}■ ${msg.isError ? "Fehler" : "fertig"}${C.reset} ${C.dim}(${msg.numTurns} turns, $${msg.totalCostUsd.toFixed(4)})${C.reset}`,
+          msg.isError ? "err" : "ok",
+          `${msg.isError ? "■ Fehler" : "■ fertig"} (${msg.numTurns} turns, $${msg.totalCostUsd.toFixed(4)})`,
         );
         break;
 
       case "error":
         if (msg.agentId) {
-          // recoverable = Eskalation (sichtbar, behebbar); sonst harter Fehler
           patchAgent(msg.agentId, { status: msg.recoverable ? "escalation" : "error" });
-          writeLine(msg.agentId, `${C.red}✖ ${msg.code}: ${msg.message}${C.reset}`);
+          notice(msg.agentId, "err", `✖ ${msg.code}: ${msg.message}`);
         }
         set((s) => ({
-          // dedupe je agentId+code (letzter gewinnt)
           escalations: [...s.escalations.filter((e) => !(e.agentId === msg.agentId && e.code === msg.code)), msg],
         }));
         break;
@@ -268,6 +331,7 @@ export const useStore = create<MadsState>((set) => {
     projectStatus: "none",
     agents: {},
     order: [],
+    events: {},
     permissions: [],
     escalations: [],
     resumables: [],
@@ -320,10 +384,8 @@ export const useStore = create<MadsState>((set) => {
         dirty: false,
       };
       set((s) => ({ agents: { ...s.agents, [id]: agent }, order: [...s.order, id], selectedId: id }));
-      writeLine(id, `${C.magenta}${C.bold}▌ ${label}${C.reset} ${C.dim}(${role}${mock ? ", mock" : ""})${C.reset}`);
-      writeLine(id, `${C.dim}› ${prompt}${C.reset}`);
+      pushEvent(id, { id: mkId(), kind: "user", text: prompt });
 
-      // Echter Agent + Projekt vorhanden → eigener Worktree/Branch.
       const useWorktree = !mock && !!project && role === "sub";
       const finalBranch = branch?.trim() || slugifyBranch(label);
       await sendHost({
@@ -339,7 +401,7 @@ export const useStore = create<MadsState>((set) => {
         ...(useWorktree && project
           ? { repoRoot: project.repoRoot, branch: finalBranch, baseRef: `origin/${project.defaultBranch}` }
           : project && !mock
-            ? { cwd: project.repoRoot } // Integrator: Haupt-Checkout (kein eigener Worktree)
+            ? { cwd: project.repoRoot }
             : {}),
       });
     },
@@ -353,15 +415,14 @@ export const useStore = create<MadsState>((set) => {
     },
 
     sendInput: async (id, text, images) => {
-      const tag = images && images.length ? ` ${C.dim}[+${images.length} Bild]${C.reset}` : "";
-      writeLine(id, `${C.dim}› ${text}${C.reset}${tag}`);
+      pushEvent(id, { id: mkId(), kind: "user", text, images: images?.length });
       patchAgent(id, { status: "running" });
       await sendHost({ ...envelope(), type: "send_input", agentId: id, text, images });
     },
 
     setPermissionMode: async (id, mode) => {
       patchAgent(id, { permissionMode: mode });
-      writeLine(id, `${C.dim}⚙ Permission-Modus: ${mode}${C.reset}`);
+      notice(id, "accent", `⚙ Permission-Modus: ${mode}`);
       await sendHost({ ...envelope(), type: "set_permission_mode", agentId: id, mode });
     },
 
@@ -374,29 +435,31 @@ export const useStore = create<MadsState>((set) => {
       set((s) => {
         const agents = { ...s.agents };
         delete agents[id];
+        const events = { ...s.events };
+        delete events[id];
         const order = s.order.filter((x) => x !== id);
-        return { agents, order, selectedId: s.selectedId === id ? order[0] : s.selectedId };
+        return { agents, events, order, selectedId: s.selectedId === id ? order[0] : s.selectedId };
       });
     },
 
     createPr: async (id) => {
       const a = useStore.getState().agents[id];
-      writeLine(id, `${C.cyan}⏵ gh pr create${C.reset}`);
+      notice(id, "accent", "▶ PR erstellen (gh pr create)");
       await sendHost({ ...envelope(), type: "create_pr", agentId: id, title: a ? `mads: ${a.label}` : undefined });
     },
 
     syncBranch: async (id) => {
-      writeLine(id, `${C.cyan}⏵ sync (rebase onto origin)${C.reset}`);
+      notice(id, "accent", "▶ Sync (rebase onto origin/main)");
       await sendHost({ ...envelope(), type: "sync_branch", agentId: id });
     },
 
     integratePr: async (id) => {
-      writeLine(id, `${C.magenta}${C.bold}⏵ Integrieren${C.reset}${C.magenta} (gh pr merge --squash --delete-branch)${C.reset}`);
+      notice(id, "accent", "▶ Integrieren (gh pr merge --squash --delete-branch)");
       await sendHost({ ...envelope(), type: "integrate_pr", agentId: id, method: "squash" });
     },
 
     runGate: async (id) => {
-      writeLine(id, `${C.cyan}⏵ Clean-Code-Gate…${C.reset}`);
+      notice(id, "accent", "▶ Clean-Code-Gate…");
       await sendHost({ ...envelope(), type: "gate_task", agentId: id });
     },
 
@@ -430,7 +493,7 @@ export const useStore = create<MadsState>((set) => {
         selectedId: r.agentId,
         resumables: s.resumables.filter((x) => x.agentId !== r.agentId),
       }));
-      writeLine(r.agentId, `${C.magenta}${C.bold}▌ ${r.label}${C.reset} ${C.dim}(fortgesetzt${r.branch ? ` · ${r.branch}` : ""})${C.reset}`);
+      notice(r.agentId, "accent", `↩︎ fortgesetzt${r.branch ? ` · ${r.branch}` : ""}`);
       await sendHost({
         ...envelope(),
         type: "start_agent",

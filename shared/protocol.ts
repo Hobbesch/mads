@@ -215,7 +215,7 @@ export type AgentEvent =
   | { kind: "assistant_delta"; text: string }
   | { kind: "thinking"; text: string }
   | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown> }
-  | { kind: "tool_result"; toolUseId: string; ok: boolean; summary?: string }
+  | { kind: "tool_result"; toolUseId: string; ok: boolean; summary?: string; output?: string }
   | { kind: "system"; subtype: string; data?: Record<string, unknown> };
 
 export interface AgentEventMsg extends BaseMsg {

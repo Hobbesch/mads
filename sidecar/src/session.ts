@@ -38,6 +38,20 @@ interface QueryHandle extends AsyncIterable<unknown> {
   close?: () => void;
 }
 
+function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((b) => (b && typeof b === "object" && (b as { type?: string }).type === "text" ? String((b as { text?: unknown }).text ?? "") : ""))
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+function cap(text: string, max = 4000): string {
+  return text.length > max ? `${text.slice(0, max)}\n… [${text.length - max} Zeichen gekürzt]` : text;
+}
+
 function userMsg(text: string, images?: ImageInput[]): SdkUserMessage {
   if (images && images.length > 0) {
     const content: unknown[] = [{ type: "text", text }];
@@ -249,9 +263,33 @@ export class AgentSession {
             for (const block of content) {
               if (block.type === "text") {
                 this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "assistant_text", text: String(block.text) } });
+              } else if (block.type === "thinking") {
+                const t = String(block.thinking ?? block.text ?? "");
+                if (t) this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "thinking", text: t } });
               } else if (block.type === "tool_use") {
                 this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId: String(block.id), name: String(block.name), input: (block.input ?? {}) as Record<string, unknown> } });
                 this.setStatus("running", String(block.name));
+              }
+            }
+            break;
+          }
+          case "user": {
+            const content = (m.message as { content?: unknown })?.content;
+            if (Array.isArray(content)) {
+              for (const block of content as Array<Record<string, unknown>>) {
+                if (block.type === "tool_result") {
+                  this.emit({
+                    ...envelope(),
+                    type: "agent_event",
+                    agentId: this.agentId,
+                    event: {
+                      kind: "tool_result",
+                      toolUseId: String(block.tool_use_id),
+                      ok: !block.is_error,
+                      output: cap(toolResultText(block.content)),
+                    },
+                  });
+                }
               }
             }
             break;
@@ -342,7 +380,9 @@ export class AgentSession {
     this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "assistant_text", text } });
   }
   private emitToolUse(name: string, input: Record<string, unknown>): void {
-    this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId: randomUUID(), name, input } });
+    const toolUseId = randomUUID();
+    this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId, name, input } });
+    this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_result", toolUseId, ok: true, output: "(mock) ok" } });
   }
   private emitCost(): void {
     this.emit({ ...envelope(), type: "cost_update", agentId: this.agentId, totalCostUsd: this.costUsd, numTurns: this.numTurns });

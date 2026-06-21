@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { agentBadges, mergeReadiness } from "../derive";
-import { mountTerminal, fitTerminal } from "../terminal";
+import { MessageTimeline } from "./MessageTimeline";
 import type { PermissionMode, ImageInput } from "../../shared/protocol";
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -27,20 +27,8 @@ export function Inspector() {
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
   const setPermissionMode = useStore((s) => s.setPermissionMode);
-  const termRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
   const [attached, setAttached] = useState<ImageInput[]>([]);
-
-  useEffect(() => {
-    if (selectedId && termRef.current) mountTerminal(selectedId, termRef.current);
-  }, [selectedId]);
-
-  useEffect(() => {
-    if (!selectedId) return;
-    const onResize = () => fitTerminal(selectedId);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [selectedId]);
 
   if (!agent || !selectedId) {
     return (
@@ -159,7 +147,9 @@ export function Inspector() {
         </div>
       )}
 
-      <div className="terminal-wrap" ref={termRef} />
+      <div className="timeline-wrap">
+        <MessageTimeline agentId={selectedId} />
+      </div>
 
       <div className="composer-wrap">
         {attached.length > 0 && (
