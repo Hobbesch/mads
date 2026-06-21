@@ -1192,6 +1192,11 @@ button.primary:hover {
   color: #fff;
   border-color: transparent;
 }
+.perm-actions .allow-always {
+  background: var(--accent-weak);
+  color: var(--accent);
+  border-color: transparent;
+}
 .perm-actions .deny {
   color: #d33b30;
 }

@@ -248,6 +248,7 @@ export interface PermissionRequestMsg extends BaseMsg {
   blockedPath?: string;
   decisionReason?: string;
   questions?: AskQuestion[];
+  suggestions?: unknown[]; // Regel-Vorschläge von Claude Code (für „Immer erlauben")
 }
 
 export interface StatusUpdateMsg extends BaseMsg {

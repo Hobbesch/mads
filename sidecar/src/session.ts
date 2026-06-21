@@ -22,8 +22,13 @@ import type {
 
 // Loses SDK-Typing: die exakte API entwickelt sich (0.3.x). Wir casten defensiv.
 type PermissionResult =
-  | { behavior: "allow"; updatedInput?: Record<string, unknown> }
+  | { behavior: "allow"; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[] }
   | { behavior: "deny"; message: string; interrupt?: boolean };
+
+interface PendingPermission {
+  resolve: (r: PermissionResult) => void;
+  suggestions?: unknown[]; // Regel-Vorschläge von Claude Code (für „Immer erlauben")
+}
 
 interface SdkUserMessage {
   type: "user";
@@ -81,7 +86,7 @@ export class AgentSession {
   mock = false;
 
   private readonly inbox = new AsyncQueue<SdkUserMessage>();
-  private readonly pending = new Map<string, (r: PermissionResult) => void>();
+  private readonly pending = new Map<string, PendingPermission>();
   private q?: QueryHandle;
   private readonly onChange?: () => void;
 
@@ -179,7 +184,7 @@ export class AgentSession {
   ): Promise<PermissionResult> {
     return new Promise<PermissionResult>((resolve) => {
       const requestId = randomUUID();
-      this.pending.set(requestId, resolve);
+      this.pending.set(requestId, { resolve, suggestions: opts.suggestions as unknown[] | undefined });
       const isAsk = toolName === "AskUserQuestion";
       this.emit({
         ...envelope(),
@@ -192,20 +197,26 @@ export class AgentSession {
         questions: isAsk ? (input as { questions?: unknown }).questions : undefined,
         blockedPath: opts.blockedPath as string | undefined,
         decisionReason: opts.decisionReason as string | undefined,
+        suggestions: opts.suggestions as unknown[] | undefined,
       });
       this.setStatus("waiting_input", `permission: ${toolName}`);
     });
   }
 
   answerPermission(requestId: string, decision: PermissionDecision): void {
-    const resolve = this.pending.get(requestId);
-    if (!resolve) {
+    const entry = this.pending.get(requestId);
+    if (!entry) {
       log(`[${this.agentId}] unknown requestId`, requestId);
       return;
     }
     this.pending.delete(requestId);
+    const { resolve, suggestions } = entry;
     if (decision.behavior === "allow") {
-      resolve({ behavior: "allow", updatedInput: decision.updatedInput });
+      resolve({
+        behavior: "allow",
+        updatedInput: decision.updatedInput,
+        updatedPermissions: decision.remember ? suggestions : undefined,
+      });
     } else if (decision.behavior === "answer_questions") {
       resolve({
         behavior: "allow",
@@ -337,7 +348,7 @@ export class AgentSession {
     await delay(700);
     // Permission-Loop demonstrieren:
     const requestId = randomUUID();
-    this.pending.set(requestId, () => {});
+    this.pending.set(requestId, { resolve: () => {} });
     this.emit({
       ...envelope(),
       type: "permission_request",

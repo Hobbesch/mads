@@ -20,6 +20,15 @@ function ToolApproval({ req }: { req: PermissionRequestMsg }) {
         <button className="deny" onClick={() => void answer(req, { behavior: "deny", message: "Vom Nutzer abgelehnt" })}>
           Ablehnen
         </button>
+        {req.suggestions && req.suggestions.length > 0 && (
+          <button
+            className="allow-always"
+            title="Diese Art von Aktion für diese Sitzung merken (keine erneute Nachfrage)"
+            onClick={() => void answer(req, { behavior: "allow", remember: true })}
+          >
+            Immer erlauben
+          </button>
+        )}
         <button className="allow" onClick={() => void answer(req, { behavior: "allow" })}>
           Erlauben{agent ? ` (${agent.label})` : ""}
         </button>
