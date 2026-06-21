@@ -17,6 +17,7 @@ import type {
   StartAgentMsg,
   PermissionDecision,
   AgentStatus,
+  ImageInput,
 } from "../../shared/protocol.js";
 
 // Loses SDK-Typing: die exakte API entwickelt sich (0.3.x). Wir casten defensiv.
@@ -26,7 +27,7 @@ type PermissionResult =
 
 interface SdkUserMessage {
   type: "user";
-  message: { role: "user"; content: string };
+  message: { role: "user"; content: string | unknown[] };
   parent_tool_use_id: null;
   session_id?: string;
 }
@@ -37,7 +38,14 @@ interface QueryHandle extends AsyncIterable<unknown> {
   close?: () => void;
 }
 
-function userMsg(text: string): SdkUserMessage {
+function userMsg(text: string, images?: ImageInput[]): SdkUserMessage {
+  if (images && images.length > 0) {
+    const content: unknown[] = [{ type: "text", text }];
+    for (const im of images) {
+      content.push({ type: "image", source: { type: "base64", media_type: im.mediaType, data: im.dataBase64 } });
+    }
+    return { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
+  }
   return { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null };
 }
 
@@ -196,8 +204,8 @@ export class AgentSession {
     if (this.mock) void this.mockAfterPermission();
   }
 
-  sendInput(text: string): void {
-    this.inbox.push(userMsg(text));
+  sendInput(text: string, images?: ImageInput[]): void {
+    this.inbox.push(userMsg(text, images));
     this.setStatus("running");
     if (this.mock) void this.runMock(text);
   }

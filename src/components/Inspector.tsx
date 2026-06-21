@@ -5,6 +5,16 @@ import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { agentBadges, mergeReadiness } from "../derive";
 import { mountTerminal, fitTerminal } from "../terminal";
+import type { PermissionMode, ImageInput } from "../../shared/protocol";
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
 
 export function Inspector() {
   const selectedId = useStore((s) => s.selectedId);
@@ -16,8 +26,10 @@ export function Inspector() {
   const syncBranch = useStore((s) => s.syncBranch);
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
+  const setPermissionMode = useStore((s) => s.setPermissionMode);
   const termRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
+  const [attached, setAttached] = useState<ImageInput[]>([]);
 
   useEffect(() => {
     if (selectedId && termRef.current) mountTerminal(selectedId, termRef.current);
@@ -41,9 +53,26 @@ export function Inspector() {
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = draft.trim();
-    if (!text) return;
-    void sendInput(selectedId, text);
+    if (!text && attached.length === 0) return;
+    void sendInput(selectedId, text || "(siehe Screenshot)", attached.length ? attached : undefined);
     setDraft("");
+    setAttached([]);
+  };
+
+  const onPaste = async (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imgs: ImageInput[] = [];
+    for (const it of Array.from(items)) {
+      if (it.type.startsWith("image/")) {
+        const file = it.getAsFile();
+        if (file) imgs.push({ mediaType: file.type || "image/png", dataBase64: await blobToBase64(file) });
+      }
+    }
+    if (imgs.length) {
+      e.preventDefault();
+      setAttached((a) => [...a, ...imgs]);
+    }
   };
 
   const badges = agentBadges(agent);
@@ -64,6 +93,18 @@ export function Inspector() {
           </span>
         </div>
         <div className="inspector-actions">
+          <select
+            className="mode-select"
+            value={agent.permissionMode}
+            onChange={(e) => void setPermissionMode(selectedId, e.target.value as PermissionMode)}
+            title="Permission-Modus dieses Agenten (steuert, wann gefragt wird)"
+          >
+            <option value="default">Standard</option>
+            <option value="acceptEdits">Auto-Edits</option>
+            <option value="plan">Plan</option>
+            <option value="auto">Auto</option>
+            <option value="bypassPermissions">Bypass</option>
+          </select>
           {agent.role === "sub" && agent.worktreePath && (
             <button onClick={() => void runGate(selectedId)} title="Clean-Code-Gate: lint/type/test + Secret-Scan">
               Gate{agent.gate ? (agent.gate.ok ? " ✓" : " ✖") : ""}
@@ -120,12 +161,31 @@ export function Inspector() {
 
       <div className="terminal-wrap" ref={termRef} />
 
-      <form className="composer" onSubmit={submit}>
-        <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={`Nachricht an ${agent.label}…`} />
-        <button type="submit" disabled={!draft.trim()}>
-          Senden
-        </button>
-      </form>
+      <div className="composer-wrap">
+        {attached.length > 0 && (
+          <div className="composer-attachments">
+            {attached.map((im, i) => (
+              <div key={i} className="thumb">
+                <img src={`data:${im.mediaType};base64,${im.dataBase64}`} alt="Anhang" />
+                <button type="button" onClick={() => setAttached((a) => a.filter((_, j) => j !== i))}>
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <form className="composer" onSubmit={submit}>
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onPaste={(e) => void onPaste(e)}
+            placeholder={`Nachricht an ${agent.label}…  (Screenshot mit ⌘V einfügen)`}
+          />
+          <button type="submit" disabled={!draft.trim() && attached.length === 0}>
+            Senden
+          </button>
+        </form>
+      </div>
     </section>
   );
 }

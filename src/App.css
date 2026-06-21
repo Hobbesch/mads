@@ -776,6 +776,54 @@ button.primary:hover {
   opacity: 0.45;
   cursor: default;
 }
+.composer-wrap {
+  border-top: 1px solid var(--border);
+}
+.composer-wrap .composer {
+  border-top: none;
+}
+.composer-attachments {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px 0;
+}
+.thumb {
+  position: relative;
+}
+.thumb img {
+  height: 56px;
+  width: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  display: block;
+}
+.thumb button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--s-red);
+  color: #fff;
+  border: none;
+  font-size: 12px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.mode-select {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 550;
+  font-family: var(--font);
+}
 
 /* ---------------- Permission overlay ---------------- */
 .perm-overlay {

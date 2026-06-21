@@ -56,6 +56,9 @@ Die Recherche-Grundlagen liegen in [`docs/research/`](docs/research/).
 - **Dashboard** (macOS-HIG-Stil): Sidebar mit Streams, Agent-Karten mit Status-Ampeln,
   „braucht Input"- und Eskalations-Hervorhebung, Live-Terminal (xterm.js) pro Agent,
   Permission-Dialog, Follow-up-Composer.
+- **Pro-Agent-Steuerung:** Permission-Modus je Agent (Standard / Auto-Edits / Plan / Auto /
+  Bypass) — initial im „Neuer Stream"-Dialog und zur Laufzeit im Inspector wählbar; **Screenshots
+  per ⌘V** direkt in den Composer einfügen (werden dem Agenten als Bild gesendet).
 - **P3 — Projekt & Worktrees:** Repo per nativem Ordner-Picker öffnen; **echte Agenten,
   jeder in eigenem `git worktree` + Branch** (`~/mads-worktrees/<repo-slug>/<agentId>`),
   mehrere parallel; Cleanup beim Stop.

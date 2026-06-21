@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useStore } from "../store";
 import type { AgentRole } from "../store";
+import type { PermissionMode } from "../../shared/protocol";
 
 export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const createAgent = useStore((s) => s.createAgent);
@@ -13,13 +14,14 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const [role, setRole] = useState<AgentRole>(hasIntegrator ? "sub" : "integrator");
   const [model, setModel] = useState(role === "integrator" ? "claude-opus-4-8" : "claude-sonnet-4-6");
   const [branch, setBranch] = useState("");
+  const [mode, setMode] = useState<PermissionMode>("acceptEdits");
   const [mock, setMock] = useState(!sdkAvailable || !project);
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const l = label.trim() || (role === "integrator" ? "Main-Agent" : "Sub-Agent");
     const p = prompt.trim() || "Beschreibe deine Aufgabe…";
-    void createAgent({ label: l, prompt: p, role, mock, model, branch: branch.trim() || undefined });
+    void createAgent({ label: l, prompt: p, role, mock, model, branch: branch.trim() || undefined, permissionMode: mode });
     onClose();
   };
 
@@ -78,6 +80,17 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
             </select>
           </label>
         </div>
+
+        <label className="field">
+          <span>Permission-Modus</span>
+          <select value={mode} onChange={(e) => setMode(e.target.value as PermissionMode)}>
+            <option value="default">Standard — fragt vor Aktionen</option>
+            <option value="acceptEdits">Auto-Edits — Edits/Bash ohne Nachfrage</option>
+            <option value="plan">Plan — nur lesen/planen</option>
+            <option value="auto">Auto — möglichst wenige Rückfragen</option>
+            <option value="bypassPermissions">Bypass — alles ohne Nachfrage</option>
+          </select>
+        </label>
 
         {role === "sub" && !mock && (
           <label className="field">

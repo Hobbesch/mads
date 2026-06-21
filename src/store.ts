@@ -19,6 +19,8 @@ import type {
   GateStep,
   ResumableAgent,
   AutonomyConfig,
+  PermissionMode,
+  ImageInput,
 } from "../shared/protocol";
 import type { Collision } from "../shared/collision";
 
@@ -45,6 +47,7 @@ export interface AgentVM {
   numTurns: number;
   sessionId?: string;
   mock: boolean;
+  permissionMode: PermissionMode;
   createdAt: number;
   lastEventAt: number;
   // P3/P4:
@@ -87,10 +90,12 @@ interface MadsState {
     mock: boolean;
     model?: string;
     branch?: string;
+    permissionMode?: PermissionMode;
   }) => Promise<void>;
   selectAgent: (id: string) => void;
   answerPermission: (req: PermissionRequestMsg, decision: PermissionDecision) => Promise<void>;
-  sendInput: (id: string, text: string) => Promise<void>;
+  sendInput: (id: string, text: string, images?: ImageInput[]) => Promise<void>;
+  setPermissionMode: (id: string, mode: PermissionMode) => Promise<void>;
   interruptAgent: (id: string) => Promise<void>;
   stopAgent: (id: string, removeWorktree: boolean) => Promise<void>;
   createPr: (id: string) => Promise<void>;
@@ -295,8 +300,9 @@ export const useStore = create<MadsState>((set) => {
       await sendHost({ ...envelope(), type: "open_project", projectId: crypto.randomUUID(), repoRoot });
     },
 
-    createAgent: async ({ label, prompt, role, mock, model, branch }) => {
+    createAgent: async ({ label, prompt, role, mock, model, branch, permissionMode }) => {
       const id = crypto.randomUUID();
+      const mode: PermissionMode = permissionMode ?? "acceptEdits";
       const project = useStore.getState().project;
       const agent: AgentVM = {
         id,
@@ -306,6 +312,7 @@ export const useStore = create<MadsState>((set) => {
         costUsd: 0,
         numTurns: 0,
         mock,
+        permissionMode: mode,
         createdAt: Date.now(),
         lastEventAt: Date.now(),
         behind: 0,
@@ -328,7 +335,7 @@ export const useStore = create<MadsState>((set) => {
         role,
         model,
         mock,
-        permissionMode: "default",
+        permissionMode: mode,
         ...(useWorktree && project
           ? { repoRoot: project.repoRoot, branch: finalBranch, baseRef: `origin/${project.defaultBranch}` }
           : project && !mock
@@ -345,10 +352,17 @@ export const useStore = create<MadsState>((set) => {
       await sendHost({ ...envelope(), type: "answer_permission", agentId: req.agentId, requestId: req.requestId, decision });
     },
 
-    sendInput: async (id, text) => {
-      writeLine(id, `${C.dim}› ${text}${C.reset}`);
+    sendInput: async (id, text, images) => {
+      const tag = images && images.length ? ` ${C.dim}[+${images.length} Bild]${C.reset}` : "";
+      writeLine(id, `${C.dim}› ${text}${C.reset}${tag}`);
       patchAgent(id, { status: "running" });
-      await sendHost({ ...envelope(), type: "send_input", agentId: id, text });
+      await sendHost({ ...envelope(), type: "send_input", agentId: id, text, images });
+    },
+
+    setPermissionMode: async (id, mode) => {
+      patchAgent(id, { permissionMode: mode });
+      writeLine(id, `${C.dim}⚙ Permission-Modus: ${mode}${C.reset}`);
+      await sendHost({ ...envelope(), type: "set_permission_mode", agentId: id, mode });
     },
 
     interruptAgent: async (id) => {
@@ -401,6 +415,7 @@ export const useStore = create<MadsState>((set) => {
         numTurns: 0,
         sessionId: r.sessionId,
         mock: false,
+        permissionMode: "acceptEdits",
         createdAt: Date.now(),
         lastEventAt: Date.now(),
         branch: r.branch,
@@ -425,7 +440,7 @@ export const useStore = create<MadsState>((set) => {
         role: r.role,
         model: r.model,
         mock: false,
-        permissionMode: "default",
+        permissionMode: "acceptEdits",
         resumeSessionId: r.sessionId,
         resumeWorktreePath: r.worktreePath,
         repoRoot: project?.repoRoot,

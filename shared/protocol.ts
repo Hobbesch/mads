@@ -24,6 +24,14 @@ export type AgentStatus =
   | "done"
   | "queued";
 
+export type PermissionMode = "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk";
+
+/** Bild-Eingabe (z.B. eingefügter Screenshot) für einen Agenten. */
+export interface ImageInput {
+  mediaType: string; // z.B. "image/png"
+  dataBase64: string;
+}
+
 export interface BaseMsg {
   v: typeof PROTOCOL_VERSION;
   id: string;
@@ -79,7 +87,7 @@ export interface StartAgentMsg extends BaseMsg {
   branch?: string; // P3: feat/<task> für den Worktree
   baseRef?: string; // P3: i.d.R. "origin/<defaultBranch>"
   model?: string;
-  permissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions" | "dontAsk";
+  permissionMode?: PermissionMode;
   allowedTools?: string[];
   disallowedTools?: string[];
   resumeSessionId?: string;
@@ -137,6 +145,7 @@ export interface SendInputMsg extends BaseMsg {
   type: "send_input";
   agentId: string;
   text: string;
+  images?: ImageInput[];
 }
 
 export type PermissionDecision =
@@ -159,7 +168,7 @@ export interface InterruptAgentMsg extends BaseMsg {
 export interface SetPermissionModeMsg extends BaseMsg {
   type: "set_permission_mode";
   agentId: string;
-  mode: "default" | "acceptEdits" | "plan" | "bypassPermissions" | "dontAsk";
+  mode: PermissionMode;
 }
 
 export interface StopAgentMsg extends BaseMsg {

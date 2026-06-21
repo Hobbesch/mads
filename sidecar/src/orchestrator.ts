@@ -71,7 +71,7 @@ export class Orchestrator {
       }
 
       case "send_input":
-        this.pool.get(msg.agentId)?.sendInput(msg.text);
+        this.pool.get(msg.agentId)?.sendInput(msg.text, msg.images);
         break;
 
       case "answer_permission":
