@@ -84,10 +84,10 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
         <label className="field">
           <span>Permission-Modus</span>
           <select value={mode} onChange={(e) => setMode(e.target.value as PermissionMode)}>
-            <option value="default">Standard — fragt vor Aktionen</option>
-            <option value="acceptEdits">Auto-Edits — Edits/Bash ohne Nachfrage</option>
+            <option value="default">Standard — fragt vor jeder Aktion</option>
+            <option value="acceptEdits">Auto-Edits — Datei-Edits ohne Nachfrage</option>
             <option value="plan">Plan — nur lesen/planen</option>
-            <option value="auto">Auto — möglichst wenige Rückfragen</option>
+            <option value="auto">Auto — liest & ändert selbst, fragt nur bei Push/PR/Löschen/Netz</option>
             <option value="bypassPermissions">Bypass — alles ohne Nachfrage</option>
           </select>
         </label>

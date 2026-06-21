@@ -105,11 +105,11 @@ export function Inspector() {
             onChange={(e) => void setPermissionMode(selectedId, e.target.value as PermissionMode)}
             title="Permission-Modus dieses Agenten (steuert, wann gefragt wird)"
           >
-            <option value="default">Standard</option>
+            <option value="default">Standard — fragt immer</option>
             <option value="acceptEdits">Auto-Edits</option>
             <option value="plan">Plan</option>
-            <option value="auto">Auto</option>
-            <option value="bypassPermissions">Bypass</option>
+            <option value="auto">Auto — nur Risiko fragen</option>
+            <option value="bypassPermissions">Bypass — nie fragen</option>
           </select>
           {agent.role === "sub" && agent.worktreePath && (
             <button onClick={() => void runGate(selectedId)} title="Clean-Code-Gate: lint/type/test + Secret-Scan">

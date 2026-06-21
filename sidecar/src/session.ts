@@ -13,6 +13,7 @@
 import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
 import { createWorktree, removeWorktree } from "./git.js";
+import { classifyToolCall } from "../../shared/safe-command.js";
 import type {
   StartAgentMsg,
   PermissionDecision,
@@ -88,6 +89,9 @@ export class AgentSession {
   model?: string;
   lastPrompt?: string;
   mock = false;
+  // Aktueller Permission-Modus + Arbeitsverzeichnis — für die mads-Auto-Freigabe.
+  private permissionMode?: string;
+  private cwd?: string;
 
   private readonly inbox = new AsyncQueue<SdkUserMessage>();
   private readonly pending = new Map<string, PendingPermission>();
@@ -108,6 +112,7 @@ export class AgentSession {
     this.role = msg.role;
     this.model = msg.model;
     this.lastPrompt = msg.prompt;
+    this.permissionMode = msg.permissionMode;
     this.inbox.push(userMsg(msg.prompt));
     this.setStatus("running", "starting up");
 
@@ -133,6 +138,8 @@ export class AgentSession {
       this.emit({ ...envelope(), type: "worktree_created", agentId: this.agentId, path: wt.path, branch: msg.branch, baseRef });
     }
 
+    this.cwd = cwd;
+
     try {
       const sdk = (await import("@anthropic-ai/claude-agent-sdk")) as {
         query: (args: { prompt: AsyncIterable<SdkUserMessage>; options: Record<string, unknown> }) => QueryHandle;
@@ -143,7 +150,9 @@ export class AgentSession {
         options: {
           cwd,
           model: msg.model,
-          permissionMode: msg.permissionMode ?? "default",
+          // "auto" wird mads-seitig behandelt (Auto-Freigabe im canUseTool); dem SDK
+          // geben wir "default", damit jeder nicht-lesende Aufruf über canUseTool läuft.
+          permissionMode: msg.permissionMode === "auto" ? "default" : (msg.permissionMode ?? "default"),
           includePartialMessages: false,
           allowedTools: msg.allowedTools,
           disallowedTools: msg.disallowedTools,
@@ -186,6 +195,24 @@ export class AgentSession {
     input: Record<string, unknown>,
     opts: Record<string, unknown>,
   ): Promise<PermissionResult> {
+    // Auto-Modus: harmlose (lesende + datei-ändernde) Aktionen ohne Rückfrage erlauben;
+    // außen-sichtbare/destruktive Aktionen kommen mit klarem Grund zur Bestätigung.
+    if (this.permissionMode === "auto" && toolName !== "AskUserQuestion") {
+      const verdict = classifyToolCall(toolName, input, { cwd: this.cwd });
+      if (verdict.decision === "allow") {
+        return Promise.resolve({ behavior: "allow" });
+      }
+      return this.promptPermission(toolName, input, opts, verdict.reason);
+    }
+    return this.promptPermission(toolName, input, opts);
+  }
+
+  private promptPermission(
+    toolName: string,
+    input: Record<string, unknown>,
+    opts: Record<string, unknown>,
+    smartReason?: string,
+  ): Promise<PermissionResult> {
     return new Promise<PermissionResult>((resolve) => {
       const requestId = randomUUID();
       this.pending.set(requestId, { resolve, suggestions: opts.suggestions as unknown[] | undefined });
@@ -200,7 +227,7 @@ export class AgentSession {
         kind: isAsk ? "ask_user_question" : "tool",
         questions: isAsk ? (input as { questions?: unknown }).questions : undefined,
         blockedPath: opts.blockedPath as string | undefined,
-        decisionReason: opts.decisionReason as string | undefined,
+        decisionReason: smartReason ?? (opts.decisionReason as string | undefined),
         suggestions: opts.suggestions as unknown[] | undefined,
       });
       this.setStatus("waiting_input", `permission: ${toolName}`);
@@ -245,7 +272,9 @@ export class AgentSession {
   }
 
   async setMode(mode: string): Promise<void> {
-    await this.q?.setPermissionMode?.(mode);
+    this.permissionMode = mode;
+    // "auto" handhabt mads selbst → dem SDK "default" geben (siehe start()).
+    await this.q?.setPermissionMode?.(mode === "auto" ? "default" : mode);
   }
 
   async stop(removeWt = false): Promise<void> {
