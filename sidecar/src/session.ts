@@ -74,6 +74,10 @@ export class AgentSession {
   sessionId?: string;
   costUsd = 0;
   numTurns = 0;
+  // Token-Verbrauch (kumuliert über alle Assistant-Messages) — die für Abo-Nutzer
+  // sinnvolle Metrik (der $-Wert des SDK ist auf der Subscription nicht aussagekräftig).
+  inputTokens = 0;
+  outputTokens = 0;
   // P3: gesetzt, sobald ein Worktree für diesen Agenten existiert.
   repoRoot?: string;
   branch?: string;
@@ -282,6 +286,14 @@ export class AgentSession {
                 this.setStatus("running", String(block.name));
               }
             }
+            // Token-Verbrauch dieser Assistant-Antwort kumulieren und live melden —
+            // so steigt die Token-Anzeige im UI sichtbar während des Laufs.
+            const usage = (m.message as { usage?: Record<string, number> })?.usage;
+            if (usage) {
+              this.inputTokens += Number(usage.input_tokens ?? 0);
+              this.outputTokens += Number(usage.output_tokens ?? 0);
+              this.emitCost();
+            }
             break;
           }
           case "user": {
@@ -389,6 +401,12 @@ export class AgentSession {
   // ----------------------------- Helpers ------------------------------------
   private emitText(text: string): void {
     this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "assistant_text", text } });
+    if (this.mock) {
+      // grobe Schätzung, damit die Token-Anzeige im Mock sichtbar mitläuft
+      this.inputTokens += 1200 + Math.round(text.length / 4);
+      this.outputTokens += Math.round(text.length / 4);
+      this.emitCost();
+    }
   }
   private emitToolUse(name: string, input: Record<string, unknown>): void {
     const toolUseId = randomUUID();
@@ -396,7 +414,15 @@ export class AgentSession {
     this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_result", toolUseId, ok: true, output: "(mock) ok" } });
   }
   private emitCost(): void {
-    this.emit({ ...envelope(), type: "cost_update", agentId: this.agentId, totalCostUsd: this.costUsd, numTurns: this.numTurns });
+    this.emit({
+      ...envelope(),
+      type: "cost_update",
+      agentId: this.agentId,
+      totalCostUsd: this.costUsd,
+      numTurns: this.numTurns,
+      inputTokens: this.inputTokens,
+      outputTokens: this.outputTokens,
+    });
   }
   private setStatus(status: AgentStatus, currentStep?: string): void {
     this.status = status;

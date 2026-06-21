@@ -63,6 +63,8 @@ export interface AgentVM {
   currentStep?: string;
   costUsd: number;
   numTurns: number;
+  inputTokens: number;
+  outputTokens: number;
   sessionId?: string;
   mock: boolean;
   permissionMode: PermissionMode;
@@ -226,7 +228,12 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "cost_update":
-        patchAgent(msg.agentId, { costUsd: msg.totalCostUsd, numTurns: msg.numTurns });
+        patchAgent(msg.agentId, {
+          costUsd: msg.totalCostUsd,
+          numTurns: msg.numTurns,
+          ...(msg.inputTokens !== undefined ? { inputTokens: msg.inputTokens } : {}),
+          ...(msg.outputTokens !== undefined ? { outputTokens: msg.outputTokens } : {}),
+        });
         break;
 
       case "worktree_created":
@@ -417,6 +424,8 @@ export const useStore = create<MadsState>((set) => {
         status: "starting",
         costUsd: 0,
         numTurns: 0,
+        inputTokens: 0,
+        outputTokens: 0,
         mock,
         permissionMode: mode,
         createdAt: Date.now(),
@@ -519,6 +528,8 @@ export const useStore = create<MadsState>((set) => {
         status: "starting",
         costUsd: 0,
         numTurns: 0,
+        inputTokens: 0,
+        outputTokens: 0,
         sessionId: r.sessionId,
         mock: false,
         permissionMode: "acceptEdits",

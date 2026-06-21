@@ -6,6 +6,7 @@ import { StatusDot } from "./StatusDot";
 import { agentBadges, mergeReadiness } from "../derive";
 import { MessageTimeline } from "./MessageTimeline";
 import { Elapsed } from "./Elapsed";
+import { fmtTokens } from "../format";
 import type { PermissionMode, ImageInput } from "../../shared/protocol";
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -83,8 +84,18 @@ export function Inspector() {
                 {" · "}
                 <Elapsed since={agent.workStartedAt} />
               </>
-            )}{" "}
-            · {agent.numTurns} turns · ${agent.costUsd.toFixed(4)}
+            )}{" · "}
+            {agent.numTurns} turns
+            <span
+              className="inspector-tokens"
+              title={
+                agent.costUsd > 0
+                  ? `↑ ${agent.inputTokens.toLocaleString()} Input · ↓ ${agent.outputTokens.toLocaleString()} Output Tokens · ≈ $${agent.costUsd.toFixed(4)} (API-Schätzung; bei Abo nicht abgerechnet)`
+                  : `↑ ${agent.inputTokens.toLocaleString()} Input · ↓ ${agent.outputTokens.toLocaleString()} Output Tokens · Abo-Nutzung (keine API-Kosten)`
+              }
+            >
+              {" · "}↑ {fmtTokens(agent.inputTokens)} ↓ {fmtTokens(agent.outputTokens)} tok
+            </span>
           </span>
         </div>
         <div className="inspector-actions">

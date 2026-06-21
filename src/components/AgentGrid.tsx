@@ -2,6 +2,7 @@ import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { Elapsed } from "./Elapsed";
+import { fmtTokens } from "../format";
 import { agentBadges, hasGitEscalation } from "../derive";
 import type { AgentVM } from "../store";
 
@@ -46,8 +47,15 @@ function AgentCard({ agent }: { agent: AgentVM }) {
             </>
           )}
         </span>
-        <span className="card-cost">
-          {agent.numTurns} turns · ${agent.costUsd.toFixed(4)}
+        <span
+          className="card-cost"
+          title={
+            agent.costUsd > 0
+              ? `≈ $${agent.costUsd.toFixed(4)} (API-Schätzung; bei Abo nicht abgerechnet)`
+              : "Abo-Nutzung (Claude Code) — keine API-Kosten"
+          }
+        >
+          {agent.numTurns} turns · {fmtTokens(agent.inputTokens + agent.outputTokens)} tok
         </span>
       </div>
       {needsInput && <div className="card-flag yellow">● braucht Input{pending ? ` (${pending})` : ""}</div>}
