@@ -249,10 +249,13 @@ export class AgentSession {
         updatedPermissions: decision.remember ? suggestions : undefined,
       });
     } else if (decision.behavior === "answer_questions") {
-      resolve({
-        behavior: "allow",
-        updatedInput: { answers: decision.answers, response: decision.response },
-      });
+      // AskUserQuestion lässt sich headless nicht „ausführen" (allow → SDK startet das
+      // interaktive Tool → Harness-Fehler). Die Auswahl daher als Ergebnis zurückgeben:
+      // deny mit der Antwort als Nachricht, sodass das Modell mit der Wahl weiterarbeitet.
+      const lines = Object.entries(decision.answers ?? {}).map(([q, a]) => `• ${q} → ${a}`);
+      if (decision.response && decision.response.trim()) lines.push(`• Ergänzung: ${decision.response.trim()}`);
+      const message = `Antwort des Nutzers:\n${lines.join("\n") || "(keine Auswahl)"}\n\nFahre mit dieser Wahl fort und rufe AskUserQuestion dafür nicht erneut auf.`;
+      resolve({ behavior: "deny", message });
     } else {
       resolve({ behavior: "deny", message: decision.message, interrupt: decision.interrupt });
     }
