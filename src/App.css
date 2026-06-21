@@ -1384,6 +1384,80 @@ button.primary:hover {
   color: var(--text-faint);
 }
 
+/* ---------------- Zuletzt geöffnete Projekte ---------------- */
+.recent-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+.recent-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  padding: 2px 2px 1px;
+}
+.recent-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.recent-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 6px;
+  cursor: pointer;
+  text-align: left;
+}
+.recent-open:hover {
+  background: rgba(120, 120, 128, 0.12);
+}
+.recent-open:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.recent-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-path {
+  font-size: 10px;
+  color: var(--text-faint);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+}
+.recent-forget {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 5px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.recent-forget:hover {
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--text);
+}
+
 /* ---------------- Badges (git/PR) ---------------- */
 .card-branch {
   font-family: var(--mono);

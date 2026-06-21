@@ -25,6 +25,11 @@ export function Sidebar({ onNewStream, onAbout }: { onNewStream: () => void; onA
   const project = useStore((s) => s.project);
   const projectStatus = useStore((s) => s.projectStatus);
   const openProject = useStore((s) => s.openProject);
+  const recentProjects = useStore((s) => s.recentProjects);
+  const openRecentProject = useStore((s) => s.openRecentProject);
+  const forgetRecentProject = useStore((s) => s.forgetRecentProject);
+
+  const recent = recentProjects.filter((r) => r.repoRoot !== project?.repoRoot);
 
   const list = order.map((id) => agents[id]).filter(Boolean);
   const integrators = list.filter((a) => a.role === "integrator");
@@ -67,6 +72,32 @@ export function Sidebar({ onNewStream, onAbout }: { onNewStream: () => void; onA
         </div>
         {project && <div className="project-branch">default: {project.defaultBranch}</div>}
       </div>
+
+      {recent.length > 0 && (
+        <div className="recent-box">
+          <div className="recent-title">Zuletzt geöffnet</div>
+          {recent.map((r) => (
+            <div key={r.repoRoot} className="recent-item">
+              <button
+                className="recent-open"
+                title={r.repoRoot}
+                disabled={projectStatus === "opening"}
+                onClick={() => void openRecentProject(r.repoRoot)}
+              >
+                <span className="recent-name">{r.owner && r.repo ? `${r.owner}/${r.repo}` : r.repoRoot.split("/").pop()}</span>
+                <span className="recent-path">{r.repoRoot}</span>
+              </button>
+              <button
+                className="recent-forget"
+                title="Aus Liste entfernen"
+                onClick={() => forgetRecentProject(r.repoRoot)}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <button className="new-stream" onClick={onNewStream}>
         + Neuer Stream

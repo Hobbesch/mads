@@ -25,6 +25,7 @@ import type {
   ImageInput,
 } from "../shared/protocol";
 import type { Collision } from "../shared/collision";
+import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
 
 export type AgentRole = "integrator" | "sub";
 
@@ -86,6 +87,7 @@ interface MadsState {
   sidecar: SidecarInfo;
   project?: ProjectInfo;
   projectStatus: "none" | "opening" | "ready" | "error";
+  recentProjects: RecentProject[];
   agents: Record<string, AgentVM>;
   order: string[];
   events: Record<string, TimelineEvent[]>;
@@ -100,6 +102,8 @@ interface MadsState {
   init: () => Promise<void>;
   setAutonomy: (config: AutonomyConfig) => Promise<void>;
   openProject: () => Promise<void>;
+  openRecentProject: (repoRoot: string) => Promise<void>;
+  forgetRecentProject: (repoRoot: string) => void;
   createAgent: (opts: {
     label: string;
     prompt: string;
@@ -185,12 +189,23 @@ export const useStore = create<MadsState>((set) => {
 
   function handleSidecarMessage(msg: SidecarMessage) {
     switch (msg.type) {
-      case "sidecar_ready":
+      case "sidecar_ready": {
         set({ sidecar: { status: "ready", sdkAvailable: msg.sdkAvailable, sdkVersion: msg.sdkVersion } });
+        // Beim Start das zuletzt geöffnete Projekt automatisch wiederöffnen, damit man
+        // nach App-Neustart/Release nicht jedes Mal neu suchen muss.
+        const st = useStore.getState();
+        if (!st.project && st.projectStatus === "none" && st.recentProjects.length > 0) {
+          void st.openRecentProject(st.recentProjects[0].repoRoot);
+        }
         break;
+      }
 
       case "project_resolved":
-        set({ project: msg.project, projectStatus: "ready" });
+        set((s) => ({
+          project: msg.project,
+          projectStatus: "ready",
+          recentProjects: rememberProject(s.recentProjects, msg.project, Date.now()),
+        }));
         break;
 
       case "status_update":
@@ -300,6 +315,10 @@ export const useStore = create<MadsState>((set) => {
         if (msg.agentId) {
           patchAgent(msg.agentId, { status: msg.recoverable ? "escalation" : "error" });
           notice(msg.agentId, "err", `✖ ${msg.code}: ${msg.message}`);
+        } else if (useStore.getState().projectStatus === "opening") {
+          // Projekt-Öffnung fehlgeschlagen (z.B. zuletzt geöffneter Ordner existiert nicht
+          // mehr) — Status zurücksetzen, sonst hängt die UI auf "öffne…".
+          set({ projectStatus: "error" });
         }
         set((s) => ({
           escalations: [...s.escalations.filter((e) => !(e.agentId === msg.agentId && e.code === msg.code)), msg],
@@ -329,6 +348,7 @@ export const useStore = create<MadsState>((set) => {
     sidecar: { status: "down", sdkAvailable: false },
     project: undefined,
     projectStatus: "none",
+    recentProjects: loadRecentProjects(),
     agents: {},
     order: [],
     events: {},
@@ -362,6 +382,15 @@ export const useStore = create<MadsState>((set) => {
       if (!repoRoot) return;
       set({ projectStatus: "opening" });
       await sendHost({ ...envelope(), type: "open_project", projectId: crypto.randomUUID(), repoRoot });
+    },
+
+    openRecentProject: async (repoRoot) => {
+      set({ projectStatus: "opening" });
+      await sendHost({ ...envelope(), type: "open_project", projectId: crypto.randomUUID(), repoRoot });
+    },
+
+    forgetRecentProject: (repoRoot) => {
+      set((s) => ({ recentProjects: forgetProject(s.recentProjects, repoRoot) }));
     },
 
     createAgent: async ({ label, prompt, role, mock, model, branch, permissionMode }) => {
