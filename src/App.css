@@ -1241,6 +1241,12 @@ button.primary:hover {
   line-height: 1.6;
   color: var(--text);
 }
+/* Chat-Markdown-Wrapper aus MarkdownView (className="md-inner"): kein eigenes Box-Modell,
+   damit die Inhalte direkte Layout-Kinder von .md sind (first/last-child-Reset greift) und
+   die kompakten .md-Regeln statt github-markdown-css gelten. */
+.md-inner {
+  display: contents;
+}
 .md > :first-child {
   margin-top: 0;
 }
@@ -1357,8 +1363,12 @@ button.primary:hover {
   cursor: default;
 }
 /* Kombinierter Senden(↑)/Stop(■)-Button im VS-Code-Stil */
-.composer-btn {
+/* Spezifität .composer button.composer-btn (0,2,1) MUSS die generische
+   `.composer button { padding: 8px 16px }` (0,1,1) schlagen — sonst bekommt der
+   Icon-Button 16px Seitenpadding, wird breit/„länglich" und das Icon wirkt winzig. */
+.composer button.composer-btn {
   width: 38px;
+  height: 38px;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -1368,8 +1378,10 @@ button.primary:hover {
   line-height: 1;
   flex-shrink: 0;
 }
-.icon-stop {
+.composer .icon-stop {
   display: block;
+  width: 16px;
+  height: 16px;
 }
 .composer-wrap {
   border-top: 1px solid var(--border);

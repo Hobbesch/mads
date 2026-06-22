@@ -14,7 +14,7 @@ const NO_EVENTS: TimelineEvent[] = [];
 function Md({ text }: { text: string }) {
   return (
     <div className="md">
-      <MarkdownView source={text} onLink={openExternalLink} />
+      <MarkdownView source={text} onLink={openExternalLink} className="md-inner" />
     </div>
   );
 }

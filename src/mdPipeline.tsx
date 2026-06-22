@@ -99,6 +99,9 @@ export const mdRehypePlugins: PluggableList = [[rehypeSanitize, mdSchema]];
 
 export interface MarkdownViewProps {
   source: string;
+  /** Wrapper-Klasse. Default `markdown-body` (voller github-markdown-css-Look, Editor-Preview).
+   *  Der Chat übergibt `md-inner` → KEIN github-Chrome, die kompakten `.md`-Regeln greifen. */
+  className?: string;
   /** Klick auf externen Link (http/https/mailto). */
   onLink?(href: string): void;
   /** Klick auf `[[wikilink]]` → name (ohne `.md`). */
@@ -110,9 +113,9 @@ export interface MarkdownViewProps {
  * (global importiert in `main.tsx`). Links werden NICHT direkt geöffnet — der Aufrufer
  * entscheidet (Bestätigung bei non-https, §5.4), Wikilinks routen in-App.
  */
-export function MarkdownView({ source, onLink, onWikiLink }: MarkdownViewProps) {
+export function MarkdownView({ source, className = "markdown-body", onLink, onWikiLink }: MarkdownViewProps) {
   return (
-    <div className="markdown-body">
+    <div className={className}>
       <ReactMarkdown
         remarkPlugins={mdRemarkPlugins}
         rehypePlugins={mdRehypePlugins}
