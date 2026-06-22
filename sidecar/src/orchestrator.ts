@@ -234,14 +234,19 @@ export class Orchestrator {
     if (pr) this.emit({ ...envelope(), type: "pr_update", agentId, pr: { ...pr, state: "MERGED" } });
     this.emit({ ...envelope(), type: "status_update", agentId, status: "done", currentStep: "merged" });
 
-    // Worktree aufräumen (gh --delete-branch entfernt das Remote; lokal hier).
+    // Aufräumen (best effort — blockiert das erfolgreiche Merge-Ergebnis NICHT):
+    // Worktree zuerst entfernen (gibt den ausgecheckten Branch frei + löscht den lokalen
+    // Branch), danach den Remote-Branch löschen.
     if (s.worktreePath) {
       try {
         await removeWorktree(s.repoRoot, s.worktreePath, s.branch);
       } catch (e) {
         log(`[orchestrator] worktree cleanup after merge failed: ${String(e)}`);
       }
+    } else {
+      await run("git", ["-C", s.repoRoot, "branch", "-D", s.branch], s.repoRoot);
     }
+    await run("git", ["-C", s.repoRoot, "push", "origin", "--delete", s.branch], s.repoRoot);
     s.status = "done";
     await s.stop(false); // Query schließen; Karte bleibt als "merged" sichtbar
     this.persist(); // gemergten Agenten aus der Resume-Registry entfernen

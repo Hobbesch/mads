@@ -187,7 +187,10 @@ export async function mergePr(
   method: "squash" | "merge" | "rebase" = "squash",
 ): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
   const flag = method === "merge" ? "--merge" : method === "rebase" ? "--rebase" : "--squash";
-  const r = await gh(["pr", "merge", branch, flag, "--delete-branch"], repoRoot);
+  // KEIN --delete-branch: der lokale Branch ist im Worktree ausgecheckt → gh würde beim
+  // Löschen scheitern und den (bereits erfolgten) Merge fälschlich als Fehler melden.
+  // Worktree + lokalen + Remote-Branch räumt der Orchestrator danach auf (Worktree zuerst).
+  const r = await gh(["pr", "merge", branch, flag], repoRoot);
   if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout).trim() };
   return { ok: true, output: r.stdout.trim() };
 }
