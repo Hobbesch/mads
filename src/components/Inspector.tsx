@@ -78,6 +78,7 @@ export function Inspector() {
     if (step.kind === "commit") void commitAgent(selectedId);
     else if (step.kind === "pr") void createPr(selectedId);
     else if (step.kind === "integrate") void integratePr(selectedId);
+    else if (step.kind === "cleanup") void stopAgent(selectedId, true);
   };
 
   return (
@@ -123,7 +124,12 @@ export function Inspector() {
           </select>
           {/* Geführter „nächster Schritt": Committen → PR erstellen → Integrieren */}
           {step.kind !== "none" && (
-            <button className="step-primary" disabled={step.disabled} title={step.hint} onClick={runStep}>
+            <button
+              className={`step-primary${step.kind === "cleanup" ? " cleanup" : ""}`}
+              disabled={step.disabled}
+              title={step.hint}
+              onClick={runStep}
+            >
               {step.label}
             </button>
           )}

@@ -286,6 +286,17 @@ button {
   color: var(--text-faint);
   padding: 8px 8px 4px;
 }
+button.group-title.done-toggle {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+button.group-title.done-toggle:hover {
+  color: var(--text-dim);
+}
 .group-empty {
   font-size: 12px;
   color: var(--text-faint);
@@ -843,6 +854,9 @@ button.primary:hover {
   color: #fff;
   border-color: transparent;
   font-weight: 650;
+}
+.inspector-actions .step-primary.cleanup {
+  background: var(--s-teal, #2bb3a3);
 }
 .inspector-actions .step-primary:hover:not(:disabled) {
   filter: brightness(1.08);

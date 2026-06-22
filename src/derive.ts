@@ -43,7 +43,7 @@ export function mergeReadiness(a: AgentVM): MergeGate {
   return preMergeGate(a.pr, a.behind);
 }
 
-export type NextStepKind = "commit" | "pr" | "integrate" | "none";
+export type NextStepKind = "commit" | "pr" | "integrate" | "cleanup" | "none";
 export interface NextStep {
   kind: NextStepKind;
   label: string;
@@ -60,7 +60,8 @@ export interface NextStep {
 export function nextStep(a: AgentVM): NextStep {
   const none: NextStep = { kind: "none", label: "", disabled: true, hint: "" };
   if (a.role !== "sub") return none; // Integrator merged nur via „Integrieren" der Subs
-  if (a.pr?.state === "MERGED") return none; // fertig
+  if (a.pr?.state === "MERGED")
+    return { kind: "cleanup", label: "Aufräumen ✓", disabled: false, hint: "Stream beenden, Worktree/Branch entfernen (Arbeit ist bereits in main)" };
   if (a.dirty) return { kind: "commit", label: "Committen", disabled: false, hint: "Der Agent committet seine Arbeit (Projektkonvention)" };
   if (a.pr && a.pr.state === "OPEN") {
     const r = mergeReadiness(a);

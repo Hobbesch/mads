@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
@@ -33,7 +34,9 @@ export function Sidebar({ onNewStream, onAbout }: { onNewStream: () => void; onA
 
   const list = order.map((id) => agents[id]).filter(Boolean);
   const integrators = list.filter((a) => a.role === "integrator");
-  const subs = list.filter((a) => a.role === "sub");
+  const subs = list.filter((a) => a.role === "sub" && a.pr?.state !== "MERGED");
+  const doneSubs = list.filter((a) => a.role === "sub" && a.pr?.state === "MERGED");
+  const [showDone, setShowDone] = useState(false);
 
   const sidecarLabel =
     sidecar.status === "ready"
@@ -114,11 +117,20 @@ export function Sidebar({ onNewStream, onAbout }: { onNewStream: () => void; onA
 
       <div className="stream-group">
         <div className="group-title">Sub-Agents · {subs.length}</div>
-        {subs.length === 0 && <div className="group-empty">Noch keine Sub-Streams.</div>}
+        {subs.length === 0 && <div className="group-empty">Noch keine aktiven Sub-Streams.</div>}
         {subs.map((a) => (
           <StreamItem key={a.id} agent={a} />
         ))}
       </div>
+
+      {doneSubs.length > 0 && (
+        <div className="stream-group">
+          <button className="group-title done-toggle" onClick={() => setShowDone((v) => !v)} title="Gemergte Streams ein-/ausblenden">
+            {showDone ? "▾" : "▸"} Erledigt · {doneSubs.length}
+          </button>
+          {showDone && doneSubs.map((a) => <StreamItem key={a.id} agent={a} />)}
+        </div>
+      )}
 
       <div className="sidebar-foot">
         {permissions.length > 0 && <div className="foot-badge yellow">{permissions.length} Rückfrage(n)</div>}

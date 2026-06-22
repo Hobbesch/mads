@@ -67,7 +67,8 @@ export function AgentGrid() {
   const agents = useStore((s) => s.agents);
   const order = useStore((s) => s.order);
   const project = useStore((s) => s.project);
-  const list = order.map((id) => agents[id]).filter(Boolean);
+  // Gemergte Sub-Streams sind „erledigt" → nicht im aktiven Grid (in der Sidebar unter „Erledigt").
+  const list = order.map((id) => agents[id]).filter(Boolean).filter((a) => a.pr?.state !== "MERGED");
 
   if (list.length === 0) {
     return (
