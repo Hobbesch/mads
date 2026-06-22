@@ -6,13 +6,12 @@
  * §2.3) — Chat-Markdown und Editor-Preview rendern identisch und gleich sicher.
  *
  * Sicherheit (§5.2): kein `rehype-raw` (kein roher HTML-Durchlass); `rehype-sanitize`
- * als LETZTES rehype-Plugin (nach starry-night) strippt Scripts/`onerror`/`javascript:`.
+ * als LETZTES (und derzeit einziges) rehype-Plugin strippt Scripts/`onerror`/`javascript:`.
  * `react-markdown` ist per Default XSS-sicher (kein dangerouslySetInnerHTML).
  *
  * Reine UI: KEIN FS, KEIN Prozess. Externe Links/Wikilinks werden vom Aufrufer
  * (Callbacks) behandelt — diese Datei entscheidet nur über das Markup.
  */
-import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -86,29 +85,17 @@ export const mdSchema = {
 export const mdRemarkPlugins: PluggableList = [remarkGfm, remarkWikilink];
 
 /**
- * Hook: lazy lädt `rehype-starry-night` (600+ Grammatiken, §6) und liefert die
- * rehype-Plugin-Liste. Vor dem Laden ohne Highlight (nur sanitize) — der Codeblock
- * erscheint sofort, wird beim Nachladen einmal re-gehighlightet. So belastet die
- * schwere Grammatik-Last den Default-View nicht.
+ * Synchrone rehype-Plugin-Liste. WICHTIG: `react-markdown` rendert synchron
+ * (`processSync`) und unterstützt KEINE async Plugins. `rehype-starry-night` ist async
+ * → führte zu „`runSync` finished async. Use `run` instead" und damit zum Render-Crash
+ * (ErrorBoundary), sobald Chat-/Editor-Markdown rendert. Daher hier NUR `rehype-sanitize`
+ * (sync, MUSS letztes rehype-Plugin bleiben, §5.2). Codeblöcke rendern (vorerst) ohne
+ * Token-Farben über github-markdown-css.
+ * TODO(Post-MVP, doc 08 §6): Syntax-Highlighting wieder anbinden — entweder async rendern
+ * (`unified().process()` im Effect → sanitisiertes HTML) oder ein SYNCHRONER Highlighter
+ * (z. B. `rehype-highlight`) statt des async `rehype-starry-night`.
  */
-export function useRehypePlugins(): PluggableList {
-  const [starryNight, setStarryNight] = useState<unknown | null>(null);
-  useEffect(() => {
-    let alive = true;
-    void import("rehype-starry-night").then((m) => {
-      if (alive) setStarryNight(() => m.default);
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
-  return useMemo<PluggableList>(() => {
-    // sanitize MUSS das letzte rehype-Plugin sein (§5.2).
-    return starryNight
-      ? [[starryNight as never, { allowMissingScopes: true }], [rehypeSanitize, mdSchema]]
-      : [[rehypeSanitize, mdSchema]];
-  }, [starryNight]);
-}
+export const mdRehypePlugins: PluggableList = [[rehypeSanitize, mdSchema]];
 
 export interface MarkdownViewProps {
   source: string;
@@ -124,12 +111,11 @@ export interface MarkdownViewProps {
  * entscheidet (Bestätigung bei non-https, §5.4), Wikilinks routen in-App.
  */
 export function MarkdownView({ source, onLink, onWikiLink }: MarkdownViewProps) {
-  const rehypePlugins = useRehypePlugins();
   return (
     <div className="markdown-body">
       <ReactMarkdown
         remarkPlugins={mdRemarkPlugins}
-        rehypePlugins={rehypePlugins}
+        rehypePlugins={mdRehypePlugins}
         components={{
           a: ({ href, children, ...props }) => {
             const wikiName = (props as Record<string, unknown>)["data-wikilink"] as
