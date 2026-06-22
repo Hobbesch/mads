@@ -191,7 +191,11 @@ export class AgentSession {
               "Kommuniziere mit dem Menschen standardmäßig auf DEUTSCH — alle Erklärungen, " +
               "Zusammenfassungen und besonders AskUserQuestion-Fragen samt Optionen (Label + " +
               "Beschreibung) auf Deutsch. Code, Bezeichner, Commit-Messages und PR-Titel nach " +
-              "Projektkonvention (CLAUDE.md), aber die Konversation mit dem Nutzer auf Deutsch.",
+              "Projektkonvention (CLAUDE.md), aber die Konversation mit dem Nutzer auf Deutsch.\n" +
+              "git-Disziplin: Committen ist erlaubt. Führe aber KEINE git-Außen-Operationen selbst " +
+              "aus — kein git push, kein rebase auf origin/main, kein `gh pr`/`gh merge`. Diese " +
+              "Schritte (Sync, PR erstellen, Integrieren/Merge, Branch-Cleanup) übernimmt mads über " +
+              "die UI-Buttons; manuelle Pushes/Rebases würden den Branch divergieren lassen.",
           },
           // "auto" wird mads-seitig behandelt (Auto-Freigabe im canUseTool); dem SDK
           // geben wir "default", damit jeder nicht-lesende Aufruf über canUseTool läuft.
