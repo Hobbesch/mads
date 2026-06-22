@@ -176,6 +176,12 @@ export class AgentSession {
         options: {
           cwd,
           model: msg.model,
+          // Die Allowlist/Regeln des Nutzers laden (~/.claude/settings.json = user,
+          // .claude/settings.json = project, .claude/settings.local.json = local) — wie
+          // Claude Code. Erlaubte Befehle werden so automatisch genehmigt und erreichen
+          // canUseTool gar nicht erst → deutlich weniger Rückfragen. Auch CLAUDE.md wird
+          // hierüber geladen ("project").
+          settingSources: ["user", "project", "local"],
           // Standard-Claude-Code-Verhalten + Sprach-Vorgabe: mit dem Menschen auf Deutsch
           // kommunizieren (Fragen/Optionen/Erklärungen); Code/Commits/PRs nach CLAUDE.md.
           systemPrompt: {
