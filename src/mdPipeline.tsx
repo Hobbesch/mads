@@ -6,7 +6,7 @@
  * §2.3) — Chat-Markdown und Editor-Preview rendern identisch und gleich sicher.
  *
  * Sicherheit (§5.2): kein `rehype-raw` (kein roher HTML-Durchlass); `rehype-sanitize`
- * als LETZTES (und derzeit einziges) rehype-Plugin strippt Scripts/`onerror`/`javascript:`.
+ * als LETZTES rehype-Plugin (nach `rehype-highlight`) strippt Scripts/`onerror`/`javascript:`.
  * `react-markdown` ist per Default XSS-sicher (kein dangerouslySetInnerHTML).
  *
  * Reine UI: KEIN FS, KEIN Prozess. Externe Links/Wikilinks werden vom Aufrufer
@@ -15,6 +15,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import rehypeHighlight from "rehype-highlight";
 import { visit } from "unist-util-visit";
 import type { PluggableList } from "unified";
 import type { Root, Text } from "mdast";
@@ -68,16 +69,18 @@ interface LinkNode {
 }
 
 // ── Sanitize-Schema (§5.2) ──
-// Vom defaultSchema abgeleitet: lässt starry-night-`pl-*`/`line`-Span-Klassen,
-// Heading-Anchor-`id`, Task-List-/Footnote-Attribute und das `data-wikilink`-Marker
-// durch — sonst alles wie defaultSchema (href-Protokolle bleiben http/https/mailto).
+// Vom defaultSchema abgeleitet: lässt die highlight.js-Klassen (`hljs*`, `language-*`),
+// Heading-Anchor-`id`, Task-List-/Footnote-Attribute und den `data-wikilink`-Marker durch
+// — sonst alles wie defaultSchema (href-Protokolle bleiben http/https/mailto). Die
+// per-Element-className-Regeln sind autoritativ (die `*`-className-Freigabe genügt NICHT —
+// rehype-sanitize schneidet pro Element auf die gelisteten Werte zu).
 export const mdSchema = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
-    span: [...(defaultSchema.attributes?.span ?? []), ["className", /^pl-/, "line"]],
-    code: [...(defaultSchema.attributes?.code ?? []), ["className", /^language-/, /^pl-/]],
-    a: [...(defaultSchema.attributes?.a ?? []), ["dataWikilink"], "dataWikilink"],
+    span: [...(defaultSchema.attributes?.span ?? []), ["className", /^pl-/, /^hljs/, "line"]],
+    code: [...(defaultSchema.attributes?.code ?? []), ["className", /^language-/, /^pl-/, /^hljs/]],
+    a: [...(defaultSchema.attributes?.a ?? []), "data-wikilink", "dataWikilink"],
     "*": [...(defaultSchema.attributes?.["*"] ?? []), "id", "className"],
   },
 };
@@ -85,17 +88,19 @@ export const mdSchema = {
 export const mdRemarkPlugins: PluggableList = [remarkGfm, remarkWikilink];
 
 /**
- * Synchrone rehype-Plugin-Liste. WICHTIG: `react-markdown` rendert synchron
- * (`processSync`) und unterstützt KEINE async Plugins. `rehype-starry-night` ist async
- * → führte zu „`runSync` finished async. Use `run` instead" und damit zum Render-Crash
- * (ErrorBoundary), sobald Chat-/Editor-Markdown rendert. Daher hier NUR `rehype-sanitize`
- * (sync, MUSS letztes rehype-Plugin bleiben, §5.2). Codeblöcke rendern (vorerst) ohne
- * Token-Farben über github-markdown-css.
- * TODO(Post-MVP, doc 08 §6): Syntax-Highlighting wieder anbinden — entweder async rendern
- * (`unified().process()` im Effect → sanitisiertes HTML) oder ein SYNCHRONER Highlighter
- * (z. B. `rehype-highlight`) statt des async `rehype-starry-night`.
+ * SYNCHRONE rehype-Plugin-Liste. WICHTIG: `react-markdown` rendert über `processSync` und
+ * unterstützt KEINE async Plugins. `rehype-highlight` (lowlight/highlight.js) ist synchron
+ * und damit kompatibel; `ignoreMissing` lässt unbekannte Sprachen unhighlightet statt zu
+ * werfen. `rehype-sanitize` MUSS das LETZTE Plugin bleiben (§5.2) — `mdSchema` lässt die
+ * `hljs*`-Klassen durch (`className` auf `*`). Token-Farben aus den highlight.js-Themes
+ * (github / github-dark via `mdHighlight.css`, folgt OS-Light/Dark).
+ * Hintergrund: das frühere async `rehype-starry-night` warf „runSync finished async" und
+ * crashte den Render — abgesichert via `mdPipeline.smoke.test.tsx` (renderToStaticMarkup).
  */
-export const mdRehypePlugins: PluggableList = [[rehypeSanitize, mdSchema]];
+export const mdRehypePlugins: PluggableList = [
+  [rehypeHighlight, { ignoreMissing: true }],
+  [rehypeSanitize, mdSchema],
+];
 
 export interface MarkdownViewProps {
   source: string;
