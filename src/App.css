@@ -1999,3 +1999,380 @@ button.primary:hover {
   color: var(--text-faint);
   font-size: 13px;
 }
+
+/* ---------------- File Explorer (doc 07) ---------------- */
+.file-explorer {
+  width: 460px;
+}
+.file-explorer-loading,
+.file-explorer-body {
+  flex: 1;
+  min-height: 0;
+}
+.file-explorer-body {
+  display: flex;
+}
+.file-error {
+  font-size: 12px;
+  color: #d33b30;
+  padding: 6px 12px;
+  background: rgba(255, 69, 58, 0.1);
+  border-bottom: 1px solid var(--border);
+}
+.file-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  font-size: 13px;
+  padding: 20px;
+  text-align: center;
+}
+
+/* Stream-Kontext-Selector (Panel-Header, PRIMÄR) */
+.file-context {
+  position: relative;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex-shrink: 0;
+}
+.file-context-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  background: none;
+  border: none;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.file-context-trigger:hover {
+  background: rgba(120, 120, 128, 0.1);
+}
+.file-context-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-context-caret {
+  color: var(--text-faint);
+}
+.ctx-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--s-gray);
+}
+.ctx-dot.main {
+  background: var(--accent);
+}
+.file-context-menu {
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  right: 8px;
+  z-index: 40;
+  margin: 4px 0 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text);
+}
+.ctx-item:hover {
+  background: rgba(120, 120, 128, 0.14);
+}
+.ctx-item.active {
+  background: var(--accent-weak);
+  font-weight: 600;
+}
+.ctx-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-empty {
+  padding: 7px 9px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* Tree-Pane */
+.file-tree-pane {
+  width: 200px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--sidebar-bg);
+  min-height: 0;
+}
+@media (prefers-reduced-transparency: reduce) {
+  .file-tree-pane {
+    background: var(--panel-2);
+  }
+}
+.file-filter {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.file-filter input {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+}
+.file-tree {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  padding: 0 4px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 5px;
+}
+.tree-row:hover {
+  background: rgba(120, 120, 128, 0.14);
+}
+.tree-row.selected {
+  background: var(--accent-weak);
+  font-weight: 600;
+}
+.tree-toggle {
+  display: inline-flex;
+  width: 14px;
+  justify-content: center;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.tree-indent {
+  display: inline-block;
+  width: 13px;
+}
+.tree-icon {
+  display: inline-flex;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-name.dim {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* File detail (preview/edit) — opak (nie Vibrancy unter Code/Editor, §1.3) */
+.file-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+}
+.file-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.file-content.empty {
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+}
+.file-content-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.fc-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fc-dirty {
+  color: var(--accent);
+}
+.fc-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.fc-mode,
+.fc-save {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.fc-save {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+.fc-save:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.fc-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.file-preview {
+  padding: 14px;
+}
+.file-preview.image {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+.file-preview.image img {
+  max-width: 100%;
+  height: auto;
+}
+.code-preview,
+.file-editor {
+  padding: 0;
+}
+.preview-cap {
+  font-size: 11px;
+  color: #b9791b;
+  padding: 6px 10px;
+  background: rgba(255, 176, 32, 0.12);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.binary-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+.binary-card {
+  text-align: center;
+  color: var(--text-dim);
+}
+.binary-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+.binary-meta {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin-top: 4px;
+}
+
+/* Warn-Leisten (§5.3) — beratend, nicht blockierend */
+.file-warnings {
+  display: flex;
+  flex-direction: column;
+}
+.warn-bar {
+  font-size: 12px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.warn-bar code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.warn-bar.info {
+  background: var(--accent-weak);
+  color: var(--text);
+}
+.warn-bar.external {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+  justify-content: space-between;
+}
+.warn-bar.external button {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 12px;
+}
+.warn-bar.amber {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+}
+.warn-bar.trespass {
+  background: rgba(255, 69, 58, 0.14);
+  color: #d33b30;
+}
+
+/* Conflict-Sheet (§7) */
+.file-conflict-sheet {
+  padding: 10px 12px;
+  background: rgba(255, 69, 58, 0.1);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.conflict-actions {
+  display: flex;
+  gap: 8px;
+}
+.conflict-actions button {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.conflict-actions button.danger {
+  color: #d33b30;
+  border-color: rgba(255, 69, 58, 0.4);
+}
