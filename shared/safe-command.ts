@@ -187,7 +187,14 @@ export function classifyToolCall(
     return classifyBashCommand(c);
   }
 
-  // MCP-Tools, WebFetch/WebSearch, Task, Unbekanntes → fragen.
+  // Erstanbieter-Orchestrierungs-Tools des In-Process-MCP-Servers „mads" (z. B.
+  // spawn_substreams): vom Nutzer bewusst aktiviert, NICHT außen-sichtbar oder destruktiv —
+  // sie geben nur eine UI-Absicht an mads weiter; die erzeugten Sub-Agenten haben ihre
+  // EIGENEN Permission-Gates. Im Auto-Modus daher ohne Rückfrage erlauben, sonst blockiert
+  // „eröffne Sub-Streams für die Punkte" still auf einer Permission-Rückfrage.
+  if (toolName.startsWith("mcp__mads__")) return ALLOW;
+
+  // Drittanbieter-MCP-Tools, WebFetch/WebSearch, Task, Unbekanntes → fragen.
   if (toolName === "WebFetch" || toolName === "WebSearch") return ASK("Netzwerkzugriff");
   return ASK(`Tool „${toolName}“ nicht als auto-sicher eingestuft`);
 }

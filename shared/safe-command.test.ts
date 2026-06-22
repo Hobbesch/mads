@@ -93,7 +93,15 @@ check("Edit .git → ask", classifyToolCall("Edit", { file_path: "/repo/.git/con
 check("Edit .. escape → ask", classifyToolCall("Write", { file_path: "../outside.ts" }, { cwd: "/repo" }).decision === "ask");
 check("WebFetch → ask", classifyToolCall("WebFetch", { url: "https://x" }).decision === "ask");
 check("Task → ask", classifyToolCall("Task", {}).decision === "ask");
-check("unknown mcp → ask", classifyToolCall("mcp__foo__bar", {}).decision === "ask");
+check("Drittanbieter-mcp → ask", classifyToolCall("mcp__foo__bar", {}).decision === "ask");
+// Erstanbieter-mads-Tools (spawn_substreams etc.) sind im Auto-Modus ohne Rückfrage erlaubt.
+check(
+  "mads spawn_substreams → allow",
+  classifyToolCall("mcp__mads__spawn_substreams", { streams: [{ label: "x", brief: "y" }] }).decision === "allow",
+);
+check("mads-Server generisch → allow", classifyToolCall("mcp__mads__irgendwas", {}).decision === "allow");
+// Namens-Spoofing darf NICHT greifen (nur exakter Server-Prefix mcp__mads__).
+check("mcp__madsfake__ (Spoof) → ask", classifyToolCall("mcp__madsfake__x", {}).decision === "ask");
 
 // reason wird bei ask geliefert
 check("ask liefert reason", typeof classifyBashCommand("git push").reason === "string");

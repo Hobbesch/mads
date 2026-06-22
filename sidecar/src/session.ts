@@ -254,7 +254,15 @@ export class AgentSession {
               "git-Disziplin: Committen ist erlaubt. Führe aber KEINE git-Außen-Operationen selbst " +
               "aus — kein git push, kein rebase auf origin/main, kein `gh pr`/`gh merge`. Diese " +
               "Schritte (Sync, PR erstellen, Integrieren/Merge, Branch-Cleanup) übernimmt mads über " +
-              "die UI-Buttons; manuelle Pushes/Rebases würden den Branch divergieren lassen.",
+              "die UI-Buttons; manuelle Pushes/Rebases würden den Branch divergieren lassen." +
+              (this.role === "integrator"
+                ? "\nSub-Streams: Wenn der Mensch dich bittet, mehrere unabhängige Punkte/Aufgaben " +
+                  "parallel zu bearbeiten (z. B. „eröffne für Punkt 1–4 je einen Sub-Stream“), rufe " +
+                  "das Tool spawn_substreams auf — ein Eintrag pro Stream (kurzes Label + " +
+                  "eigenständiger, in sich abgeschlossener Auftrag). Erkläre kurz die geplante " +
+                  "Aufteilung, aber führe sie dann auch wirklich über das Tool aus; die Sub-Agenten " +
+                  "laufen danach eigenständig in mads (eigener Worktree/Branch) — mergen tust nur du."
+                : ""),
           },
           // "auto" wird mads-seitig behandelt (Auto-Freigabe im canUseTool); dem SDK
           // geben wir "default", damit jeder nicht-lesende Aufruf über canUseTool läuft.
