@@ -1275,11 +1275,8 @@ button.primary:hover {
   line-height: 1;
   flex-shrink: 0;
 }
-.icon-square {
-  width: 12px;
-  height: 12px;
-  background: #fff;
-  border-radius: 3px;
+.icon-stop {
+  display: block;
 }
 .composer-wrap {
   border-top: 1px solid var(--border);
