@@ -3,11 +3,17 @@ import { useStore } from "../store";
 import { FileWarnings } from "./FileWarnings";
 import { FilePreview } from "./FilePreview";
 import { FileEditor } from "./FileEditor";
+import { MarkdownEditor } from "./MarkdownEditor";
+import { ConflictSheet } from "./ConflictSheet";
 
 /**
  * Content-Bereich des Explorers (docs/design/07-file-explorer.md §2.1):
  * Mode-Switch preview/edit, Header mit Datei-Name + Dirty-Marker + Mode-Toggle,
  * Warn-Leisten und das Conflict-Sheet. I/O nur über Store-Actions.
+ *
+ * `.md`-Dateien werden vom dedizierten `MarkdownEditor` (doc 08) bedient — eigener
+ * Preview/Edit/Split-Header mit der GitHub-Style-Pipeline. Alle anderen Typen über
+ * den generischen Preview/Edit-Pfad aus 07.
  */
 export function FileContent({ path }: { path: string }) {
   const openFile = useStore((s) => s.openFile);
@@ -15,7 +21,6 @@ export function FileContent({ path }: { path: string }) {
   const enterEditMode = useStore((s) => s.enterEditMode);
   const discardEdit = useStore((s) => s.discardEdit);
   const saveFile = useStore((s) => s.saveFile);
-  const reloadFile = useStore((s) => s.reloadFile);
   const fileConflict = useStore((s) => s.fileConflict);
   const [mode, setMode] = useState<"preview" | "edit">("preview");
 
@@ -24,6 +29,17 @@ export function FileContent({ path }: { path: string }) {
 
   if (!openFile || openFile.path !== path) {
     return <div className="file-content empty">Datei wird geladen…</div>;
+  }
+
+  // `.md` → dedizierter Markdown-Editor (doc 08); der eigene Header ersetzt den 07-Header.
+  if (openFile.kind === "markdown") {
+    return (
+      <section className="file-content">
+        <FileWarnings path={path} />
+        {fileConflict === path && <ConflictSheet path={path} />}
+        <MarkdownEditor file={openFile} />
+      </section>
+    );
   }
 
   const editable = openFile.coreKind === "text";
@@ -65,29 +81,7 @@ export function FileContent({ path }: { path: string }) {
 
       <FileWarnings path={path} />
 
-      {conflicted && (
-        <div className="file-conflict-sheet" role="alertdialog" aria-label="Auf Disk geändert">
-          <span>Diese Datei wurde auf der Festplatte geändert.</span>
-          <div className="conflict-actions">
-            <button onClick={() => void reloadFile(path)}>Disk laden</button>
-            <button
-              className="danger"
-              onClick={() => {
-                // Meine Version durchsetzen: openFile-Signatur auf Disk-Stand bringen, dann save.
-                void useStore.getState().reloadFile(path).then(() => {
-                  const cur = useStore.getState().openFile;
-                  if (cur && cur.path === path && buffer !== undefined) {
-                    useStore.getState().setEditorBuffer(path, buffer);
-                    void useStore.getState().saveFile(path);
-                  }
-                });
-              }}
-            >
-              Meine Version überschreiben
-            </button>
-          </div>
-        </div>
-      )}
+      {conflicted && <ConflictSheet path={path} />}
 
       <div className="fc-body">
         {mode === "edit" && editable ? <FileEditor file={openFile} /> : <FilePreview file={openFile} />}

@@ -162,19 +162,30 @@ fn is_denied(p: &Path) -> bool {
 }
 
 /// `canonicalize`, das auch noch-nicht-existierende Dateien zulässt (§7 „neu anlegen"):
-/// existiert der Pfad → direkt kanonisieren; sonst Parent kanonisieren + Dateiname anhängen.
+/// existiert der Pfad → direkt kanonisieren; sonst den TIEFSTEN existierenden Vorfahren
+/// kanonisieren und die noch fehlenden Komponenten anhängen. So funktioniert auch ein
+/// mehrstufig fehlendes Ziel wie `<dir>/assets/<img>.png` (Bild-Paste legt `assets/` an).
 fn canonicalize_allowing_missing(p: &Path) -> Result<PathBuf, String> {
     if p.exists() {
         return std::fs::canonicalize(p).map_err(|e| e.to_string());
     }
-    let parent = p
-        .parent()
-        .ok_or_else(|| "Ungültiger Pfad".to_string())?;
-    let name = p
-        .file_name()
-        .ok_or_else(|| "Ungültiger Pfad".to_string())?;
-    let canon_parent = std::fs::canonicalize(parent).map_err(|e| e.to_string())?;
-    Ok(canon_parent.join(name))
+    // Bis zum ersten existierenden Vorfahren hochlaufen, die übersprungenen Namen merken.
+    let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cur = p;
+    loop {
+        let name = cur.file_name().ok_or_else(|| "Ungültiger Pfad".to_string())?;
+        missing.push(name);
+        let parent = cur.parent().ok_or_else(|| "Ungültiger Pfad".to_string())?;
+        if parent.exists() {
+            let mut canon = std::fs::canonicalize(parent).map_err(|e| e.to_string())?;
+            // missing wurde von innen nach außen gesammelt → umgekehrt anhängen.
+            for name in missing.iter().rev() {
+                canon.push(name);
+            }
+            return Ok(canon);
+        }
+        cur = parent;
+    }
 }
 
 fn ext_lower(p: &Path) -> String {
@@ -344,6 +355,55 @@ fn write_file_inner(
     })
 }
 
+/// Binärer Schreibpfad für Bild-Paste (docs/design/08-markdown-editor.md §4.2/§1.2).
+/// EINZIGE FS-Command-Neuerung von Doc 08 über 07s Satz hinaus (07 hat nur einen
+/// Byte-LESE-Pfad). Gleiche Conflict-Semantik wie `mads_write_file`; legt fehlende
+/// Eltern-Verzeichnisse (z.B. `assets/`) scope-gecheckt an (§7).
+#[tauri::command]
+pub fn mads_write_file_bytes(
+    scope: State<'_, FsScope>,
+    path: String,
+    bytes: Vec<u8>,
+    base_mtime_ms: f64,
+    base_size: u64,
+    base_hash: String,
+) -> Result<WriteResult, String> {
+    write_file_bytes_inner(&scope, &path, &bytes, base_mtime_ms, base_size, &base_hash)
+}
+
+fn write_file_bytes_inner(
+    scope: &FsScope,
+    path: &str,
+    bytes: &[u8],
+    base_mtime_ms: f64,
+    base_size: u64,
+    base_hash: &str,
+) -> Result<WriteResult, String> {
+    let p = ensure_in_scope(scope, path)?;
+
+    if p.exists() {
+        let cur = stat(&p)?;
+        let changed =
+            cur.mtime_ms != base_mtime_ms || cur.size != base_size || content_hash(&p)? != base_hash;
+        if changed {
+            return Ok(WriteResult::Conflict);
+        }
+    } else if let Some(parent) = p.parent() {
+        // Eltern-Verzeichnis (z.B. `<dir>/assets/`) anlegen — der Parent muss IM Scope
+        // liegen (ensure_in_scope hat den Ziel-Pfad bereits geprüft, der Parent ist ein
+        // Präfix davon, also ebenfalls in-scope).
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    std::fs::write(&p, bytes).map_err(|e| e.to_string())?;
+    let after = stat(&p)?;
+    Ok(WriteResult::Saved {
+        mtime_ms: after.mtime_ms,
+        size: after.size,
+        hash: hash_bytes(bytes),
+    })
+}
+
 /// Laufzeit-Scope erweitern, sobald der Mensch ein Projekt/Worktree wählt (§4.2).
 /// Ein Sub-Agent-Worktree wird EXAKT wie repoRoot registriert → lesbar UND schreibbar
 /// (OE-35). `allow_directory(.., true)` deckt Lesen+Schreiben; der autoritative Gate
@@ -426,6 +486,26 @@ mod tests {
             &hash_bytes(b"v1"),
         );
         assert!(matches!(res, Ok(WriteResult::Conflict)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_bytes_creates_missing_parent() {
+        let dir = std::env::temp_dir().join(format!("mads-bytes-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let scope = tmp_scope(&dir);
+        // Ziel in einem noch nicht existenten `assets/`-Unterordner (Bild-Paste, §7).
+        let target = dir.join("assets").join("img.png");
+        let res = write_file_bytes_inner(
+            &scope,
+            &target.to_string_lossy(),
+            &[0x89, 0x50, 0x4e, 0x47],
+            0.0,
+            0,
+            "",
+        );
+        assert!(matches!(res, Ok(WriteResult::Saved { .. })));
+        assert!(target.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

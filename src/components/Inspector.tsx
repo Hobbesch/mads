@@ -6,20 +6,12 @@ import { agentBadges, nextStep } from "../derive";
 import { MessageTimeline } from "./MessageTimeline";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
+import { blobToBase64 } from "../blob";
 import type { PermissionMode, ImageInput } from "../../shared/protocol";
 
 // Stabile Leer-Referenz: ein zustand-Selektor darf NICHT bei jedem Render ein neues []
 // zurückgeben (sonst Endlos-Render-Schleife → App-Crash / graues Fenster).
 const NO_IMAGES: ImageInput[] = [];
-
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-}
 
 export function Inspector() {
   const selectedId = useStore((s) => s.selectedId);

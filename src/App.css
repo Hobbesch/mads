@@ -2376,3 +2376,180 @@ button.primary:hover {
   color: #d33b30;
   border-color: rgba(255, 69, 58, 0.4);
 }
+
+/* ── Markdown-Editor (docs/design/08-markdown-editor.md §1.3/§1.4) ── */
+.md-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.md-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex-shrink: 0;
+}
+.md-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.md-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.md-dirty {
+  color: var(--accent);
+}
+.md-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+/* Segmented Control (macOS-HIG) — Stil an .toggle/.pill angelehnt (§1.4) */
+.md-segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.md-seg {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 4px 11px;
+  font-size: 12px;
+  font-weight: 550;
+  border-right: 1px solid var(--border);
+}
+.md-seg:last-child {
+  border-right: none;
+}
+.md-seg.active {
+  background: var(--accent);
+  color: #fff;
+}
+.md-seg:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.md-save {
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.md-save:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.md-readonly-banner {
+  font-size: 12px;
+  color: #b9791b;
+  padding: 7px 12px;
+  background: rgba(255, 176, 32, 0.16);
+  border-bottom: 1px solid var(--border);
+}
+/* Formatierungs-Toolbar (§1.4 — nur Edit/Split) */
+.md-toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex-shrink: 0;
+}
+.md-tb-btn {
+  min-width: 28px;
+  height: 26px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 6px;
+}
+.md-tb-btn:hover:not(:disabled) {
+  background: var(--accent-weak);
+}
+.md-tb-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* Body: Preview/Edit (ein Panel) oder Split (zwei) */
+.md-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.md-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.md-body.mode-split .md-pane-source {
+  border-right: 1px solid var(--border);
+}
+.md-source {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.md-source .cm-editor {
+  height: 100%;
+}
+.md-preview-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 18px;
+}
+
+/* Wikilink-Darstellung (§5.4) */
+.markdown-body a.wikilink,
+.md a.wikilink {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--accent);
+}
+
+/* Globale Save-Notice (§3.3, OE-37) */
+.save-toast {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  padding: 8px 16px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 550;
+  color: #fff;
+  background: var(--text);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.22);
+  cursor: default;
+}
+.save-toast.ok {
+  background: #34c759;
+}
+.save-toast.err {
+  background: #d33b30;
+}

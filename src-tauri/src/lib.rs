@@ -1,7 +1,10 @@
 mod files;
 mod sidecar;
 
-use files::{mads_read_dir, mads_read_file, mads_register_root, mads_write_file, FsScope};
+use files::{
+    mads_read_dir, mads_read_file, mads_register_root, mads_write_file, mads_write_file_bytes,
+    FsScope,
+};
 use sidecar::{sidecar_send, start_sidecar, stop_sidecar, SidecarState};
 use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
 use tauri::Emitter;
@@ -73,6 +76,7 @@ pub fn run() {
             mads_read_dir,
             mads_read_file,
             mads_write_file,
+            mads_write_file_bytes,
             mads_register_root
         ])
         .run(tauri::generate_context!())

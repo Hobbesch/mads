@@ -1,35 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
 import { Elapsed } from "./Elapsed";
+import { MarkdownView } from "../mdPipeline";
+import { openExternalLink } from "../openExternal";
 import type { TimelineEvent, TodoItem } from "../store";
 
 // Stabile Leer-Referenz (kein neues [] pro Render im Selektor → keine Render-Schleife).
 const NO_EVENTS: TimelineEvent[] = [];
 
+// Chat-Markdown nutzt jetzt dieselbe (sanitisierte, gehighlightete) Pipeline wie die
+// Editor-Preview (docs/design/08-markdown-editor.md §2.3). Externe Links über die
+// gemeinsame Bestätigungs-Policy (§5.4); Wikilinks gibt es im Chat-Kontext nicht.
 function Md({ text }: { text: string }) {
   return (
     <div className="md">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              onClick={(e) => {
-                e.preventDefault();
-                if (href) void openUrl(href);
-              }}
-            >
-              {children}
-            </a>
-          ),
-        }}
-      >
-        {text}
-      </ReactMarkdown>
+      <MarkdownView source={text} onLink={openExternalLink} />
     </div>
   );
 }

@@ -29,6 +29,7 @@ import type { Collision } from "../shared/collision";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
 import { toolCommand } from "./toolText";
+import { blobToBase64, base64ToBytes, extForMime, dirname } from "./blob";
 
 export type AgentRole = "integrator" | "sub";
 export type { ViewId } from "./uiPrefs";
@@ -109,6 +110,10 @@ export interface DirNode {
 }
 
 export type FileKind = "markdown" | "code" | "image" | "binary";
+
+/** Markdown-Editor-View-Modus (docs/design/08-markdown-editor.md §1.1, OE-36).
+ *  Global (eine .md zugleich offen), session-only (nicht persistiert). */
+export type ViewMode = "preview" | "edit" | "split";
 
 /** Core-Lese-Resultat (FileRead, doc 07 §4.2) — DER CORE entscheidet text/binary. */
 type CoreFileRead =
@@ -200,6 +205,10 @@ export interface MadsState {
   externalChanged: Record<string, boolean>;
   fsError?: string;
   fileConflict?: string; // path mit Disk-Drift beim Save → conflicted-Sheet
+  // ── Markdown-Editor (docs/design/08-markdown-editor.md §3.1) ──
+  editorViewMode: ViewMode; // global (eine .md zugleich, OE-36/OE-38), session-only
+  editorSaving: Record<string, boolean>; // path → Save in flight (Doppel-Save/Race vermeiden, §7)
+  saveNotice?: { tone: NoticeTone; text: string }; // leichte globale Save-Notice (§3.3, OE-37)
 
   init: () => Promise<void>;
   setAutonomy: (config: AutonomyConfig) => Promise<void>;
@@ -253,6 +262,14 @@ export interface MadsState {
   saveFile: (path: string) => Promise<void>;
   reloadFile: (path: string) => Promise<void>;
   discardEdit: (path: string) => void;
+  // ── Markdown-Editor actions (doc 08 §3.1) ──
+  setEditorViewMode: (mode: ViewMode) => void;
+  /** Bild-Blob nach `<dir>/assets/<ts>-<n>.<ext>` schreiben (Core, binär) und einen
+   *  relativen Markdown-Link an `cursor` in den Buffer einfügen. §1.2/§4.2/OE-39. */
+  insertImageFromBlob: (path: string, blob: Blob, cursor: number) => Promise<number>;
+  /** `[[name]]` relativ zur aktuell offenen .md auf `./<name>.md` auflösen und öffnen (§1.2/§5.4). */
+  openWikiLink: (fromPath: string, name: string) => Promise<void>;
+  clearSaveNotice: () => void;
 }
 
 const mkId = () => crypto.randomUUID();
@@ -532,6 +549,9 @@ export const useStore = create<MadsState>((set) => {
     externalChanged: {},
     fsError: undefined,
     fileConflict: undefined,
+    editorViewMode: "preview", // .md öffnet im Preview (OE-36)
+    editorSaving: {},
+    saveNotice: undefined,
 
     setActiveView: (view) => {
       set({ activeView: view });
@@ -884,6 +904,8 @@ export const useStore = create<MadsState>((set) => {
       const open = st.openFile;
       const content = st.editorBuffers[path];
       if (!open || open.path !== path || content === undefined) return;
+      if (st.editorSaving[path]) return; // Doppel-Save/Race blocken (§7)
+      set((s) => ({ editorSaving: { ...s.editorSaving, [path]: true } }));
       try {
         const res = (await invoke("mads_write_file", {
           path,
@@ -893,7 +915,8 @@ export const useStore = create<MadsState>((set) => {
           baseHash: open.diskHash,
         })) as CoreWriteResult;
         if (res.kind === "conflict") {
-          set({ fileConflict: path });
+          // Conflict ist KEIN Fehler — dirty bleibt, Sheet/Dialog (§7).
+          set((s) => ({ fileConflict: path, editorSaving: { ...s.editorSaving, [path]: false } }));
           return;
         }
         // saved → openFile-Signatur aktualisieren, Buffer als gespeichert markieren.
@@ -903,12 +926,19 @@ export const useStore = create<MadsState>((set) => {
           return {
             openFile: { ...open, loadedText: content, diskMtimeMs: res.mtimeMs, diskSize: res.size, diskHash: res.hash },
             editorBuffers: buffers,
+            editorSaving: { ...s.editorSaving, [path]: false },
             fileConflict: undefined,
             fsError: undefined,
+            saveNotice: { tone: "ok", text: "Gespeichert" },
           };
         });
       } catch (e) {
-        set({ fsError: String(e) });
+        // Echter IO-/Scope-Fehler — nie „gespeichert" vortäuschen (§7).
+        set((s) => ({
+          fsError: String(e),
+          editorSaving: { ...s.editorSaving, [path]: false },
+          saveNotice: { tone: "err", text: `Speichern fehlgeschlagen: ${String(e)}` },
+        }));
       }
     },
 
@@ -929,5 +959,60 @@ export const useStore = create<MadsState>((set) => {
         delete buffers[path];
         return { editorBuffers: buffers, fileConflict: undefined };
       }),
+
+    // ── Markdown-Editor (doc 08 §3.1) ──
+    setEditorViewMode: (mode) => set({ editorViewMode: mode }),
+
+    clearSaveNotice: () => set({ saveNotice: undefined }),
+
+    insertImageFromBlob: async (path, blob, cursor) => {
+      const st = useStore.getState();
+      const open = st.openFile;
+      if (!open || open.path !== path) return cursor;
+      const b64 = await blobToBase64(blob);
+      const bytes = base64ToBytes(b64);
+      const ext = extForMime(blob.type || "image/png");
+      // Eindeutiger, relativer Ziel-Name in `<dir>/assets/` (OE-39): Zeitstempel + Zufall.
+      const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const rel = `assets/${stamp}.${ext}`;
+      const dir = dirname(path);
+      const target = `${dir}/${rel}`;
+      try {
+        // Neu-Anlegen: keine base-Signatur (Core legt `assets/` an, §7).
+        const res = (await invoke("mads_write_file_bytes", {
+          path: target,
+          bytes: Array.from(bytes),
+          baseMtimeMs: 0,
+          baseSize: 0,
+          baseHash: "",
+        })) as CoreWriteResult;
+        if (res.kind === "conflict") {
+          set({ saveNotice: { tone: "err", text: "Bild-Ziel bereits geändert — abgebrochen" } });
+          return cursor;
+        }
+        // Relativen Markdown-Link an der Cursor-Position in den Buffer einsetzen.
+        const cur = useStore.getState();
+        const text = cur.editorBuffers[path] ?? open.loadedText ?? "";
+        const snippet = `![](./${rel})`;
+        const next = text.slice(0, cursor) + snippet + text.slice(cursor);
+        set((s) => ({
+          editorBuffers: { ...s.editorBuffers, [path]: next },
+          saveNotice: { tone: "ok", text: `Bild eingefügt (${rel})` },
+        }));
+        return cursor + snippet.length;
+      } catch (e) {
+        set({ fsError: String(e), saveNotice: { tone: "err", text: `Bild-Paste fehlgeschlagen: ${String(e)}` } });
+        return cursor;
+      }
+    },
+
+    openWikiLink: async (fromPath, name) => {
+      // `[[name]]` → `./<name>.md` relativ zum Verzeichnis der aktuellen Datei (§1.2/§5.4).
+      // Keine externe URL-Interpretation; Scope-Check liegt im Core (öffnet sonst mit fsError).
+      const dir = dirname(fromPath);
+      const slug = name.endsWith(".md") ? name : `${name}.md`;
+      const target = `${dir}/${slug}`;
+      await useStore.getState().openFilePath(target);
+    },
   };
 });
