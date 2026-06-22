@@ -10,6 +10,7 @@ import { PermissionDialog } from "./components/PermissionDialog";
 import { NewStreamDialog } from "./components/NewStreamDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { ParallelDialog } from "./components/ParallelDialog";
+import { SaveToast } from "./components/SaveToast";
 import { RELEASE, buildDateLocal } from "./version";
 import "./App.css";
 
@@ -185,6 +186,7 @@ export default function App() {
       <PermissionDialog />
       <ParallelDialog />
       <ChangeOverlay />
+      <SaveToast />
     </div>
   );
 }

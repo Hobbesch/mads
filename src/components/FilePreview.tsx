@@ -1,8 +1,7 @@
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import CodeMirror from "@uiw/react-codemirror";
 import { codeExtensions } from "../editorLang";
+import { MarkdownView } from "../mdPipeline";
+import { openExternalLink } from "../openExternal";
 import type { OpenFile } from "../store";
 
 function fmtBytes(n: number): string {
@@ -13,8 +12,9 @@ function fmtBytes(n: number): string {
 
 /**
  * Vorschau je Typ (docs/design/07-file-explorer.md §2.2):
- *  - markdown → react-markdown + remark-gfm (Links extern via openUrl). Volle
- *    GitHub-Style-Pipeline (rehype-sanitize/starry-night) ist Post-MVP (doc 08).
+ *  - markdown → volle GitHub-Style-Pipeline (mdPipeline: sanitize/starry-night, doc 08).
+ *    Im Explorer übernimmt der dedizierte MarkdownEditor; diese Branch ist der
+ *    schreibgeschützte Fallback (eine Pipeline, §2.3).
  *  - code → CodeMirror read-only Highlight.
  *  - image → <img> aus Data-URL (Core-base64, Image-Cap §6).
  *  - binary (oder Bild über Cap) → Fallback-Karte.
@@ -40,26 +40,7 @@ export function FilePreview({ file }: { file: OpenFile }) {
     return (
       <div className="file-preview md-preview">
         {file.truncated && <div className="preview-cap">Datei gekürzt ({fmtBytes(file.diskSize)}).</div>}
-        <div className="md">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={{
-              a: ({ href, children }) => (
-                <a
-                  href={href}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    if (href) void openUrl(href);
-                  }}
-                >
-                  {children}
-                </a>
-              ),
-            }}
-          >
-            {file.loadedText ?? ""}
-          </ReactMarkdown>
-        </div>
+        <MarkdownView source={file.loadedText ?? ""} onLink={openExternalLink} />
       </div>
     );
   }
