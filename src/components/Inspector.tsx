@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
@@ -29,8 +28,11 @@ export function Inspector() {
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
   const setPermissionMode = useStore((s) => s.setPermissionMode);
-  const [draft, setDraft] = useState("");
-  const [attached, setAttached] = useState<ImageInput[]>([]);
+  // Composer-Entwürfe je Agent (im Store) — beim Umschalten bleibt jeder Entwurf erhalten.
+  const draft = useStore((s) => (s.selectedId ? s.drafts[s.selectedId] ?? "" : ""));
+  const attached = useStore((s) => (s.selectedId ? s.draftImages[s.selectedId] ?? [] : []));
+  const setDraft = useStore((s) => s.setDraft);
+  const setDraftImages = useStore((s) => s.setDraftImages);
 
   if (!agent || !selectedId) {
     return (
@@ -45,8 +47,8 @@ export function Inspector() {
     const text = draft.trim();
     if (!text && attached.length === 0) return;
     void sendInput(selectedId, text || "(siehe Screenshot)", attached.length ? attached : undefined);
-    setDraft("");
-    setAttached([]);
+    setDraft(selectedId, "");
+    setDraftImages(selectedId, []);
   };
 
   const onPaste = async (e: React.ClipboardEvent) => {
@@ -61,7 +63,7 @@ export function Inspector() {
     }
     if (imgs.length) {
       e.preventDefault();
-      setAttached((a) => [...a, ...imgs]);
+      setDraftImages(selectedId, [...attached, ...imgs]);
     }
   };
 
@@ -175,7 +177,7 @@ export function Inspector() {
             {attached.map((im, i) => (
               <div key={i} className="thumb">
                 <img src={`data:${im.mediaType};base64,${im.dataBase64}`} alt="Anhang" />
-                <button type="button" onClick={() => setAttached((a) => a.filter((_, j) => j !== i))}>
+                <button type="button" onClick={() => setDraftImages(selectedId, attached.filter((_, j) => j !== i))}>
                   ×
                 </button>
               </div>
@@ -185,7 +187,7 @@ export function Inspector() {
         <form className="composer" onSubmit={submit}>
           <input
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => setDraft(selectedId, e.target.value)}
             onPaste={(e) => void onPaste(e)}
             placeholder={`Nachricht an ${agent.label}…  (Screenshot mit ⌘V einfügen)`}
           />

@@ -105,6 +105,9 @@ interface MadsState {
   debugLog: string[];
   /** Offener „Parallel starten"-Picker (nach Anforderung der Integrator-Einschätzung). */
   parallelPicker?: { agentId: string; options: { label: string; description: string }[] };
+  /** Composer-Entwürfe je Agent (Text + Anhänge) — bleiben beim Umschalten erhalten. */
+  drafts: Record<string, string>;
+  draftImages: Record<string, ImageInput[]>;
 
   init: () => Promise<void>;
   setAutonomy: (config: AutonomyConfig) => Promise<void>;
@@ -121,6 +124,8 @@ interface MadsState {
     permissionMode?: PermissionMode;
   }) => Promise<void>;
   selectAgent: (id: string) => void;
+  setDraft: (agentId: string, text: string) => void;
+  setDraftImages: (agentId: string, images: ImageInput[]) => void;
   answerPermission: (req: PermissionRequestMsg, decision: PermissionDecision) => Promise<void>;
   requestParallelAssessment: (req: PermissionRequestMsg) => Promise<void>;
   spawnParallelStreams: (picks: { label: string; brief: string }[]) => Promise<void>;
@@ -380,6 +385,8 @@ export const useStore = create<MadsState>((set) => {
     selectedId: undefined,
     debugLog: [],
     parallelPicker: undefined,
+    drafts: {},
+    draftImages: {},
 
     setAutonomy: async (config) => {
       set({ autonomy: config });
@@ -463,6 +470,9 @@ export const useStore = create<MadsState>((set) => {
     },
 
     selectAgent: (id) => set({ selectedId: id }),
+
+    setDraft: (agentId, text) => set((s) => ({ drafts: { ...s.drafts, [agentId]: text } })),
+    setDraftImages: (agentId, images) => set((s) => ({ draftImages: { ...s.draftImages, [agentId]: images } })),
 
     answerPermission: async (req, decision) => {
       set((s) => ({ permissions: s.permissions.filter((p) => p.requestId !== req.requestId) }));
