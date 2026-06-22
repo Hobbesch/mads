@@ -42,3 +42,35 @@ export function hasGitEscalation(a: AgentVM): boolean {
 export function mergeReadiness(a: AgentVM): MergeGate {
   return preMergeGate(a.pr, a.behind);
 }
+
+export type NextStepKind = "commit" | "pr" | "integrate" | "none";
+export interface NextStep {
+  kind: NextStepKind;
+  label: string;
+  disabled: boolean;
+  /** Tooltip: was passiert bzw. warum (de)aktiviert. */
+  hint: string;
+}
+
+/**
+ * Der EINE nächste Schritt im Sub-Agent-Workflow — fürs geführte UI:
+ * uncommitted → Committen, Commits aber kein PR → PR erstellen, PR offen → Integrieren.
+ * Sync läuft automatisch im Hintergrund und ist hier bewusst kein eigener Schritt.
+ */
+export function nextStep(a: AgentVM): NextStep {
+  const none: NextStep = { kind: "none", label: "", disabled: true, hint: "" };
+  if (a.role !== "sub") return none; // Integrator merged nur via „Integrieren" der Subs
+  if (a.pr?.state === "MERGED") return none; // fertig
+  if (a.dirty) return { kind: "commit", label: "Committen", disabled: false, hint: "Der Agent committet seine Arbeit (Projektkonvention)" };
+  if (a.pr && a.pr.state === "OPEN") {
+    const r = mergeReadiness(a);
+    return {
+      kind: "integrate",
+      label: "Integrieren",
+      disabled: !r.ok,
+      hint: r.ok ? "PR nach main mergen und Branch/Worktree aufräumen" : `Noch nicht bereit: ${r.reasons.join(" · ")}`,
+    };
+  }
+  if (a.ahead > 0 && !a.pr) return { kind: "pr", label: "PR erstellen", disabled: false, hint: "Gate prüfen → auf main syncen → pushen → PR öffnen" };
+  return none;
+}

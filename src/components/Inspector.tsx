@@ -2,7 +2,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
-import { agentBadges, mergeReadiness } from "../derive";
+import { agentBadges, nextStep } from "../derive";
 import { MessageTimeline } from "./MessageTimeline";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
@@ -23,6 +23,7 @@ export function Inspector() {
   const sendInput = useStore((s) => s.sendInput);
   const interruptAgent = useStore((s) => s.interruptAgent);
   const stopAgent = useStore((s) => s.stopAgent);
+  const commitAgent = useStore((s) => s.commitAgent);
   const createPr = useStore((s) => s.createPr);
   const syncBranch = useStore((s) => s.syncBranch);
   const integratePr = useStore((s) => s.integratePr);
@@ -68,9 +69,12 @@ export function Inspector() {
   };
 
   const badges = agentBadges(agent);
-  const canPr = !!agent.branch && !agent.pr;
-  const canIntegrate = agent.role === "sub" && !!agent.pr && agent.pr.state === "OPEN";
-  const readiness = mergeReadiness(agent);
+  const step = nextStep(agent);
+  const runStep = () => {
+    if (step.kind === "commit") void commitAgent(selectedId);
+    else if (step.kind === "pr") void createPr(selectedId);
+    else if (step.kind === "integrate") void integratePr(selectedId);
+  };
 
   return (
     <section className="inspector">
@@ -113,34 +117,25 @@ export function Inspector() {
             <option value="auto">Auto — nur Risiko fragen</option>
             <option value="bypassPermissions">Bypass — nie fragen</option>
           </select>
+          {/* Geführter „nächster Schritt": Committen → PR erstellen → Integrieren */}
+          {step.kind !== "none" && (
+            <button className="step-primary" disabled={step.disabled} title={step.hint} onClick={runStep}>
+              {step.label}
+            </button>
+          )}
           {agent.role === "sub" && agent.worktreePath && (
-            <button onClick={() => void runGate(selectedId)} title="Clean-Code-Gate: lint/type/test + Secret-Scan">
+            <button onClick={() => void runGate(selectedId)} title="Clean-Code-Gate: lint/type/test + Secret-Scan (läuft beim PR automatisch)">
               Gate{agent.gate ? (agent.gate.ok ? " ✓" : " ✖") : ""}
             </button>
           )}
           {agent.behind > 0 && (
-            <button onClick={() => void syncBranch(selectedId)} title="Rebase onto origin/main">
+            <button onClick={() => void syncBranch(selectedId)} title="Manuell auf origin/main rebasen (läuft sonst automatisch)">
               Sync ({agent.behind})
-            </button>
-          )}
-          {canPr && (
-            <button onClick={() => void createPr(selectedId)} title="Pull Request erstellen">
-              PR erstellen
             </button>
           )}
           {agent.pr && (
             <button onClick={() => void openUrl(agent.pr!.url)} title="PR auf GitHub öffnen">
-              PR #{agent.pr.number}
-            </button>
-          )}
-          {canIntegrate && (
-            <button
-              className="integrate"
-              disabled={!readiness.ok}
-              title={readiness.ok ? "PR nach main mergen (Integrator-Aktion)" : `Blockiert: ${readiness.reasons.join(" · ")}`}
-              onClick={() => void integratePr(selectedId)}
-            >
-              Integrieren
+              PR #{agent.pr.number} ↗
             </button>
           )}
           <button onClick={() => void interruptAgent(selectedId)} title="Unterbrechen">

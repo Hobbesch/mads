@@ -769,6 +769,21 @@ button.primary:hover {
 .inspector-actions .danger {
   color: #d33b30;
 }
+.inspector-actions .step-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  font-weight: 650;
+}
+.inspector-actions .step-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.inspector-actions .step-primary:disabled {
+  background: var(--panel);
+  color: var(--text-faint);
+  border-color: var(--border);
+  cursor: default;
+}
 .inspector-actions .integrate {
   background: var(--s-green);
   color: #fff;

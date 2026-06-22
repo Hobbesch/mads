@@ -134,6 +134,7 @@ interface MadsState {
   setPermissionMode: (id: string, mode: PermissionMode) => Promise<void>;
   interruptAgent: (id: string) => Promise<void>;
   stopAgent: (id: string, removeWorktree: boolean) => Promise<void>;
+  commitAgent: (id: string) => Promise<void>;
   createPr: (id: string) => Promise<void>;
   syncBranch: (id: string) => Promise<void>;
   integratePr: (id: string) => Promise<void>;
@@ -545,6 +546,15 @@ export const useStore = create<MadsState>((set) => {
         const order = s.order.filter((x) => x !== id);
         return { agents, events, order, selectedId: s.selectedId === id ? order[0] : s.selectedId };
       });
+    },
+
+    commitAgent: async (id) => {
+      await useStore.getState().sendInput(
+        id,
+        "Committe jetzt deine bisherige Arbeit in diesem Worktree nach Projektkonvention " +
+          "(falls vorhanden z. B. scripts/paix-commit.sh, sonst `git add -A && git commit`) mit einer " +
+          "aussagekräftigen Commit-Message. NUR committen — nicht pushen und keinen PR erstellen.",
+      );
     },
 
     createPr: async (id) => {
