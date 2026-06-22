@@ -150,6 +150,17 @@ export class AgentSession {
         options: {
           cwd,
           model: msg.model,
+          // Standard-Claude-Code-Verhalten + Sprach-Vorgabe: mit dem Menschen auf Deutsch
+          // kommunizieren (Fragen/Optionen/Erklärungen); Code/Commits/PRs nach CLAUDE.md.
+          systemPrompt: {
+            type: "preset",
+            preset: "claude_code",
+            append:
+              "Kommuniziere mit dem Menschen standardmäßig auf DEUTSCH — alle Erklärungen, " +
+              "Zusammenfassungen und besonders AskUserQuestion-Fragen samt Optionen (Label + " +
+              "Beschreibung) auf Deutsch. Code, Bezeichner, Commit-Messages und PR-Titel nach " +
+              "Projektkonvention (CLAUDE.md), aber die Konversation mit dem Nutzer auf Deutsch.",
+          },
           // "auto" wird mads-seitig behandelt (Auto-Freigabe im canUseTool); dem SDK
           // geben wir "default", damit jeder nicht-lesende Aufruf über canUseTool läuft.
           permissionMode: msg.permissionMode === "auto" ? "default" : (msg.permissionMode ?? "default"),
