@@ -135,6 +135,7 @@ interface MadsState {
   runGate: (id: string) => Promise<void>;
   pollProject: () => Promise<void>;
   resumeAgent: (r: ResumableAgent) => Promise<void>;
+  resumeAll: () => Promise<void>;
 }
 
 const mkId = () => crypto.randomUUID();
@@ -559,6 +560,11 @@ export const useStore = create<MadsState>((set) => {
 
     pollProject: async () => {
       await sendHost({ ...envelope(), type: "poll_project" });
+    },
+
+    resumeAll: async () => {
+      const list = [...useStore.getState().resumables];
+      for (const r of list) await useStore.getState().resumeAgent(r);
     },
 
     resumeAgent: async (r) => {

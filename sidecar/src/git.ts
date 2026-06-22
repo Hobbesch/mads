@@ -37,6 +37,39 @@ export function worktreePathFor(repoRoot: string, agentId: string): string {
   return join(homedir(), "mads-worktrees", repoSlug(repoRoot), agentId);
 }
 
+/**
+ * Alle mads-Worktrees dieses Repos auflisten (unter ~/mads-worktrees/<slug>/<agentId>).
+ * Liefert agentId (= Verzeichnisname), Pfad und Branch — Basis fürs Wieder-Anbieten
+ * verwaister Branches beim Projekt-Öffnen.
+ */
+export async function discoverWorktrees(
+  repoRoot: string,
+): Promise<{ agentId: string; path: string; branch: string }[]> {
+  const base = join(homedir(), "mads-worktrees", repoSlug(repoRoot));
+  const r = await git(["-C", repoRoot, "worktree", "list", "--porcelain"], repoRoot);
+  if (r.code !== 0) return [];
+  const out: { agentId: string; path: string; branch: string }[] = [];
+  let curPath = "";
+  let curBranch = "";
+  const flush = () => {
+    if (curPath && (curPath === base || curPath.startsWith(base + "/"))) {
+      out.push({ agentId: basename(curPath), path: curPath, branch: curBranch.replace(/^refs\/heads\//, "") });
+    }
+    curPath = "";
+    curBranch = "";
+  };
+  for (const line of r.stdout.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      flush();
+      curPath = line.slice("worktree ".length).trim();
+    } else if (line.startsWith("branch ")) {
+      curBranch = line.slice("branch ".length).trim();
+    }
+  }
+  flush();
+  return out;
+}
+
 export async function getRepoInfo(
   repoRoot: string,
 ): Promise<{ owner: string; repo: string; defaultBranch: string } | null> {

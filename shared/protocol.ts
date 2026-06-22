@@ -356,7 +356,8 @@ export interface ResumableAgent {
   agentId: string;
   label: string;
   role: "integrator" | "sub";
-  sessionId: string;
+  /** Claude-Session zum echten Fortsetzen; fehlt bei verwaisten Worktrees → frischer Start darin. */
+  sessionId?: string;
   branch?: string;
   worktreePath?: string;
   lastPrompt?: string;

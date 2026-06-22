@@ -19,6 +19,7 @@ export default function App() {
   const pollProject = useStore((s) => s.pollProject);
   const resumables = useStore((s) => s.resumables);
   const resumeAgent = useStore((s) => s.resumeAgent);
+  const resumeAll = useStore((s) => s.resumeAll);
   const collisions = useStore((s) => s.collisions);
   const autonomy = useStore((s) => s.autonomy);
   const setAutonomy = useStore((s) => s.setAutonomy);
@@ -99,13 +100,19 @@ export default function App() {
 
         {resumables.length > 0 && (
           <div className="resume-banner">
-            <span className="resume-label">↩︎ {resumables.length} Agent(en) fortsetzbar:</span>
+            <span className="resume-label">↩︎ {resumables.length} Stream(s) fortsetzbar:</span>
             {resumables.map((r) => (
-              <button key={r.agentId} onClick={() => void resumeAgent(r)}>
+              <button key={r.agentId} onClick={() => void resumeAgent(r)} title={r.sessionId ? "Session fortsetzen" : "Frischer Start im bestehenden Worktree"}>
                 {r.label}
                 {r.branch ? ` · ${r.branch}` : ""}
+                {!r.sessionId ? " ⟲" : ""}
               </button>
             ))}
+            {resumables.length > 1 && (
+              <button className="resume-all" onClick={() => void resumeAll()}>
+                Alle fortsetzen
+              </button>
+            )}
           </div>
         )}
 

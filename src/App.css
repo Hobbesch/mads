@@ -514,6 +514,13 @@ button.primary:hover {
 .resume-banner button:hover {
   background: var(--panel-2);
 }
+.resume-banner button.resume-all {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  font-weight: 600;
+  margin-left: auto;
+}
 .collision-banner {
   background: rgba(255, 176, 32, 0.16);
   color: #b9791b;

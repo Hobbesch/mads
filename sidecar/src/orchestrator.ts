@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
-import { createPr, getRepoInfo, gitStatus, mergePr, prStatus, removeWorktree, run, syncBranch } from "./git.js";
+import { createPr, discoverWorktrees, getRepoInfo, gitStatus, mergePr, prStatus, removeWorktree, run, syncBranch } from "./git.js";
 import { runGate } from "./gate.js";
 import { loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
@@ -52,7 +52,7 @@ export class Orchestrator {
         this.project = { projectId: msg.projectId, repoRoot: msg.repoRoot, ...info };
         this.emit({ ...envelope(), type: "project_resolved", project: this.project });
         log(`[orchestrator] project resolved: ${info.owner}/${info.repo} (default ${info.defaultBranch})`);
-        this.offerResumable(msg.repoRoot);
+        void this.offerResumable(msg.repoRoot);
         this.startPolling();
         break;
       }
@@ -296,18 +296,48 @@ export class Orchestrator {
     }
   }
 
-  private offerResumable(repoRoot: string): void {
-    const resumable = loadRegistry(repoRoot).filter(
-      (e) =>
-        e.sessionId &&
-        !this.pool.has(e.agentId) &&
-        // Sub-Agenten brauchen ihren Worktree; der Integrator läuft im Haupt-Checkout
-        // (kein Worktree) und ist trotzdem fortsetzbar.
-        (e.worktreePath ? existsSync(e.worktreePath) : true),
-    );
+  private async offerResumable(repoRoot: string): Promise<void> {
+    const registry = loadRegistry(repoRoot);
+    const seen = new Set<string>();
+    const resumable: RegistryEntry[] = [];
+
+    // 1) Registry-Einträge mit Claude-Session → echtes Fortsetzen.
+    for (const e of registry) {
+      if (!e.sessionId || this.pool.has(e.agentId)) continue;
+      if (e.worktreePath && !existsSync(e.worktreePath)) continue; // Worktree weg → überspringen
+      resumable.push(e);
+      seen.add(e.agentId);
+    }
+
+    // 2) Verwaiste mads-Worktrees (kein Registry-Eintrag mit Session) → frischer Stream
+    //    im bestehenden Worktree/Branch, damit nichts liegen bleibt.
+    try {
+      const reg = new Map(registry.map((e) => [e.agentId, e]));
+      for (const wt of await discoverWorktrees(repoRoot)) {
+        if (seen.has(wt.agentId) || this.pool.has(wt.agentId)) continue;
+        const known = reg.get(wt.agentId);
+        resumable.push({
+          agentId: wt.agentId,
+          label: known?.label ?? wt.branch.replace(/^mads\//, "") ?? wt.agentId,
+          role: "sub",
+          sessionId: known?.sessionId, // i.d.R. undefined → frischer Start im Worktree
+          branch: wt.branch,
+          worktreePath: wt.path,
+          lastPrompt: known?.lastPrompt,
+          status: "queued",
+          model: known?.model,
+          mock: false,
+          updatedAt: Date.now(),
+        });
+        seen.add(wt.agentId);
+      }
+    } catch (e) {
+      log(`[orchestrator] Worktree-Discovery fehlgeschlagen: ${String(e)}`);
+    }
+
     if (resumable.length > 0) {
       this.emit({ ...envelope(), type: "resumable_agents", agents: resumable });
-      log(`[orchestrator] ${resumable.length} resumebare Agenten gefunden`);
+      log(`[orchestrator] ${resumable.length} fortsetzbare Streams (inkl. verwaister Worktrees)`);
     }
   }
 
