@@ -1958,12 +1958,12 @@ button.primary:hover {
   color: var(--text-dim);
 }
 
-/* ---------------- Change-Overview-Overlay (stub, doc 09) ---------------- */
+/* ---------------- Change-Overview-Overlay (doc 09) ---------------- */
 .change-overlay {
   position: fixed;
   inset: 0;
   z-index: 80;
-  background: var(--bg-content);
+  background: var(--bg-content); /* opak, kein Vibrancy unter den Diff-Flächen (HIG A.5) */
   display: flex;
   flex-direction: column;
 }
@@ -1972,11 +1972,34 @@ button.primary:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 0 16px;
   border-bottom: 1px solid var(--border);
   background: var(--panel-2);
   font-weight: 600;
   font-size: 14px;
+}
+.change-overlay-title {
+  white-space: nowrap;
+}
+.change-overlay-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.change-overlay-filter {
+  width: 200px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+}
+.change-overlay-filter:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 .change-overlay-close {
   background: none;
@@ -1986,18 +2009,157 @@ button.primary:hover {
   line-height: 1;
   padding: 6px 8px;
   border-radius: 6px;
+  cursor: pointer;
 }
 .change-overlay-close:hover {
   background: rgba(120, 120, 128, 0.16);
   color: var(--text);
 }
+.change-overlay-aria {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
 .change-overlay-body {
   flex: 1;
+  overflow: auto;
+  padding: 14px;
+}
+.change-overlay-empty {
   display: flex;
   align-items: center;
   justify-content: center;
+  height: 100%;
   color: var(--text-faint);
   font-size: 13px;
+}
+
+/* Diff-Pane-Grid (auto-fill, Idiom wie .grid im .center) */
+.diff-pane-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+.diff-pane {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh;
+}
+.diff-pane:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.diff-pane.coll-region {
+  border-color: var(--s-red);
+  box-shadow: 0 0 0 1px var(--s-red) inset;
+}
+.diff-pane.coll-file {
+  border-color: var(--s-yellow);
+  box-shadow: 0 0 0 1px var(--s-yellow) inset;
+}
+.diff-pane.failed {
+  border-color: var(--s-red);
+}
+.diff-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.diff-pane-label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.diff-pane-path {
+  font-family: var(--mono);
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* von links clippen, Dateiname bleibt sichtbar */
+  text-align: left;
+  flex: 1;
+}
+.diff-pane-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.diff-pane-badge.err {
+  background: rgba(255, 69, 58, 0.16);
+  color: var(--s-red);
+}
+.diff-pane-coll {
+  padding: 6px 10px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+}
+.diff-pane-coll.region {
+  background: rgba(255, 69, 58, 0.12);
+  color: var(--s-red);
+}
+.diff-pane-coll.file {
+  background: rgba(255, 176, 32, 0.14);
+  color: var(--s-yellow);
+}
+.diff-pane-body {
+  overflow: auto;
+}
+.diff-subview + .diff-subview {
+  border-top: 1px dashed var(--border);
+}
+.diff-subview-label {
+  padding: 4px 10px;
+  font-size: 10px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+.diff-pane-cm .cm-editor {
+  font-size: 12px;
+  background: transparent;
+}
+.diff-pane-cm .cm-scroller {
+  font-family: var(--mono);
+}
+.diff-pane-cap {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+}
+.diff-pane-cap-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .diff-pane,
+  .diff-pane-cm .cm-scroller {
+    scroll-behavior: auto;
+  }
+}
+@media (prefers-contrast: more) {
+  .diff-pane {
+    border-width: 2px;
+  }
 }
 
 /* ---------------- File Explorer (doc 07) ---------------- */
