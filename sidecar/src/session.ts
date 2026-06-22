@@ -252,9 +252,16 @@ export class AgentSession {
       // AskUserQuestion lässt sich headless nicht „ausführen" (allow → SDK startet das
       // interaktive Tool → Harness-Fehler). Die Auswahl daher als Ergebnis zurückgeben:
       // deny mit der Antwort als Nachricht, sodass das Modell mit der Wahl weiterarbeitet.
-      const lines = Object.entries(decision.answers ?? {}).map(([q, a]) => `• ${q} → ${a}`);
-      if (decision.response && decision.response.trim()) lines.push(`• Ergänzung: ${decision.response.trim()}`);
-      const message = `Antwort des Nutzers:\n${lines.join("\n") || "(keine Auswahl)"}\n\nFahre mit dieser Wahl fort und rufe AskUserQuestion dafür nicht erneut auf.`;
+      const picks = Object.entries(decision.answers ?? {}).map(([q, a]) => `• ${q} → ${a}`);
+      let message: string;
+      if (picks.length > 0) {
+        message = `Antwort des Nutzers:\n${picks.join("\n")}`;
+        if (decision.response && decision.response.trim()) message += `\n• Ergänzung: ${decision.response.trim()}`;
+        message += `\n\nFahre mit dieser Wahl fort und rufe AskUserQuestion dafür nicht erneut auf.`;
+      } else {
+        // Freitext-Anweisung ohne konkrete Auswahl (z.B. Parallel-Streams-Einschätzung).
+        message = (decision.response && decision.response.trim()) || "(keine Auswahl getroffen)";
+      }
       resolve({ behavior: "deny", message });
     } else {
       resolve({ behavior: "deny", message: decision.message, interrupt: decision.interrupt });

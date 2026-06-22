@@ -7,6 +7,7 @@ import { Inspector } from "./components/Inspector";
 import { PermissionDialog } from "./components/PermissionDialog";
 import { NewStreamDialog } from "./components/NewStreamDialog";
 import { AboutDialog } from "./components/AboutDialog";
+import { ParallelDialog } from "./components/ParallelDialog";
 import { RELEASE, buildDateLocal } from "./version";
 import "./App.css";
 
@@ -132,6 +133,7 @@ export default function App() {
       {showNew && <NewStreamDialog onClose={() => setShowNew(false)} />}
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       <PermissionDialog />
+      <ParallelDialog />
     </div>
   );
 }

@@ -103,6 +103,8 @@ interface MadsState {
   autonomy: AutonomyConfig;
   selectedId?: string;
   debugLog: string[];
+  /** Offener „Parallel starten"-Picker (nach Anforderung der Integrator-Einschätzung). */
+  parallelPicker?: { agentId: string; options: { label: string; description: string }[] };
 
   init: () => Promise<void>;
   setAutonomy: (config: AutonomyConfig) => Promise<void>;
@@ -120,6 +122,9 @@ interface MadsState {
   }) => Promise<void>;
   selectAgent: (id: string) => void;
   answerPermission: (req: PermissionRequestMsg, decision: PermissionDecision) => Promise<void>;
+  requestParallelAssessment: (req: PermissionRequestMsg) => Promise<void>;
+  spawnParallelStreams: (picks: { label: string; brief: string }[]) => Promise<void>;
+  cancelParallelPicker: () => void;
   sendInput: (id: string, text: string, images?: ImageInput[]) => Promise<void>;
   setPermissionMode: (id: string, mode: PermissionMode) => Promise<void>;
   interruptAgent: (id: string) => Promise<void>;
@@ -373,6 +378,7 @@ export const useStore = create<MadsState>((set) => {
     autonomy: { autoSync: true, collisionScan: true },
     selectedId: undefined,
     debugLog: [],
+    parallelPicker: undefined,
 
     setAutonomy: async (config) => {
       set({ autonomy: config });
@@ -459,6 +465,45 @@ export const useStore = create<MadsState>((set) => {
       patchAgent(req.agentId, { status: "running", workStartedAt: Date.now() });
       await sendHost({ ...envelope(), type: "answer_permission", agentId: req.agentId, requestId: req.requestId, decision });
     },
+
+    requestParallelAssessment: async (req) => {
+      // Optionen der Frage merken und den Integrator um eine Unabhängigkeits-Einschätzung
+      // bitten (er startet selbst nichts). Danach wählt der Nutzer im Parallel-Picker.
+      const options = (req.questions ?? []).flatMap((q) =>
+        (q.options ?? []).map((o) => ({ label: o.label, description: o.description })),
+      );
+      const instruction =
+        "Der Nutzer möchte mehrere der gerade vorgeschlagenen Optionen PARALLEL bearbeiten lassen — " +
+        "je in einem eigenen git-Worktree/Branch (eigene Sub-Agenten).\n" +
+        "Beurteile ZUERST, welche der Optionen voneinander UNABHÄNGIG sind (gleichzeitig bearbeitbar, " +
+        "ohne sich gegenseitig zu beeinflussen: keine geteilten Dateien/Funktionen, keine Reihenfolge-/" +
+        "Ergebnis-Abhängigkeit). Gib pro Option kurz an: unabhängig ja/nein + 1 Satz Begründung, " +
+        "und für die unabhängigen je einen knappen Aufgaben-Brief für einen Sub-Agenten.\n" +
+        "Starte selbst KEINE Arbeit und rufe das Frage-Tool nicht erneut auf — der Nutzer wählt anhand " +
+        "deiner Einschätzung aus.";
+      set((s) => ({
+        permissions: s.permissions.filter((p) => p.requestId !== req.requestId),
+        parallelPicker: { agentId: req.agentId, options },
+      }));
+      patchAgent(req.agentId, { status: "running", workStartedAt: Date.now() });
+      await sendHost({
+        ...envelope(),
+        type: "answer_permission",
+        agentId: req.agentId,
+        requestId: req.requestId,
+        decision: { behavior: "answer_questions", answers: {}, response: instruction },
+      });
+    },
+
+    spawnParallelStreams: async (picks) => {
+      const create = useStore.getState().createAgent;
+      for (const p of picks) {
+        await create({ label: p.label, prompt: p.brief, role: "sub", mock: false, permissionMode: "auto" });
+      }
+      set({ parallelPicker: undefined });
+    },
+
+    cancelParallelPicker: () => set({ parallelPicker: undefined }),
 
     sendInput: async (id, text, images) => {
       pushEvent(id, { id: mkId(), kind: "user", text, images: images?.length });

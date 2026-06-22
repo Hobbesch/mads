@@ -41,8 +41,13 @@ function ToolApproval({ req }: { req: PermissionRequestMsg }) {
 
 function QuestionForm({ req }: { req: PermissionRequestMsg }) {
   const answer = useStore((s) => s.answerPermission);
+  const requestParallel = useStore((s) => s.requestParallelAssessment);
+  const agent = useStore((s) => s.agents[req.agentId]);
+  const project = useStore((s) => s.project);
   const [picks, setPicks] = useState<Record<string, string>>({});
   const questions = req.questions ?? [];
+  const optionCount = questions.reduce((n, q) => n + (q.options?.length ?? 0), 0);
+  const canParallel = !!project && agent?.role === "integrator" && optionCount >= 2;
 
   const submit = () => {
     void answer(req, { behavior: "answer_questions", answers: picks });
@@ -71,6 +76,15 @@ function QuestionForm({ req }: { req: PermissionRequestMsg }) {
         </div>
       ))}
       <div className="perm-actions">
+        {canParallel && (
+          <button
+            className="parallel-btn"
+            title="Den Integrator prüfen lassen, welche Optionen unabhängig sind, und sie als eigene Streams starten"
+            onClick={() => void requestParallel(req)}
+          >
+            Parallel-Streams…
+          </button>
+        )}
         <button className="allow" disabled={Object.keys(picks).length < questions.length} onClick={submit}>
           Antwort senden
         </button>
