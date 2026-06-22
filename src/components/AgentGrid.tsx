@@ -22,7 +22,7 @@ function AgentCard({ agent }: { agent: AgentVM }) {
       onClick={() => select(agent.id)}
     >
       <div className="card-head">
-        <StatusDot status={agent.status} />
+        {active ? <span className="card-spin" title="läuft" /> : <StatusDot status={agent.status} />}
         <span className="card-label">{agent.label}</span>
         <span className={`role-badge ${agent.role}`}>{agent.role === "integrator" ? "Integrator" : "Sub"}</span>
       </div>
