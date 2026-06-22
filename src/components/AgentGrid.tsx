@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
@@ -67,10 +68,15 @@ export function AgentGrid() {
   const agents = useStore((s) => s.agents);
   const order = useStore((s) => s.order);
   const project = useStore((s) => s.project);
-  // Gemergte Sub-Streams sind „erledigt" → nicht im aktiven Grid (in der Sidebar unter „Erledigt").
-  const list = order.map((id) => agents[id]).filter(Boolean).filter((a) => a.pr?.state !== "MERGED");
+  const [showDone, setShowDone] = useState(false);
 
-  if (list.length === 0) {
+  const all = order.map((id) => agents[id]).filter(Boolean);
+  // Gemergte Sub-Streams sind „erledigt" → eigene kollabierte Sektion (zuvor in der Sidebar
+  // unter „Erledigt"; die Sidebar ist aufgelöst, doc 10 §2.1). Aktives Grid = nicht-gemergt.
+  const list = all.filter((a) => a.pr?.state !== "MERGED");
+  const doneSubs = all.filter((a) => a.role === "sub" && a.pr?.state === "MERGED");
+
+  if (list.length === 0 && doneSubs.length === 0) {
     return (
       <div className="empty-state">
         <div className="empty-title">Keine aktiven Agenten</div>
@@ -92,10 +98,32 @@ export function AgentGrid() {
   }
 
   return (
-    <div className="grid">
-      {list.map((a) => (
-        <AgentCard key={a.id} agent={a} />
-      ))}
-    </div>
+    <>
+      {list.length > 0 && (
+        <div className="grid">
+          {list.map((a) => (
+            <AgentCard key={a.id} agent={a} />
+          ))}
+        </div>
+      )}
+      {doneSubs.length > 0 && (
+        <div className="grid-done">
+          <button
+            className="group-title done-toggle"
+            onClick={() => setShowDone((v) => !v)}
+            title="Gemergte Streams ein-/ausblenden"
+          >
+            {showDone ? "▾" : "▸"} Erledigt · {doneSubs.length}
+          </button>
+          {showDone && (
+            <div className="grid">
+              {doneSubs.map((a) => (
+                <AgentCard key={a.id} agent={a} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </>
   );
 }

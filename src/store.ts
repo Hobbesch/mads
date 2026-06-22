@@ -26,9 +26,11 @@ import type {
 } from "../shared/protocol";
 import type { Collision } from "../shared/collision";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
+import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
 import { toolCommand } from "./toolText";
 
 export type AgentRole = "integrator" | "sub";
+export type { ViewId } from "./uiPrefs";
 
 export interface TodoItem {
   content: string;
@@ -88,7 +90,7 @@ export interface SidecarInfo {
   sdkVersion?: string;
 }
 
-interface MadsState {
+export interface MadsState {
   sidecar: SidecarInfo;
   project?: ProjectInfo;
   projectStatus: "none" | "opening" | "ready" | "error";
@@ -108,6 +110,16 @@ interface MadsState {
   /** Composer-Entwürfe je Agent (Text + Anhänge) — bleiben beim Umschalten erhalten. */
   drafts: Record<string, string>;
   draftImages: Record<string, ImageInput[]>;
+
+  // ── Activity-Rail / Primary-Panel (docs/design/10-navigation-toolbar.md §3.1) ──
+  /** Welcher Rail-View aktiv ist (persistiert). "streams" (Default) ⇒ KEIN Primary-Panel
+   *  — nur Content (§1a.5); "files"/"settings" ⇒ aktivitäts-spezifisches Mittel-Panel.
+   *  "changes" ist KEIN ViewId — Overlay via changeOverviewOn (§2.3). */
+  activeView: ViewId;
+  /** Rail nur-Icon (true) vs. Icon+Text (false) (persistiert). */
+  railCollapsed: boolean;
+  /** Change-Overview-Overlay an/aus (Owner: doc 09). Der Rail-„Änderungen"-Eintrag toggelt es (§2.3). */
+  changeOverviewOn: boolean;
 
   init: () => Promise<void>;
   setAutonomy: (config: AutonomyConfig) => Promise<void>;
@@ -143,6 +155,12 @@ interface MadsState {
   pollProject: () => Promise<void>;
   resumeAgent: (r: ResumableAgent) => Promise<void>;
   resumeAll: () => Promise<void>;
+
+  // ── Activity-Rail / Primary-Panel actions (doc 10 §3.1) ──
+  setActiveView: (view: ViewId) => void;
+  toggleRailCollapsed: () => void;
+  setRailCollapsed: (collapsed: boolean) => void;
+  toggleChangeOverview: () => void;
 }
 
 const mkId = () => crypto.randomUUID();
@@ -404,6 +422,25 @@ export const useStore = create<MadsState>((set) => {
     parallelPicker: undefined,
     drafts: {},
     draftImages: {},
+
+    activeView: loadUiPrefs().activeView,
+    railCollapsed: loadUiPrefs().railCollapsed,
+    changeOverviewOn: false,
+
+    setActiveView: (view) => {
+      set({ activeView: view });
+      saveUiPrefs({ activeView: view, railCollapsed: useStore.getState().railCollapsed });
+    },
+    toggleRailCollapsed: () => {
+      const next = !useStore.getState().railCollapsed;
+      set({ railCollapsed: next });
+      saveUiPrefs({ activeView: useStore.getState().activeView, railCollapsed: next });
+    },
+    setRailCollapsed: (collapsed) => {
+      set({ railCollapsed: collapsed });
+      saveUiPrefs({ activeView: useStore.getState().activeView, railCollapsed: collapsed });
+    },
+    toggleChangeOverview: () => set((s) => ({ changeOverviewOn: !s.changeOverviewOn })),
 
     setAutonomy: async (config) => {
       set({ autonomy: config });

@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "./store";
-import { Sidebar } from "./components/Sidebar";
+import { ActivityRail } from "./components/ActivityRail";
+import { PrimaryPanel } from "./components/PrimaryPanel";
+import { ChangeOverlay } from "./components/ChangeOverlay";
 import { AgentGrid } from "./components/AgentGrid";
 import { Inspector } from "./components/Inspector";
 import { PermissionDialog } from "./components/PermissionDialog";
@@ -37,11 +39,42 @@ export default function App() {
     };
   }, []);
 
+  // Activity-Rail-Shortcuts (doc 10 §8) — MVP rein im Frontend (keine Core-Änderung):
+  // ⌘1 Streams · ⌘2 Dateien · ⌘, Einstellungen · ⌃⌘B Rail ein/aus · ⇧⌘D Änderungen-Toggle.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const s = useStore.getState();
+      if (e.metaKey && e.ctrlKey && (e.key === "b" || e.key === "B")) {
+        e.preventDefault();
+        s.toggleRailCollapsed();
+      } else if (e.metaKey && e.shiftKey && (e.key === "d" || e.key === "D")) {
+        if (!s.project) return;
+        e.preventDefault();
+        s.toggleChangeOverview();
+      } else if (e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (e.key === "1") {
+          e.preventDefault();
+          s.setActiveView("streams");
+        } else if (e.key === "2") {
+          if (!s.project) return; // "Dateien" ohne Projekt deaktiviert
+          e.preventDefault();
+          s.setActiveView("files");
+        } else if (e.key === ",") {
+          e.preventDefault();
+          s.setActiveView("settings");
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const lastEscalation = escalations[escalations.length - 1];
 
   return (
     <div className="app">
-      <Sidebar onNewStream={() => setShowNew(true)} onAbout={() => setShowAbout(true)} />
+      <ActivityRail onNewStream={() => setShowNew(true)} onAbout={() => setShowAbout(true)} />
+      <PrimaryPanel />
 
       <div className="main">
         <div className="titlebar" data-tauri-drag-region>
@@ -151,6 +184,7 @@ export default function App() {
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       <PermissionDialog />
       <ParallelDialog />
+      <ChangeOverlay />
     </div>
   );
 }
