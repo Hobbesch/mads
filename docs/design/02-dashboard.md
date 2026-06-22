@@ -1,6 +1,6 @@
 # 02 — Dashboard (Gesamtübersicht)
 
-> **Status:** Design, implementierungsreif. Stand: 2026-06-19.
+> **Status:** Design, implementierungsreif. Stand: 2026-06-22.
 > **Sprache:** Deutsch (Fließtext), Englisch (Code/Identifier).
 > **Zielprojekt:** **mads** — native macOS-App (Tauri 2 + React/TS, Rust-Core, Node-Sidecar
 > mit dem offiziellen Claude Agent SDK). Ein Mensch arbeitet parallel mit einem
@@ -39,6 +39,13 @@ ihnen zu widersprechen:
   Konflikt-Routing. Das Main-Agent-Panel (§7 hier) ist die *View* darauf.
 - [[04-sub-agents]] — Sub-Agent-Lebenszyklus, Rückfrage-Protokoll, GitHub-Interaktion; die
   Sub-Agent-Karten (§3 hier) sind die *View* darauf.
+- [[10-navigation-toolbar]] — Activity-Rail (`activeView`/`ToolbarItem`-Registry), die dieses
+  Dashboard-Layout **ersetzt** die alte Sidebar durch: der Default-Streams-View ist **Rail + Content
+  (AgentGrid + Inspector)** ohne persistente Sidebar (Doc 10 §1a löst sie auf — die Stream-Liste war
+  redundant mit dem `AgentGrid`); das Primary-Panel erscheint nur aktivitäts-spezifisch
+  (Dateien/Settings). **„Änderungen" ist kein Primary-Panel**, sondern ein `position:fixed`-Overlay
+  (Toggle `changeOverviewOn`, [[09-change-overview]] §1.4), das mit jeder View koexistiert.
+  Streams-/Changes-Badges auf der Rail spiegeln die hier gezeigten Eskalations-/Kollisions-Zähler.
 - [[sidecar-orchestration]] — NDJSON-Message-Set (`HostMessage`/`SidecarMessage`), aus dem
   alle Echtzeit-Daten dieses Dashboards stammen.
 - [[github-multiagent]] — GraphQL-Polling, Eskalations-Signale, `gh`-Exit-Codes. Liefert die
@@ -54,8 +61,8 @@ ihnen zu widersprechen:
 
 | Leitfrage | Wo im UI beantwortet | Datenquelle |
 |---|---|---|
-| Wie viele Agenten laufen / sind idle / fertig? | Toolbar-Aggregat + Sidebar-Sektionszähler | `status_update` (Sidecar) |
-| **Wer braucht jetzt Input?** | „Needs-attention"-Sektion oben im Grid + Inbox-Badge + Tray | `permission_request`, `needs_input` |
+| Wie viele Agenten laufen / sind idle / fertig? | Toolbar-Aggregat + Grid-Sektionszähler („Running"/„Idle/Done") | `status_update` (Sidecar) |
+| **Wer braucht jetzt Input?** | „Needs-attention"-Sektion oben im Grid + Inbox-Badge + Rail-Badge auf „Streams" + Tray | `permission_request`, `needs_input` |
 | **Wo ist eine Eskalation?** | Eskalations-Banner + rote Karten-Border + Eskalations-Spalte | `error` (Sidecar) + GraphQL-Signale ([[github-multiagent]]) |
 | Was tut Agent X gerade? | Karten-Statuszeile (`currentStep`) + Live-Terminal | `status_update.currentStep`, `agent_event` |
 | Wie viel kostet/dauert es? | Karten-Footer (Token/$), Toolbar-Aggregat | `cost_update` |
@@ -66,61 +73,74 @@ ihnen zu widersprechen:
 ## 2. Layout (macOS-HIG, NavigationSplitView-Muster)
 
 mads gehört zur App-Klasse **Developer-Tool / Monitoring-Dashboard** (vgl. Xcode, Tower,
-OrbStack). Das kanonische Layout ist **Sidebar + Content + Inspector** (dreispaltiger
-`NavigationSplitView`), siehe `macos-design.md` A.0. Konkret für das Dashboard:
+OrbStack). Das Layout folgt dem **Activity-Bar → (aktivitäts-spezifisches) Side-Panel → Content +
+Inspector**-Muster (VS Code Side-Bar, Xcode-Navigator), siehe `macos-design.md` A.0 und
+[[10-navigation-toolbar]] §1a. **Wichtig:** Der Default-Streams-View hat **keine persistente
+Sidebar** — die frühere Stream-Sidebar war redundant mit dem `AgentGrid` und ist aufgelöst
+([[10-navigation-toolbar]] §1a). Der Dashboard-Default ist **Activity-Rail + Content (AgentGrid +
+Inspector)**; ein Mittel-Panel erscheint nur bei aktivitäts-spezifischen Views (Dateien/Settings)
+— „Änderungen" ist davon ausgenommen (Overlay, kein Panel; [[09-change-overview]] §1.4,
+[[10-navigation-toolbar]] LAYOUT-CONTRACT (g)). Konkret für den Streams-View:
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────────────────┐
 │ ●●●   mads · 6 agents (4 running · 1 needs input · 1 escalation)   [⟳ Sync all] [+ New] [⌥⌘I] │ ← Toolbar (vibrant, drag-region)
-├──────────────────┬────────────────────────────────────────────────────┬─────────────────┤
-│  SIDEBAR         │  CONTENT                                            │  INSPECTOR       │
-│  (NSVisualEffect │                                                     │  (tertiär,       │
-│   ::Sidebar)     │  ┌── ⚠ ESCALATION BANNER (persistent) ──────────┐  │   einklappbar)   │
-│                  │  │ Agent „payments" — CI failed · [View diff]    │  │                  │
-│ ▾ PROJECT        │  │                       [Re-run CI] [Rebase]    │  │  Tabs:           │
-│   ◆ acme/web     │  └───────────────────────────────────────────────┘  │  [Diff][Logs]    │
-│                  │                                                     │  [PR][Escal.]    │
-│ ▾ STREAMS        │  ── NEEDS ATTENTION (sorted first) ───────────────  │                  │
-│   ● Main (Integr)│  ┌──────────┐ ┌──────────┐                          │  Agent: payments │
-│   ⬤ auth      ②  │  │ 🟡 auth   │ │ 🔴 paymnt │                          │  Branch: feat/.. │
-│   ⬤ payments  ⚠  │  │ waiting   │ │ escalation│                          │  PR #142 BLOCKED │
-│   ◯ search       │  │ Permission│ │ CI failed │                          │  ───────────────  │
-│   ◯ docs         │  └──────────┘ └──────────┘                          │  + git diff /     │
-│                  │  ── RUNNING ─────────────────────────────────────   │    xterm logs /   │
-│ ▾ INBOX       ③  │  ┌──────────┐ ┌──────────┐ ┌──────────┐             │    PR checks      │
-│   3 open requests│  │ 🔵 search │ │ 🔵 docs   │ │ 🔵 refac. │             │                  │
-│                  │  │ Bash:test │ │ Edit:md   │ │ Grep:...  │             │                  │
-│ ▾ ACTIVITY       │  └──────────┘ └──────────┘ └──────────┘             │                  │
-│                  │  ── IDLE / DONE ─────────────────────────────────   │                  │
-│ ⚙ Settings       │  ┌──────────┐                                        │                  │
-│                  │  │ 🟢 search │ … (collapsed group)                    │                  │
-│                  │  ╞══════════════════════════════════════════════════╡                  │
-│                  │  ║ LIVE TERMINAL — [auth ▾] 🟡   [⌕ filter]  [↧ tail]║                  │
-│                  │  ║ $ npm test                                        ║                  │
-│                  │  ║ ● Running 12/30 …                                 ║ ← xterm.js (opak) │
-│                  │  ╚══════════════════════════════════════════════════╝                  │
-├──────────────────┴────────────────────────────────────────────────────┴─────────────────┤
+├────────┬───────────────────────────────────────────────────────────────┬─────────────────┤
+│ RAIL   │  CONTENT (.main)                                               │  INSPECTOR       │
+│ (Activ.│                                                                │  (tertiär,       │
+│  -Rail,│  ┌── ⚠ ESCALATION BANNER (persistent) ──────────────────────┐ │   einklappbar)   │
+│  vibr.)│  │ Agent „payments" — CI failed · [View diff]                │ │                  │
+│        │  │                                   [Re-run CI] [Rebase]    │ │  Tabs:           │
+│ ◆ mads │  └────────────────────────────────────────────────────────────┘ │  [Diff][Logs]    │
+│        │                                                                │  [PR][Escal.]    │
+│ ◇ Strm②│  ── NEEDS ATTENTION (sorted first) ──────────────────────────  │                  │
+│ ▤ Dat. │  ┌──────────┐ ┌──────────┐                                     │  Agent: payments │
+│ ⛁ Chg④ │  │ 🟡 auth   │ │ 🔴 paymnt │                                     │  Branch: feat/.. │
+│ ⟳ Upd●│  │ waiting   │ │ escalation│                                     │  PR #142 BLOCKED │
+│        │  │ Permission│ │ CI failed │                                     │  ───────────────  │
+│ + New  │  └──────────┘ └──────────┘                                     │  + git diff /     │
+│ ────── │  ── RUNNING ────────────────────────────────────────────────  │    xterm logs /   │
+│ ⚙ Set. │  ┌──────────┐ ┌──────────┐ ┌──────────┐                        │    PR checks      │
+│ ⓘ Über │  │ 🔵 search │ │ 🔵 docs   │ │ 🔵 refac. │                        │                  │
+│ «       │  │ Bash:test │ │ Edit:md   │ │ Grep:...  │                        │                  │
+│        │  └──────────┘ └──────────┘ └──────────┘                        │                  │
+│        │  ── IDLE / DONE ────────────────────────────────────────────   │                  │
+│        │  ┌──────────┐                                                   │                  │
+│        │  │ 🟢 search │ … (collapsed group, inkl. „Erledigt · N")        │                  │
+│        │  ╞═══════════════════════════════════════════════════════════╡ │                  │
+│        │  ║ LIVE TERMINAL — [auth ▾] 🟡   [⌕ filter]  [↧ tail]         ║ │                  │
+│        │  ║ $ npm test                                                  ║ │                  │
+│        │  ║ ● Running 12/30 …                                          ║ │ ← xterm.js (opak)│
+│        │  ╚═══════════════════════════════════════════════════════════╝ │                  │
+├────────┴───────────────────────────────────────────────────────────────┴─────────────────┤
 │ STATUS BAR:  ◷ Sidecar OK · gh ✓ · poll 23s · Σ $3.41 · 142k tok · 6 agents               │ ← Statusleiste
 └───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+> Die **Inbox** (alle offenen Rückfragen, früher eine Sidebar-Sektion ③) bleibt als
+> ⌘0-Overlay-Panel + „Needs attention"-Grid-Sektion erreichbar (§4.1) — sie braucht keine
+> persistente Sidebar-Spalte. **PROJECT**/**Recent** (früher Sidebar-Box) leben jetzt im
+> Rail-Eintrag „Projekt" + Popover ([[10-navigation-toolbar]] §1.3); der aktive `owner/repo` ist
+> zusätzlich eine Titlebar-Pill. Die Stream-Liste *ist* das Grid — es gibt keine zweite.
 
 **Layout-Regeln (HIG, aus `macos-design.md` A.1–A.5):**
 
 | Bereich | Material / Verhalten | Quelle |
 |---|---|---|
 | Titlebar/Toolbar | `TitleBarStyle::Overlay`, durchlaufende Vibrancy, oben ein `data-tauri-drag-region`-Streifen | A.1 |
-| Sidebar | `NSVisualEffectMaterial::Sidebar`, Breite 200–280 pt, einklappbar (**⌃⌘S**), Icon-only bei < 160 pt | A.2 |
+| Activity-Rail | `NSVisualEffectMaterial::Sidebar`-Look (`--sidebar-bg` + Vibrancy), ~176 pt aufgeklappt / ~52 pt nur-Icon, Kollaps-Toggle (**⌃⌘B**) — siehe [[10-navigation-toolbar]] §1.5 | A.2 |
+| Primary-Panel (Mittel-Slot) | **nur aktivitäts-spezifisch** (Dateien/Settings); im Streams-View **nicht vorhanden** ([[10-navigation-toolbar]] §1a.5); „Änderungen" ist ein Overlay, kein Slot (§1.4 in 09) | A.0 |
 | Content (Grid) | dezenter `WindowBackground` **oder** solider Hintergrund; Cards opak | A.5 |
 | **Live-Terminal & Diff** | **opak, kein Vibrancy** (Lesbarkeit) | A.5 (Pflicht-Caveat) |
 | Inspector | tertiäre Spalte, **zuerst ausgeblendet** bei schmalem Fenster, Toggle **⌥⌘I** | A.4 |
-| Statusleiste | dünne opake Leiste, sekundäre Labels | A.8 |
+| Statusleiste | dünne opake Leiste, sekundäre Labels (inkl. Sidecar-Health, früher Sidebar-Foot) | A.8 |
 
 **Responsives Kollabieren (Breakpoints):**
 
 ```
-> 1200 pt:  Sidebar + Content + Inspector (alle drei)
-900–1200:   Sidebar + Content (Inspector eingeklappt; Toggle holt ihn als Overlay)
-< 900:      Sidebar einklappbar; Content full-bleed; Min-Window 900×600 (tauri.conf min_inner_size)
+> 1200 pt:  Rail + (Primary-Panel falls aktiv) + Content + Inspector
+900–1200:   Rail + Content (Inspector eingeklappt; Toggle holt ihn als Overlay)
+< 900:      Rail auto-kollabiert (nur-Icon, Doc 10 OE-51); Content full-bleed; Min-Window 900×600 (tauri.conf min_inner_size)
 ```
 
 > **OFFENE FRAGE (Layout):** Soll das **Live-Terminal-Panel** fest unten im Content angedockt
@@ -285,8 +305,9 @@ Pseudo-Prozent. Ein Pseudo-Balken wirkt unehrlich.
 Mehrstufige Hervorhebung vom dezentesten zum auffälligsten (aus `macos-design.md` C.2),
 ausgelöst beim Übergang `running → waiting_input`:
 
-1. **Badge** an der Karte (`openRequests`-Zähler) + Sidebar-Item-Badge (②) + Inbox-Sektionszähler
-   (③) + **Tray-/Dock-Badge** (Aggregat „2 brauchen Input").
+1. **Badge** an der Karte (`openRequests`-Zähler) + **Rail-Badge auf „Streams"** (②, der
+   Off-Dashboard-Awareness-Anker, [[10-navigation-toolbar]] §1a.6) + Inbox-Overlay-Zähler (⌘0)
+   + **Tray-/Dock-Badge** (Aggregat „2 brauchen Input").
 2. **Sortierung:** Karte rückt in die **„Needs attention"-Sektion** ganz oben; gelbe Border.
 3. **Dezente Pulse-Animation** an der Ampel — **respektiert Reduced Motion** (§11).
 4. **Native Notification** (Tauri `plugin-notification`, `macos-design.md` B.3) **nur beim
@@ -299,8 +320,10 @@ ausgelöst beim Übergang `running → waiting_input`:
 ### 4.1 Inbox / Queue aller offenen Rückfragen (über alle Agenten)
 
 Die **Inbox** ist die zentrale, agentenübergreifende Liste aller offenen Permission-Requests
-und `AskUserQuestion`-Rückfragen. Sie ist als Sidebar-Sektion **und** als overlay-bares Panel
-(Shortcut **⌘0**) erreichbar, damit der Mensch sequenziell „abarbeiten" kann, ohne zwischen
+und `AskUserQuestion`-Rückfragen. Sie ist als overlay-bares Panel (Shortcut **⌘0**) erreichbar
+(mit der Auflösung der Sidebar entfällt die frühere Sidebar-Sektion — das ⌘0-Overlay + die
+„Needs attention"-Grid-Sektion ersetzen sie vollständig), damit der Mensch sequenziell
+„abarbeiten" kann, ohne zwischen
 Karten zu springen.
 
 ```typescript
@@ -480,9 +503,9 @@ function makeTerminal(): Terminal {
 > Vollständige Logik in [[03-main-agent]]; hier nur die **View** im Dashboard.
 
 Der Main-Agent ist die mads-Verkörperung des **einen Integrators** (paix §2: *„genau EIN
-Integrator merged"*). Sein Panel ist visuell vom Sub-Agent-Grid abgesetzt (eigenes
-Sidebar-Item „● Main (Integrator)", eigener Akzent) und ist der **einzige Ort mit
-Merge-Aktionen**.
+Integrator merged"*). Seine Karte ist im Grid visuell vom Sub-Agent-Grid abgesetzt (eigener
+`role-badge.integrator`-Akzent + eigene Grid-Sektion „● Main (Integrator)", `AgentGrid.tsx`) und
+ist der **einzige Ort mit Merge-Aktionen** (im Inspector des selektierten Integrators).
 
 ```
 ┌─ MAIN AGENT — Integrator ─────────────────────────────────────────────┐
@@ -620,10 +643,12 @@ native Window-Tabs — ein Fenster pro Detach, [[macos-design]] A.9.)
 | **⌘N** | Neuer Agent / Stream |
 | **⌘.** | Aktiven Agenten stoppen (Cancel) |
 | **⌘0** | Inbox-Overlay öffnen/fokussieren |
-| **⌘1..9** | Zu Agent N / dessen Terminal springen |
+| **⌘1** | View „Streams" (Content/Grid; **kein** Mittel-Panel) — Rücksprung-Anker ([[10-navigation-toolbar]] §8/§1a.6) |
+| **⌘2 / ⌘…n** | Rail-Panels „Dateien" / weitere ([[10-navigation-toolbar]] §8) |
+| **⇧⌘D** | „Änderungen" an/aus — Overlay-Toggle (`changeOverviewOn`), **kein** Panel ([[09-change-overview]] §8, [[10-navigation-toolbar]] §8) |
 | **⌃`** | Live-Terminal-Panel ein/aus |
-| **⌘F** | Suche (Terminal/Agentenliste) |
-| **⌃⌘S** | Sidebar ein/aus |
+| **⌘F** | Suche (Terminal/Grid) |
+| **⌃⌘B** | Activity-Rail ein-/ausklappen (ersetzt das frühere **⌃⌘S** „Sidebar ein/aus" — keine Sidebar mehr) |
 | **⌥⌘I** | Inspector ein/aus |
 | **⌘R** | Status/Polling neu laden |
 | **⌘,** | Settings |
@@ -640,7 +665,7 @@ native Window-Tabs — ein Fenster pro Detach, [[macos-design]] A.9.)
 | State | Anzeige |
 |---|---|
 | **Empty (kein Agent)** | Zentrierte Illustration + „No agents running" + primärer `[+ New stream]`-Button + Kurz-Hint „Each stream runs on its own branch & worktree". |
-| **Empty (kein Repo/Projekt)** | „Open a Git repository to start" + `[Open repo…]`; Sidebar zeigt nur „Project"-Platzhalter. |
+| **Empty (kein Repo/Projekt)** | „Open a Git repository to start" + `[Open repo…]`; der Rail-Eintrag „Projekt" (Popover) ist der Einstieg zum Öffnen ([[10-navigation-toolbar]] §1.3). |
 | **Loading (App-Start)** | Skeleton-Karten (graue Platzhalter) + Statusleiste „Connecting to sidecar…". Beim `sidecar_ready` mit `resumableAgents`: **Resume-Banner** „N agents can be resumed [Resume all] [Dismiss]" (`sidecar-orchestration.md` §7.2). |
 | **Loading (PR-Status)** | Karten zeigen PR-Badge als Spinner solange `mergeStateStatus == UNKNOWN` (Re-Poll, **kein** Fehler — §5). |
 | **Error (Sidecar down)** | Persistentes rotes Banner „Sidecar disconnected" + `[Restart sidecar]`; Karten gehen in „stale"-Look (gedimmt), keine Aktionen außer Restart. Core erkennt EOF auf stdout (`sidecar-orchestration.md` §7.5). |
@@ -657,14 +682,14 @@ Aus `macos-design.md` Teil D:
 - **`prefers-reduced-motion: reduce`** → Pulse/Bounce/Spinner-Rotation aus oder durch
   Crossfade ersetzt; Status-Übergänge ohne Bewegung. CSS-Global-Reset + JS-Guard für
   xterm-Cursor-Blink-Reduktion.
-- **`prefers-reduced-transparency: reduce`** → Sidebar/Toolbar-Vibrancy durch **soliden**
+- **`prefers-reduced-transparency: reduce`** → Activity-Rail-/Toolbar-Vibrancy durch **soliden**
   Hintergrund ersetzen, **sowohl** im CSS **als auch** das Vibrancy-Material zur Laufzeit
   deaktivieren ([[macos-design]]).
 - **`prefers-contrast: more`** → Separatoren/Borders verstärken (Karten-Border, Ampel-Ring).
 - **Farbe nie alleiniger Träger:** jeder Status hat Farbe **+ Icon + Text-Label** (§3.2,
   „Differentiate Without Color").
-- **Fokus-Ringe** (`:focus-visible`) sichtbar; logische Tab-Reihenfolge: Toolbar → Sidebar →
-  Grid (Karte für Karte) → Terminal → Inspector.
+- **Fokus-Ringe** (`:focus-visible`) sichtbar; logische Tab-Reihenfolge: Toolbar → Activity-Rail →
+  (Primary-Panel falls aktiv) → Grid (Karte für Karte) → Terminal → Inspector.
 - **VoiceOver:** sinnvolle Labels für Ampeln („Agent auth, waiting for input"); **Live-Region**
   für eingehende „needs input"/Eskalations-Events, damit VoiceOver sie ansagt; Inbox-Items als
   Liste mit klaren Rollen.

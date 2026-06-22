@@ -39,6 +39,7 @@ ausführbar und im UI sichtbar**.
 | [[04-sub-agents]] | Sub-Agent-Lebenszyklus, Worktree-Stream, Rückfrage-Protokoll, Crash-Recovery | Detailliert die Sub-Stream-Schicht aus §3 hier |
 | [[05-update-area]] | Update-Monitor, Relevanz-Agent, Issue-Erstellung, Self-Update, Versions-Pinning | Detailliert den Update-Job aus §10 hier |
 | [[06-ownership-and-coordination]] | Region-Ownership (`OwnershipRule`, `CoordinationArtifact`), Trespass-Erkennung (`detectTrespass`), `EscalationKind: "ownership_trespass"` | Verfeinert die datei-grobe Ownership-Map aus §5.1/§8 hier auf Sub-Datei-Ebene |
+| [[10-navigation-toolbar]] | Activity-Rail / Primary-Panel (`activeView`/`ToolbarItem`-Registry), neues dreigliedriges Frontend-Layout | Reine UI-Schicht über dem Layout aus §2 hier; bewahrt die fünf Kern-Invarianten (kein Merge/Branch/State-Store in der Rail) |
 | [[sidecar-orchestration]] | Node-Sidecar, `AgentSession`-Pool, NDJSON-Protokoll-Details, State-Maschine, Backpressure | Recherche-Input zur Sidecar-Schicht aus §2/§6 hier |
 | [[github-multiagent]] | gh/Octokit, Eskalations-Signale, Branch-Protection, Merge-Queue, Auth | Recherche-Input zur GitHub-/Integrator-Mechanik aus §3/§7 hier |
 | [[claude-code-capabilities]] | Agent SDK, `canUseTool`, Hooks, Permission-Modes, Modelle, Auth | Recherche-Input zur Agenten-Schicht + Permission-Gating aus §2/§7 hier |
