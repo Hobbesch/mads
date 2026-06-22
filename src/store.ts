@@ -416,6 +416,9 @@ export const useStore = create<MadsState>((set) => {
     createAgent: async ({ label, prompt, role, mock, model, branch, permissionMode }) => {
       const id = crypto.randomUUID();
       const mode: PermissionMode = permissionMode ?? "auto";
+      // Modell-Default nach CLAUDE.md: Integrator Opus, Subs Sonnet (schont Rate-Limit/Kosten,
+      // wichtig bei mehreren parallelen Subs).
+      const finalModel = model ?? (role === "integrator" ? "claude-opus-4-8" : "claude-sonnet-4-6");
       const project = useStore.getState().project;
       const agent: AgentVM = {
         id,
@@ -447,7 +450,7 @@ export const useStore = create<MadsState>((set) => {
         prompt,
         label,
         role,
-        model,
+        model: finalModel,
         mock,
         permissionMode: mode,
         ...(useWorktree && project
