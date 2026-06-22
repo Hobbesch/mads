@@ -139,6 +139,17 @@ export class Orchestrator {
       return;
     }
 
+    // Ohne Commits gegenüber dem Default-Branch scheitert `gh pr create` mit einem
+    // kryptischen „No commits between …". Vorab klar prüfen und führen.
+    const pre = await gitStatus(s.repoRoot, s.worktreePath, s.branch, this.project.defaultBranch);
+    if (pre.ahead === 0) {
+      const msg = pre.dirty
+        ? `Kein PR möglich: Der Branch ${s.branch} hat noch keine Commits gegenüber ${this.project.defaultBranch} — die Änderungen sind nicht committet. Lass den Agenten zuerst committen (eure Commit-Konvention, z. B. scripts/paix-commit.sh), dann erneut „PR erstellen".`
+        : `Kein PR möglich: Keine Commits und keine Änderungen auf ${s.branch} gegenüber ${this.project.defaultBranch}.`;
+      this.emitError(agentId, "push_rejected", msg);
+      return;
+    }
+
     // P6: kein roter PR — erst das Clean-Code-Gate.
     const gate = await this.handleGate(agentId);
     if (!gate.ok) {
