@@ -30,6 +30,7 @@ import { loadRecentProjects, rememberProject, forgetProject, type RecentProject 
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
 import { toolCommand } from "./toolText";
 import { blobToBase64, base64ToBytes, extForMime, dirname } from "./blob";
+import { EDIT_TOOLS, toEditOp, editPath, type EditOp } from "./editOps";
 
 export type AgentRole = "integrator" | "sub";
 export type { ViewId } from "./uiPrefs";
@@ -91,6 +92,31 @@ export interface SidecarInfo {
   sdkAvailable: boolean;
   sdkVersion?: string;
 }
+
+// ── Change-Overview (docs/design/09-change-overview.md §3.2) ──
+/**
+ * Ein gerade (oder zuletzt) von einem Stream editierter Datei-Pfad — die Datenquelle
+ * der Diff-Panes. Key in `editsByFile`: `${agentId}::${path}` (eine Pane pro Stream×Datei,
+ * §3.2). Rein aus dem `tool_use`-Payload abgeleitet (Option A, zero-read).
+ */
+export interface FileEditEntry {
+  agentId: string;
+  path: string; // file_path bzw. notebook_path aus dem tool_use-Input
+  ops: EditOp[]; // chronologisch; spätere Edits sehen frühere angewandt
+  toolUseIds: string[]; // Korrelation mit tool_result (completeTool)
+  status: "applying" | "applied" | "failed"; // via tool_result umgeschaltet
+  firstEditAt: number;
+  lastEditAt: number; // treibt Highlight-Fade (§1.2)
+  contextDoc?: string; // optional: durch Core gelesener Vorzustand (Option C, §4) — Post-MVP
+}
+
+/** Pane-/File-Deckel (OE-45, §6). Jede Deckelung wird sichtbar gemacht + in debugLog protokolliert. */
+export const MAX_VISIBLE_PANES = 8;
+export const MAX_FILES = 200;
+/** Coalescing-Fenster für schnelle Hunks (§6): mehrere Hunks → ein Re-Render-Tick. */
+const EDIT_COALESCE_MS = 50;
+
+export const editKey = (agentId: string, path: string) => `${agentId}::${path}`;
 
 // ── Datei-Explorer (docs/design/07-file-explorer.md §3.1) ──
 /**
@@ -193,6 +219,8 @@ export interface MadsState {
   railCollapsed: boolean;
   /** Change-Overview-Overlay an/aus (Owner: doc 09). Der Rail-„Änderungen"-Eintrag toggelt es (§2.3). */
   changeOverviewOn: boolean;
+  /** Live-Diff-Quelle: Datei-Edits je Stream×Datei (doc 09 §3.2). Key: `${agentId}::${path}`. */
+  editsByFile: Record<string, FileEditEntry>;
 
   // ── Datei-Explorer (docs/design/07-file-explorer.md §3.1) ──
   activeRoot: ExplorerRoot | null; // gewählter Stream-Kontext; null = kein Projekt offen
@@ -250,6 +278,8 @@ export interface MadsState {
   toggleRailCollapsed: () => void;
   setRailCollapsed: (collapsed: boolean) => void;
   toggleChangeOverview: () => void;
+  /** Alle Diff-Panes räumen (für Tests/Aufräum-Wege) — leert `editsByFile`. */
+  clearEdits: () => void;
 
   // ── Datei-Explorer actions (doc 07 §3.2) ──
   setActiveRoot: (root: ExplorerRoot) => Promise<void>;
@@ -321,8 +351,72 @@ export const useStore = create<MadsState>((set) => {
       if (!found) {
         next.push({ id: mkId(), kind: "tool", toolUseId, name: "Tool", output, ok, running: false });
       }
-      return { events: { ...s.events, [agentId]: next } };
+      // Change-Overview: das passende Diff-Pane auf applied/failed umschalten (§3.3).
+      // tool_result trägt nur die toolUseId — wir finden den Eintrag über toolUseIds.
+      let editsByFile = s.editsByFile;
+      for (const [key, entry] of Object.entries(editsByFile)) {
+        if (entry.agentId === agentId && entry.toolUseIds.includes(toolUseId)) {
+          editsByFile = { ...editsByFile, [key]: { ...entry, status: ok ? "applied" : "failed" } };
+        }
+      }
+      return { events: { ...s.events, [agentId]: next }, editsByFile };
     });
+  }
+
+  /**
+   * Edit-Hunk in `editsByFile` einsortieren (§3.3). Coalesct schnelle Hunks pro Datei in
+   * einem ~50 ms-Fenster (§6): wir akkumulieren in `pendingEdits` und flushen gebündelt.
+   * Caps (OE-45): `maxFiles` Ring-Buffer (ältester `lastEditAt` zuerst) — Deckelung sichtbar
+   * in debugLog protokolliert (nie still abschneiden).
+   */
+  let pendingEdits: Array<{ agentId: string; path: string; toolUseId: string; op: EditOp }> = [];
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function flushEdits() {
+    flushTimer = undefined;
+    const batch = pendingEdits;
+    pendingEdits = [];
+    if (!batch.length) return;
+    set((s) => {
+      const editsByFile = { ...s.editsByFile };
+      const now = Date.now();
+      for (const { agentId, path, toolUseId, op } of batch) {
+        const key = editKey(agentId, path);
+        const prev = editsByFile[key];
+        editsByFile[key] = prev
+          ? {
+              ...prev,
+              ops: [...prev.ops, op],
+              toolUseIds: prev.toolUseIds.includes(toolUseId) ? prev.toolUseIds : [...prev.toolUseIds, toolUseId],
+              status: "applying",
+              lastEditAt: now,
+            }
+          : {
+              agentId,
+              path,
+              ops: [op],
+              toolUseIds: [toolUseId],
+              status: "applying",
+              firstEditAt: now,
+              lastEditAt: now,
+            };
+      }
+      // Ring-Buffer-Deckel (OE-45) — ältester lastEditAt zuerst geräumt, Deckelung geloggt.
+      const keys = Object.keys(editsByFile);
+      let debugLog = s.debugLog;
+      if (keys.length > MAX_FILES) {
+        const sorted = keys.sort((a, b) => editsByFile[a].lastEditAt - editsByFile[b].lastEditAt);
+        const dropCount = keys.length - MAX_FILES;
+        for (const k of sorted.slice(0, dropCount)) delete editsByFile[k];
+        debugLog = [...s.debugLog.slice(-400), `change-overview: ${dropCount} Datei(en) geräumt (Deckel ${MAX_FILES})`];
+      }
+      return { editsByFile, debugLog };
+    });
+  }
+
+  function upsertEdit(agentId: string, path: string, toolUseId: string, op: EditOp) {
+    pendingEdits.push({ agentId, path, toolUseId, op });
+    if (!flushTimer) flushTimer = setTimeout(flushEdits, EDIT_COALESCE_MS);
   }
 
   function handleSidecarMessage(msg: SidecarMessage) {
@@ -443,6 +537,13 @@ export const useStore = create<MadsState>((set) => {
             }));
             pushEvent(msg.agentId, { id: mkId(), kind: "todos", todos });
           } else {
+            // Change-Overview (doc 09 §3.3): die vier Edit-Tools zusätzlich in editsByFile
+            // ableiten — additiv, ohne die Timeline-Karte zu ändern. Rein Frontend-derived
+            // aus dem bereits ankommenden tool_use-Payload (kein Protokoll-/Core-Change).
+            if (EDIT_TOOLS.has(ev.name)) {
+              const path = editPath(ev.input ?? {});
+              if (path) upsertEdit(msg.agentId, path, ev.toolUseId, toEditOp(ev.name, ev.input ?? {}));
+            }
             pushEvent(msg.agentId, {
               id: mkId(),
               kind: "tool",
@@ -538,6 +639,7 @@ export const useStore = create<MadsState>((set) => {
     activeView: loadUiPrefs().activeView,
     railCollapsed: loadUiPrefs().railCollapsed,
     changeOverviewOn: false,
+    editsByFile: {},
 
     activeRoot: null,
     treeChildren: {},
@@ -567,6 +669,7 @@ export const useStore = create<MadsState>((set) => {
       saveUiPrefs({ activeView: useStore.getState().activeView, railCollapsed: collapsed });
     },
     toggleChangeOverview: () => set((s) => ({ changeOverviewOn: !s.changeOverviewOn })),
+    clearEdits: () => set({ editsByFile: {} }),
 
     setAutonomy: async (config) => {
       set({ autonomy: config });
@@ -725,7 +828,13 @@ export const useStore = create<MadsState>((set) => {
         const events = { ...s.events };
         delete events[id];
         const order = s.order.filter((x) => x !== id);
-        return { agents, events, order, selectedId: s.selectedId === id ? order[0] : s.selectedId };
+        // Change-Overview (doc 09 §7): die Diff-Panes des gestoppten Agenten mit räumen —
+        // alle editsByFile-Keys mit Prefix `${id}::`. Fällt NICHT automatisch an.
+        const prefix = `${id}::`;
+        const editsByFile = Object.fromEntries(
+          Object.entries(s.editsByFile).filter(([k]) => !k.startsWith(prefix)),
+        );
+        return { agents, events, order, editsByFile, selectedId: s.selectedId === id ? order[0] : s.selectedId };
       });
     },
 
