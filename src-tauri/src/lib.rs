@@ -1,5 +1,7 @@
+mod files;
 mod sidecar;
 
+use files::{mads_read_dir, mads_read_file, mads_register_root, mads_write_file, FsScope};
 use sidecar::{sidecar_send, start_sidecar, stop_sidecar, SidecarState};
 use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
 use tauri::Emitter;
@@ -52,7 +54,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init()) // doc 07 §4.2 — für watch + Plugin-Scope
         .manage(SidecarState::default())
+        .manage(FsScope::default()) // doc 07 §4.2 — Laufzeit-Allow-Liste
         .setup(|app| {
             build_app_menu(app)?;
             Ok(())
@@ -65,7 +69,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_sidecar,
             sidecar_send,
-            stop_sidecar
+            stop_sidecar,
+            mads_read_dir,
+            mads_read_file,
+            mads_write_file,
+            mads_register_root
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -8,6 +8,7 @@
  * VS-Code-Claude-Code-Stil (MessageTimeline).
  */
 import { create } from "zustand";
+import { invoke } from "@tauri-apps/api/core";
 import { startSidecar, sendHost, envelope, pickFolder } from "./ipc";
 import type {
   AgentStatus,
@@ -90,6 +91,73 @@ export interface SidecarInfo {
   sdkVersion?: string;
 }
 
+// ── Datei-Explorer (docs/design/07-file-explorer.md §3.1) ──
+/**
+ * Welcher Stream-Kontext wird gebrowst — main/Integrator ODER ein Sub-Agent-Worktree.
+ * BEIDE Varianten sind gleichwertig (lesbar UND schreibbar, OE-35): beide werden per
+ * setActiveRoot im Core registriert (mads_register_root → allow_directory).
+ */
+export type ExplorerRoot =
+  | { kind: "project"; path: string }
+  | { kind: "worktree"; agentId: string; path: string };
+
+export interface DirNode {
+  name: string;
+  path: string; // absoluter Pfad (vom Core kanonisiert geliefert)
+  isDir: boolean;
+  isSymlink: boolean;
+}
+
+export type FileKind = "markdown" | "code" | "image" | "binary";
+
+/** Core-Lese-Resultat (FileRead, doc 07 §4.2) — DER CORE entscheidet text/binary. */
+type CoreFileRead =
+  | { kind: "text"; text: string; mtimeMs: number; size: number; hash: string; truncated: boolean }
+  | { kind: "binary"; bytesBase64: string; mtimeMs: number; size: number; hash: string; truncated: boolean };
+
+type CoreWriteResult =
+  | { kind: "saved"; mtimeMs: number; size: number; hash: string }
+  | { kind: "conflict" };
+
+export interface OpenFile {
+  path: string;
+  kind: FileKind;
+  diskMtimeMs: number; // Conflict-Signal (§7)
+  diskSize: number;
+  diskHash: string; // autoritatives Conflict-Signal (§7)
+  coreKind: "text" | "binary";
+  loadedText?: string; // bei coreKind:"text"
+  bytesBase64?: string; // bei coreKind:"binary"
+  dataUrl?: string; // bei kind:"image"
+  truncated: boolean;
+}
+
+const IMAGE_EXT: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+};
+
+const CODE_EXT = new Set([
+  "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "rs", "py", "go", "java", "c", "h", "cpp", "hpp",
+  "cc", "rb", "php", "sh", "bash", "zsh", "css", "scss", "html", "xml", "yaml", "yml", "toml",
+  "sql", "swift", "kt", "lua", "vue", "svelte",
+]);
+
+/** Typ-Erkennung aus Endung + Core-Flag (doc 07 §2.2). coreKind:"binary" überstimmt
+ *  jede Code-/Markdown-Endung (Nicht-UTF-8 → Binär-Fallback). */
+export function fileKind(path: string, coreKind: "text" | "binary"): FileKind {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  if (ext in IMAGE_EXT) return "image";
+  if (coreKind === "binary") return "binary";
+  if (ext === "md" || ext === "markdown") return "markdown";
+  if (CODE_EXT.has(ext)) return "code";
+  return "code"; // sonstiger UTF-8-Text als Code-Highlight (Plaintext)
+}
+
 export interface MadsState {
   sidecar: SidecarInfo;
   project?: ProjectInfo;
@@ -120,6 +188,18 @@ export interface MadsState {
   railCollapsed: boolean;
   /** Change-Overview-Overlay an/aus (Owner: doc 09). Der Rail-„Änderungen"-Eintrag toggelt es (§2.3). */
   changeOverviewOn: boolean;
+
+  // ── Datei-Explorer (docs/design/07-file-explorer.md §3.1) ──
+  activeRoot: ExplorerRoot | null; // gewählter Stream-Kontext; null = kein Projekt offen
+  treeChildren: Record<string, DirNode[]>; // keyed by Verzeichnis-Pfad (lazy)
+  treeExpanded: Record<string, boolean>;
+  treeFilter: string;
+  selectedFilePath?: string;
+  openFile?: OpenFile;
+  editorBuffers: Record<string, string>; // path → ungespeicherter Inhalt (dirty wenn ≠ loadedText)
+  externalChanged: Record<string, boolean>;
+  fsError?: string;
+  fileConflict?: string; // path mit Disk-Drift beim Save → conflicted-Sheet
 
   init: () => Promise<void>;
   setAutonomy: (config: AutonomyConfig) => Promise<void>;
@@ -161,6 +241,18 @@ export interface MadsState {
   toggleRailCollapsed: () => void;
   setRailCollapsed: (collapsed: boolean) => void;
   toggleChangeOverview: () => void;
+
+  // ── Datei-Explorer actions (doc 07 §3.2) ──
+  setActiveRoot: (root: ExplorerRoot) => Promise<void>;
+  expandDir: (path: string) => Promise<void>;
+  collapseDir: (path: string) => void;
+  setTreeFilter: (text: string) => void;
+  openFilePath: (path: string) => Promise<void>;
+  enterEditMode: (path: string) => void;
+  setEditorBuffer: (path: string, text: string) => void;
+  saveFile: (path: string) => Promise<void>;
+  reloadFile: (path: string) => Promise<void>;
+  discardEdit: (path: string) => void;
 }
 
 const mkId = () => crypto.randomUUID();
@@ -235,6 +327,9 @@ export const useStore = create<MadsState>((set) => {
           projectStatus: "ready",
           recentProjects: rememberProject(s.recentProjects, msg.project, Date.now()),
         }));
+        // repoRoot im Core registrieren + als Default-Explorer-Root setzen (doc 07 §4.2:
+        // „aufgerufen direkt nachdem project gesetzt ist"). Erst bei aktiver Files-View geladen.
+        void useStore.getState().setActiveRoot({ kind: "project", path: msg.project.repoRoot });
         break;
 
       case "status_update":
@@ -426,6 +521,17 @@ export const useStore = create<MadsState>((set) => {
     activeView: loadUiPrefs().activeView,
     railCollapsed: loadUiPrefs().railCollapsed,
     changeOverviewOn: false,
+
+    activeRoot: null,
+    treeChildren: {},
+    treeExpanded: {},
+    treeFilter: "",
+    selectedFilePath: undefined,
+    openFile: undefined,
+    editorBuffers: {},
+    externalChanged: {},
+    fsError: undefined,
+    fileConflict: undefined,
 
     setActiveView: (view) => {
       set({ activeView: view });
@@ -691,5 +797,137 @@ export const useStore = create<MadsState>((set) => {
         branch: r.branch,
       });
     },
+
+    // ── Datei-Explorer (doc 07 §3.2) — kapseln die invoke-Aufrufe an den Core ──
+    setActiveRoot: async (root) => {
+      try {
+        await invoke("mads_register_root", { path: root.path });
+        // Top-Level laden; Tree-/Datei-State für den neuen Kontext zurücksetzen.
+        const children = (await invoke("mads_read_dir", { path: root.path })) as DirNode[];
+        set({
+          activeRoot: root,
+          treeChildren: { [root.path]: children },
+          treeExpanded: { [root.path]: true },
+          selectedFilePath: undefined,
+          openFile: undefined,
+          editorBuffers: {},
+          externalChanged: {},
+          fsError: undefined,
+          fileConflict: undefined,
+        });
+      } catch (e) {
+        set({ fsError: String(e) });
+      }
+    },
+
+    expandDir: async (path) => {
+      set((s) => ({ treeExpanded: { ...s.treeExpanded, [path]: true } }));
+      // Bereits geladen? dann nur aufklappen.
+      if (useStore.getState().treeChildren[path]) return;
+      try {
+        const children = (await invoke("mads_read_dir", { path })) as DirNode[];
+        set((s) => ({ treeChildren: { ...s.treeChildren, [path]: children }, fsError: undefined }));
+      } catch (e) {
+        set({ fsError: String(e) });
+      }
+    },
+
+    collapseDir: (path) => set((s) => ({ treeExpanded: { ...s.treeExpanded, [path]: false } })),
+
+    setTreeFilter: (text) => set({ treeFilter: text }),
+
+    openFilePath: async (path) => {
+      try {
+        const res = (await invoke("mads_read_file", { path })) as CoreFileRead;
+        const kind = fileKind(path, res.kind);
+        const open: OpenFile = {
+          path,
+          kind,
+          diskMtimeMs: res.mtimeMs,
+          diskSize: res.size,
+          diskHash: res.hash,
+          coreKind: res.kind,
+          truncated: res.truncated,
+        };
+        if (res.kind === "text") {
+          open.loadedText = res.text;
+        } else {
+          open.bytesBase64 = res.bytesBase64;
+          if (kind === "image" && res.bytesBase64) {
+            const ext = path.split(".").pop()?.toLowerCase() ?? "";
+            const mime = IMAGE_EXT[ext] ?? "application/octet-stream";
+            open.dataUrl = `data:${mime};base64,${res.bytesBase64}`;
+          }
+        }
+        set((s) => {
+          const buffers = { ...s.editorBuffers };
+          delete buffers[path]; // frische Vorschau → kein alter Buffer
+          const ext = { ...s.externalChanged };
+          delete ext[path];
+          return { selectedFilePath: path, openFile: open, editorBuffers: buffers, externalChanged: ext, fsError: undefined };
+        });
+      } catch (e) {
+        set({ fsError: String(e) });
+      }
+    },
+
+    enterEditMode: (path) => {
+      const open = useStore.getState().openFile;
+      if (!open || open.path !== path || open.coreKind !== "text") return;
+      set((s) => ({ editorBuffers: { ...s.editorBuffers, [path]: open.loadedText ?? "" } }));
+    },
+
+    setEditorBuffer: (path, text) => set((s) => ({ editorBuffers: { ...s.editorBuffers, [path]: text } })),
+
+    saveFile: async (path) => {
+      const st = useStore.getState();
+      const open = st.openFile;
+      const content = st.editorBuffers[path];
+      if (!open || open.path !== path || content === undefined) return;
+      try {
+        const res = (await invoke("mads_write_file", {
+          path,
+          content,
+          baseMtimeMs: open.diskMtimeMs,
+          baseSize: open.diskSize,
+          baseHash: open.diskHash,
+        })) as CoreWriteResult;
+        if (res.kind === "conflict") {
+          set({ fileConflict: path });
+          return;
+        }
+        // saved → openFile-Signatur aktualisieren, Buffer als gespeichert markieren.
+        set((s) => {
+          const buffers = { ...s.editorBuffers };
+          delete buffers[path];
+          return {
+            openFile: { ...open, loadedText: content, diskMtimeMs: res.mtimeMs, diskSize: res.size, diskHash: res.hash },
+            editorBuffers: buffers,
+            fileConflict: undefined,
+            fsError: undefined,
+          };
+        });
+      } catch (e) {
+        set({ fsError: String(e) });
+      }
+    },
+
+    reloadFile: async (path) => {
+      set((s) => {
+        const buffers = { ...s.editorBuffers };
+        delete buffers[path];
+        const ext = { ...s.externalChanged };
+        delete ext[path];
+        return { editorBuffers: buffers, externalChanged: ext, fileConflict: undefined };
+      });
+      await useStore.getState().openFilePath(path);
+    },
+
+    discardEdit: (path) =>
+      set((s) => {
+        const buffers = { ...s.editorBuffers };
+        delete buffers[path];
+        return { editorBuffers: buffers, fileConflict: undefined };
+      }),
   };
 });

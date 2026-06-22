@@ -1,5 +1,11 @@
+import { Suspense, lazy } from "react";
 import { useStore } from "../store";
 import { SettingsPanel } from "./SettingsPanel";
+
+// Lazy-Mount (doc 10 §6): das schwere Dateien-Panel (react-arborist + CodeMirror) wird
+// erst beim ersten Aktivieren von activeView==="files" geladen — der Default-Streams-View
+// bleibt schlank.
+const FileExplorer = lazy(() => import("./FileExplorer").then((m) => ({ default: m.FileExplorer })));
 
 /**
  * Switch über `activeView` → rendert das aktivitäts-spezifische Primary-Panel
@@ -10,9 +16,6 @@ import { SettingsPanel } from "./SettingsPanel";
  *
  * NB: „Änderungen" ist KEIN Primary-Panel — es ist ein position:fixed-Overlay
  * (<ChangeOverlay/>), gesteuert von changeOverviewOn, NICHT von activeView (§2.3).
- *
- * TODO(Part B / doc 07): "files" → <FileExplorer/> (lazy-mounted) — der File-Explorer
- * wird mit Feature 07 eingehängt.
  */
 export function PrimaryPanel() {
   const view = useStore((s) => s.activeView);
@@ -22,9 +25,13 @@ export function PrimaryPanel() {
     case "settings":
       return <SettingsPanel />;
     case "files":
-      // Fallback (§7): "files" ohne Projekt zeigt kein Panel. Echter Explorer folgt in Part B.
+      // Fallback (§7): "files" ohne Projekt zeigt kein Panel (Rail-Eintrag ist disabled).
       if (!hasProject) return null;
-      return null;
+      return (
+        <Suspense fallback={<div className="primary-panel file-explorer-loading">Dateien lädt…</div>}>
+          <FileExplorer />
+        </Suspense>
+      );
     case "streams":
     default:
       return null; // KEIN Panel: Rail steht direkt neben .main
