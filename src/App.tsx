@@ -94,7 +94,17 @@ export default function App() {
 
         {lastEscalation && (
           <div className="escalation-banner">
-            ▲ Eskalation ({lastEscalation.code}): {lastEscalation.message}
+            <span className="escalation-text">
+              ▲ Eskalation ({lastEscalation.code}): {lastEscalation.message}
+            </span>
+            <button
+              className="banner-close"
+              title="Eskalationen schließen"
+              aria-label="Eskalationen schließen"
+              onClick={() => useStore.getState().dismissEscalations()}
+            >
+              ✕
+            </button>
           </div>
         )}
 

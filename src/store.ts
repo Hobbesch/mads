@@ -124,6 +124,7 @@ interface MadsState {
     permissionMode?: PermissionMode;
   }) => Promise<void>;
   selectAgent: (id: string) => void;
+  dismissEscalations: () => void;
   setDraft: (agentId: string, text: string) => void;
   setDraftImages: (agentId: string, images: ImageInput[]) => void;
   answerPermission: (req: PermissionRequestMsg, decision: PermissionDecision) => Promise<void>;
@@ -471,6 +472,8 @@ export const useStore = create<MadsState>((set) => {
     },
 
     selectAgent: (id) => set({ selectedId: id }),
+
+    dismissEscalations: () => set({ escalations: [] }),
 
     setDraft: (agentId, text) => set((s) => ({ drafts: { ...s.drafts, [agentId]: text } })),
     setDraftImages: (agentId, images) => set((s) => ({ draftImages: { ...s.draftImages, [agentId]: images } })),

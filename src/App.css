@@ -487,6 +487,29 @@ button.primary:hover {
   padding: 8px 16px;
   font-size: 12px;
   font-weight: 550;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.escalation-banner .escalation-text {
+  flex: 1;
+  min-width: 0;
+}
+.banner-close {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 6px;
+  opacity: 0.7;
+}
+.banner-close:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.06);
 }
 .resume-banner {
   background: var(--accent-weak);
