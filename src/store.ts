@@ -283,6 +283,21 @@ export const useStore = create<MadsState>((set) => {
         set({ collisions: msg.collisions });
         break;
 
+      case "spawn_substreams_request": {
+        // Der Integrator-Chat hat per Tool N Sub-Streams angefordert → über den
+        // normalen createAgent-Pfad anlegen (eigener Worktree/Branch je Stream).
+        for (const st of msg.streams) {
+          void useStore.getState().createAgent({ label: st.label, prompt: st.brief, role: "sub", mock: false });
+        }
+        notice(
+          msg.parentAgentId,
+          "accent",
+          `▶ ${msg.streams.length} Sub-Stream(s) gestartet: ${msg.streams.map((s) => s.label).join(", ")}`,
+        );
+        set({ selectedId: msg.parentAgentId }); // Auswahl beim Dispatcher belassen
+        break;
+      }
+
       case "agent_event": {
         const ev = msg.event;
         if (ev.kind === "assistant_text" || ev.kind === "assistant_delta") {

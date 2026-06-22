@@ -200,6 +200,7 @@ export type SidecarMessage =
   | GateResultMsg
   | ResumableAgentsMsg
   | CollisionWarningMsg
+  | SpawnSubstreamsRequestMsg
   | SidecarErrorMsg;
 
 export interface SidecarReadyMsg extends BaseMsg {
@@ -374,6 +375,13 @@ export interface ResumableAgentsMsg extends BaseMsg {
 export interface CollisionWarningMsg extends BaseMsg {
   type: "collision_warning";
   collisions: Collision[];
+}
+
+/** Agent-Tool (Integrator) bittet das Frontend, N Sub-Streams zu starten. */
+export interface SpawnSubstreamsRequestMsg extends BaseMsg {
+  type: "spawn_substreams_request";
+  parentAgentId: string;
+  streams: Array<{ label: string; brief: string }>;
 }
 
 export type EscalationKind =

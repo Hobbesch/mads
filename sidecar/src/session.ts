@@ -14,6 +14,7 @@ import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
 import { createWorktree, removeWorktree } from "./git.js";
 import { classifyToolCall } from "../../shared/safe-command.js";
+import { z } from "zod";
 import type {
   StartAgentMsg,
   PermissionDecision,
@@ -167,15 +168,73 @@ export class AgentSession {
     this.cwd = cwd;
 
     try {
-      const sdk = (await import("@anthropic-ai/claude-agent-sdk")) as {
+      const sdk = (await import("@anthropic-ai/claude-agent-sdk")) as unknown as {
         query: (args: { prompt: AsyncIterable<SdkUserMessage>; options: Record<string, unknown> }) => QueryHandle;
+        createSdkMcpServer: (cfg: { name: string; version: string; tools: unknown[] }) => unknown;
+        tool: (
+          name: string,
+          description: string,
+          schema: unknown,
+          handler: (args: {
+            streams: Array<{ label: string; brief: string }>;
+          }) => Promise<{ content: Array<{ type: string; text: string }> }>,
+        ) => unknown;
       };
+
+      // Nur der Integrator (Dispatcher-Chat) bekommt das In-Process-Tool, um aus dem Chat
+      // heraus Sub-Streams zu starten. Sub-Agenten spawnen bewusst NICHT (kein Runaway).
+      const mcpServers: Record<string, unknown> = {};
+      if (this.role === "integrator") {
+        mcpServers.mads = sdk.createSdkMcpServer({
+          name: "mads",
+          version: "1.0.0",
+          tools: [
+            sdk.tool(
+              "spawn_substreams",
+              "Startet neue parallele Sub-Streams (Sub-Agenten) in mads — jeder mit eigener " +
+                "Branch/Worktree und eigenständiger Aufgabe. Nutze dies, wenn der Mensch dich bittet, " +
+                "mehrere unabhängige Punkte/Aufgaben parallel zu bearbeiten (z. B. „eröffne für Punkt " +
+                "1–4 vier Sub-Streams“). Pro Stream: kurzes Label + klarer, in sich abgeschlossener Auftrag (brief).",
+              {
+                streams: z
+                  .array(
+                    z.object({
+                      label: z.string().describe("kurzer Name, z. B. 'Link-Analyse (link_safety.py)'"),
+                      brief: z.string().describe("vollständiger, eigenständiger Auftrag für diesen Sub-Agenten"),
+                    }),
+                  )
+                  .min(1),
+              },
+              async (args) => {
+                this.emit({
+                  ...envelope(),
+                  type: "spawn_substreams_request",
+                  parentAgentId: this.agentId,
+                  streams: args.streams,
+                });
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text:
+                        `${args.streams.length} Sub-Stream(s) in mads gestartet: ` +
+                        `${args.streams.map((s) => s.label).join(", ")}. ` +
+                        "Jeder läuft ab jetzt eigenständig in eigenem Worktree/Branch; du steuerst sie im Dashboard.",
+                    },
+                  ],
+                };
+              },
+            ),
+          ],
+        });
+      }
 
       this.q = sdk.query({
         prompt: this.inbox,
         options: {
           cwd,
           model: msg.model,
+          mcpServers,
           // Die Allowlist/Regeln des Nutzers laden (~/.claude/settings.json = user,
           // .claude/settings.json = project, .claude/settings.local.json = local) — wie
           // Claude Code. Erlaubte Befehle werden so automatisch genehmigt und erreichen
