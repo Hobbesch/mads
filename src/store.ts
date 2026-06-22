@@ -415,7 +415,7 @@ export const useStore = create<MadsState>((set) => {
 
     createAgent: async ({ label, prompt, role, mock, model, branch, permissionMode }) => {
       const id = crypto.randomUUID();
-      const mode: PermissionMode = permissionMode ?? "acceptEdits";
+      const mode: PermissionMode = permissionMode ?? "auto";
       const project = useStore.getState().project;
       const agent: AgentVM = {
         id,
@@ -571,7 +571,7 @@ export const useStore = create<MadsState>((set) => {
         outputTokens: 0,
         sessionId: r.sessionId,
         mock: false,
-        permissionMode: "acceptEdits",
+        permissionMode: "auto",
         createdAt: Date.now(),
         lastEventAt: Date.now(),
         workStartedAt: Date.now(),
@@ -597,7 +597,7 @@ export const useStore = create<MadsState>((set) => {
         role: r.role,
         model: r.model,
         mock: false,
-        permissionMode: "acceptEdits",
+        permissionMode: "auto",
         resumeSessionId: r.sessionId,
         resumeWorktreePath: r.worktreePath,
         repoRoot: project?.repoRoot,

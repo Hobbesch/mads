@@ -14,7 +14,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const [role, setRole] = useState<AgentRole>(hasIntegrator ? "sub" : "integrator");
   const [model, setModel] = useState(role === "integrator" ? "claude-opus-4-8" : "claude-sonnet-4-6");
   const [branch, setBranch] = useState("");
-  const [mode, setMode] = useState<PermissionMode>("acceptEdits");
+  const [mode, setMode] = useState<PermissionMode>("auto");
   const [mock, setMock] = useState(!sdkAvailable || !project);
 
   const submit = (e: React.FormEvent) => {
