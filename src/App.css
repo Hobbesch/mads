@@ -1263,6 +1263,24 @@ button.primary:hover {
   opacity: 0.45;
   cursor: default;
 }
+/* Kombinierter Senden(↑)/Stop(■)-Button im VS-Code-Stil */
+.composer-btn {
+  width: 38px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.icon-square {
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border-radius: 3px;
+}
 .composer-wrap {
   border-top: 1px solid var(--border);
 }

@@ -74,6 +74,7 @@ export function Inspector() {
 
   const badges = agentBadges(agent);
   const step = nextStep(agent);
+  const busy = agent.status === "running" || agent.status === "starting";
   const runStep = () => {
     if (step.kind === "commit") void commitAgent(selectedId);
     else if (step.kind === "pr") void createPr(selectedId);
@@ -148,13 +149,10 @@ export function Inspector() {
               PR #{agent.pr.number} ↗
             </button>
           )}
-          <button onClick={() => void interruptAgent(selectedId)} title="Unterbrechen">
-            Pause
-          </button>
           <button
             className="danger"
             onClick={() => void stopAgent(selectedId, agent.role === "sub")}
-            title="Stoppen (+ Worktree entfernen bei Sub)"
+            title="Stoppen + aufräumen (Worktree/Branch entfernen bei Sub)"
           >
             Stop
           </button>
@@ -196,9 +194,27 @@ export function Inspector() {
             onPaste={(e) => void onPaste(e)}
             placeholder={`Nachricht an ${agent.label}…  (Screenshot mit ⌘V einfügen)`}
           />
-          <button type="submit" disabled={!draft.trim() && attached.length === 0}>
-            Senden
-          </button>
+          {busy ? (
+            <button
+              type="button"
+              className="composer-btn stop"
+              title="KI unterbrechen"
+              aria-label="Unterbrechen"
+              onClick={() => void interruptAgent(selectedId)}
+            >
+              <span className="icon-square" />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="composer-btn send"
+              disabled={!draft.trim() && attached.length === 0}
+              title="Senden"
+              aria-label="Senden"
+            >
+              ↑
+            </button>
+          )}
         </form>
       </div>
     </section>
