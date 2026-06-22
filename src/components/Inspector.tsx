@@ -8,6 +8,10 @@ import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
 import type { PermissionMode, ImageInput } from "../../shared/protocol";
 
+// Stabile Leer-Referenz: ein zustand-Selektor darf NICHT bei jedem Render ein neues []
+// zurückgeben (sonst Endlos-Render-Schleife → App-Crash / graues Fenster).
+const NO_IMAGES: ImageInput[] = [];
+
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -31,7 +35,7 @@ export function Inspector() {
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   // Composer-Entwürfe je Agent (im Store) — beim Umschalten bleibt jeder Entwurf erhalten.
   const draft = useStore((s) => (s.selectedId ? s.drafts[s.selectedId] ?? "" : ""));
-  const attached = useStore((s) => (s.selectedId ? s.draftImages[s.selectedId] ?? [] : []));
+  const attached = useStore((s) => (s.selectedId ? s.draftImages[s.selectedId] ?? NO_IMAGES : NO_IMAGES));
   const setDraft = useStore((s) => s.setDraft);
   const setDraftImages = useStore((s) => s.setDraftImages);
 

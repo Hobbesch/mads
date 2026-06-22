@@ -6,6 +6,9 @@ import { useStore } from "../store";
 import { Elapsed } from "./Elapsed";
 import type { TimelineEvent, TodoItem } from "../store";
 
+// Stabile Leer-Referenz (kein neues [] pro Render im Selektor → keine Render-Schleife).
+const NO_EVENTS: TimelineEvent[] = [];
+
 function Md({ text }: { text: string }) {
   return (
     <div className="md">
@@ -135,7 +138,7 @@ function renderEvent(ev: TimelineEvent) {
 }
 
 export function MessageTimeline({ agentId }: { agentId: string }) {
-  const events = useStore((s) => s.events[agentId] ?? []);
+  const events = useStore((s) => s.events[agentId] ?? NO_EVENTS);
   const status = useStore((s) => s.agents[agentId]?.status);
   const currentStep = useStore((s) => s.agents[agentId]?.currentStep);
   const workStartedAt = useStore((s) => s.agents[agentId]?.workStartedAt);

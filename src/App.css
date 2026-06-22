@@ -480,6 +480,52 @@ button.primary {
 button.primary:hover {
   filter: brightness(1.08);
 }
+.fatal-error {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg, #1e1e1e);
+  color: var(--text, #eee);
+}
+.fatal-card {
+  max-width: 760px;
+  width: 100%;
+}
+.fatal-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.fatal-sub {
+  font-size: 13px;
+  opacity: 0.8;
+  margin-bottom: 12px;
+}
+.fatal-trace {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 50vh;
+  overflow: auto;
+  background: rgba(255, 69, 58, 0.1);
+  border: 1px solid rgba(255, 69, 58, 0.3);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.fatal-reload {
+  margin-top: 14px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
 .escalation-banner {
   background: rgba(255, 69, 58, 0.14);
   color: #d33b30;
