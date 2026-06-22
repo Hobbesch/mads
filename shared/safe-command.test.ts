@@ -2,7 +2,7 @@
  * Tests für den Auto-Freigabe-Klassifizierer (shared/safe-command.ts). Via `npm run test:safe`.
  * Sicherheitskritisch: prüft, dass riskante Aktionen IMMER gefragt werden.
  */
-import { classifyBashCommand, classifyToolCall } from "./safe-command";
+import { classifyBashCommand, classifyToolCall, isGitCommit } from "./safe-command";
 
 const results: string[] = [];
 let failed = 0;
@@ -102,6 +102,20 @@ check(
 check("mads-Server generisch → allow", classifyToolCall("mcp__mads__irgendwas", {}).decision === "allow");
 // Namens-Spoofing darf NICHT greifen (nur exakter Server-Prefix mcp__mads__).
 check("mcp__madsfake__ (Spoof) → ask", classifyToolCall("mcp__madsfake__x", {}).decision === "ask");
+
+// ---- Main-Commit-Gate: isGitCommit (Integrator darf nicht still auf main committen) ----
+check("git commit → erkannt", isGitCommit("git commit -m x"));
+check("git commit (ohne args) → erkannt", isGitCommit("git commit"));
+check("compound add && commit → erkannt", isGitCommit("git add -A && git commit -m 'msg mit Wort commit'"));
+check("git -C <dir> commit → erkannt", isGitCommit("git -C /repo commit --amend"));
+check("git -c k=v commit → erkannt", isGitCommit('git -c user.name=x commit -am y'));
+check("git commit im Compound mit cd → erkannt", isGitCommit('cd /wt && git commit -m "x"'));
+// keine Fehltreffer:
+check("git log --grep commit → NICHT", !isGitCommit("git log --grep commit"));
+check("git status → NICHT", !isGitCommit("git status"));
+check("git show HEAD → NICHT", !isGitCommit("git show HEAD"));
+check("echo git commit → NICHT (Kommando ist echo)", !isGitCommit("echo git commit"));
+check("git commit-tree (plumbing) → NICHT", !isGitCommit("git commit-tree $t -m x"));
 
 // reason wird bei ask geliefert
 check("ask liefert reason", typeof classifyBashCommand("git push").reason === "string");

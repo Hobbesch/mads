@@ -130,6 +130,36 @@ function isUvRunner(toks: string[]): boolean {
   return false;
 }
 
+/**
+ * Erkennt einen echten `git commit`-Aufruf in einer (ggf. zusammengesetzten) Bash-Zeile.
+ * Robust via segmentCommands (Quotes/Heredocs/Compound entfernt) und gegen Fehltreffer wie
+ * `git log --grep commit` (commit muss das Subcommand sein, nicht ein Argument). Globale
+ * git-Flags (-C <dir>, -c k=v, --git-dir …) werden übersprungen.
+ * Genutzt fürs Main-Commit-Gate: der Integrator (Worktree = main-Checkout) soll nicht still
+ * auf main committen.
+ */
+export function isGitCommit(command: string): boolean {
+  for (const toks of segmentCommands(command)) {
+    const base = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
+    if (base !== "git") continue;
+    let i = 1;
+    while (i < toks.length) {
+      const t = toks[i];
+      if (t === "-C" || t === "-c" || t === "--git-dir" || t === "--work-tree" || t === "--namespace") {
+        i += 2; // diese Flags tragen ein Argument
+        continue;
+      }
+      if (t.startsWith("-")) {
+        i += 1;
+        continue;
+      }
+      break;
+    }
+    if (toks[i] === "commit") return true;
+  }
+  return false;
+}
+
 export function classifyBashCommand(command: string): AutoDecision {
   const cmd = command.trim();
   if (!cmd) return ASK("leerer Befehl");

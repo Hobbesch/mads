@@ -13,7 +13,7 @@
 import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
 import { createWorktree, removeWorktree } from "./git.js";
-import { classifyToolCall } from "../../shared/safe-command.js";
+import { classifyToolCall, isGitCommit } from "../../shared/safe-command.js";
 import { z } from "zod";
 import type {
   StartAgentMsg,
@@ -309,6 +309,25 @@ export class AgentSession {
     input: Record<string, unknown>,
     opts: Record<string, unknown>,
   ): Promise<PermissionResult> {
+    // Main-Commit-Gate: Der Integrator-Worktree IST der main-Checkout. Ein `git commit`
+    // des Integrators landet also direkt auf main — das soll NIE still passieren (auch nicht
+    // im Auto-Modus, wo lokale Commits sonst durchlaufen). Immer Rückfrage, damit der
+    // Maintainer bewusst zustimmt; lehnt er ab, soll die Arbeit über einen Sub-Stream/Branch
+    // + PR laufen. (Greift nicht bei bypassPermissions — dort hat der Nutzer Prompts bewusst
+    // abgeschaltet; und nicht beim gegateten `gh pr merge`, der serverseitig statt per Bash läuft.)
+    if (
+      this.role === "integrator" &&
+      toolName === "Bash" &&
+      isGitCommit(String((input as { command?: unknown })?.command ?? ""))
+    ) {
+      return this.promptPermission(
+        toolName,
+        input,
+        opts,
+        "Commit auf main: Der Integrator würde direkt auf den main-Checkout committen. " +
+          "Bitte bewusst bestätigen — oder ablehnen und die Arbeit über einen Sub-Stream/Branch + PR laufen lassen.",
+      );
+    }
     // Auto-Modus: harmlose (lesende + datei-ändernde) Aktionen ohne Rückfrage erlauben;
     // außen-sichtbare/destruktive Aktionen kommen mit klarem Grund zur Bestätigung.
     if (this.permissionMode === "auto" && toolName !== "AskUserQuestion") {

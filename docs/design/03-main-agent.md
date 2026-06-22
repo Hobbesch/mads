@@ -200,6 +200,16 @@ ausgeführt — nachdem der `GateChecker` deterministisch grün gemeldet hat. So
 Merge-Punkt ein einziger, auditierbarer, nicht-stochastischer Ort. Das ist die
 striktest-mögliche Lesart von „nur der Integrator merged" + „der Integrator rät nicht".
 
+**Main-Commit-Gate (bewusste Maintainer-Zustimmung).** Da der Integrator-Worktree *der*
+`main`-Checkout ist, landet jeder `git commit` des `MAIN_AGENT` direkt auf `main`. Damit das
+nie *still* geschieht (auch nicht im Auto-Modus, in dem lokale Commits sonst ohne Rückfrage
+durchlaufen), löst ein `git commit` des Integrators in `canUseTool` **immer** eine
+Permission-Rückfrage aus (`isGitCommit` in `shared/safe-command.ts` → erzwungenes
+`promptPermission`, siehe `sidecar/src/session.ts`). Der Maintainer stimmt bewusst zu — oder
+lehnt ab, dann gehört die Arbeit in einen Sub-Stream/Branch + PR. Greift nicht bei
+`bypassPermissions` (dort sind Prompts bewusst abgeschaltet) und nicht beim gegateten
+`gh pr merge` (läuft serverseitig über die Engine, nicht per Bash). Operationalisiert OE-16.
+
 > **OFFENE FRAGE (A1):** Soll der `MAIN_AGENT` *überhaupt* `git rebase`/`git merge`
 > ausführen dürfen (für mechanische Konfliktlösung), oder soll auch das die
 > `IntegratorEngine` deterministisch starten und den LLM nur für den *Edit* der
