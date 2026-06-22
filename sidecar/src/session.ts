@@ -29,6 +29,7 @@ type PermissionResult =
 interface PendingPermission {
   resolve: (r: PermissionResult) => void;
   suggestions?: unknown[]; // Regel-Vorschläge von Claude Code (für „Immer erlauben")
+  input?: Record<string, unknown>; // ursprünglicher Tool-Input — als updatedInput zurückgeben
 }
 
 interface SdkUserMessage {
@@ -236,7 +237,9 @@ export class AgentSession {
     if (this.permissionMode === "auto" && toolName !== "AskUserQuestion") {
       const verdict = classifyToolCall(toolName, input, { cwd: this.cwd });
       if (verdict.decision === "allow") {
-        return Promise.resolve({ behavior: "allow" });
+        // updatedInput ist im CLI-Schema PFLICHT (Record) — sonst ZodError. Ursprünglichen
+        // Input zurückgeben.
+        return Promise.resolve({ behavior: "allow", updatedInput: input });
       }
       return this.promptPermission(toolName, input, opts, verdict.reason);
     }
@@ -251,7 +254,7 @@ export class AgentSession {
   ): Promise<PermissionResult> {
     return new Promise<PermissionResult>((resolve) => {
       const requestId = randomUUID();
-      this.pending.set(requestId, { resolve, suggestions: opts.suggestions as unknown[] | undefined });
+      this.pending.set(requestId, { resolve, suggestions: opts.suggestions as unknown[] | undefined, input });
       const isAsk = toolName === "AskUserQuestion";
       this.emit({
         ...envelope(),
@@ -277,11 +280,12 @@ export class AgentSession {
       return;
     }
     this.pending.delete(requestId);
-    const { resolve, suggestions } = entry;
+    const { resolve, suggestions, input } = entry;
     if (decision.behavior === "allow") {
       resolve({
         behavior: "allow",
-        updatedInput: decision.updatedInput,
+        // updatedInput ist im CLI-Schema PFLICHT — Original-Input (oder geänderten) zurückgeben.
+        updatedInput: decision.updatedInput ?? input ?? {},
         updatedPermissions: decision.remember ? suggestions : undefined,
       });
     } else if (decision.behavior === "answer_questions") {
