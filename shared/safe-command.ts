@@ -29,6 +29,8 @@ const SAFE_CMDS = new Set([
   "cut", "tr", "column", "awk", "sed", "jq", "yq", "diff", "comm", "stat", "du", "df",
   "date", "env", "printenv", "basename", "dirname", "realpath", "readlink", "hostname",
   "whoami", "uname", "true", "false", "test", "[", "[[", "tldr", "man",
+  // Shell-Builtins zur Variablen-/Existenz-Prüfung (harmlos; gefährliche Args fängt DANGER)
+  "command", "export", "local", "declare", "readonly", "typeset", "unset",
   // lokale Datei-Op (Policy erlaubt Datei-Änderungen)
   "mkdir", "touch", "mv", "cp",
   // git: nur erlaubt zusammen mit erlaubtem Subcommand (siehe classifyGit)
@@ -54,12 +56,17 @@ const DANGER = [
   { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)" },
 ];
 
-// git-Subcommands, die destruktiv/außen-sichtbar sind → fragen.
-const GIT_RISKY = /\bgit\s+(?:-[^\s]+\s+)*(push|rm|reset|clean|checkout|restore|merge|rebase|cherry-pick|revert|filter-branch|update-ref|gc|prune|fetch|pull|remote|submodule|worktree|tag\b(?!\s+-l)|config\s+--global)/;
+// git-Subcommands, die destruktiv/außen-sichtbar sind → fragen. Lese-Subcommands
+// (z.B. `worktree list`, `remote -v`, `submodule status`) sind NICHT riskant.
+const GIT_RISKY =
+  /\bgit\s+(?:-[^\s]+\s+)*(push|rm|reset|clean|checkout|restore|merge|rebase|cherry-pick|revert|filter-branch|update-ref|gc|fetch|pull|remote\s+(?:add|remove|rm|set-url|rename|prune)|submodule\s+(?:add|update|deinit|sync|set-url|set-branch)|worktree\s+(?:add|remove|move|prune)|tag\b(?!\s+-l)|config\s+--global)/;
 
 function hasWriteRedirect(cmd: string): boolean {
-  // erlaubt: >/dev/null, 2>/dev/null, 2>&1, >&2 — alles andere ist ein Schreib-Redirect
+  // Quotes zuerst maskieren — ein > in 'text' oder "code" ist KEIN Redirect.
+  // erlaubt: >/dev/null, 2>/dev/null, 2>&1, >&2 — alles andere ist ein Schreib-Redirect.
   const cleaned = cmd
+    .replace(/'[^']*'/g, " ")
+    .replace(/"[^"]*"/g, " ")
     .replace(/\d?>>?\s*\/dev\/null/g, " ")
     .replace(/\d?>&\d/g, " ")
     .replace(/&>\s*\/dev\/null/g, " ");

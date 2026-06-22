@@ -47,6 +47,19 @@ check("hidden danger in $()", ask('echo $(rm -rf foo)'));
 check("pipe to sh", ask("ls | sh"));
 check("chmod", ask("chmod +x script.sh"));
 
+// ---- Fehlalarm-Fixes (aus Praxis-Rückmeldungen) ----
+check("git worktree list (read) → allow", allow("git worktree list 2>&1 | head"));
+check("git worktree add → ask", ask("git worktree add ../wt feat/x"));
+check("git remote -v (read) → allow", allow('echo "=== remotes ===" && git remote -v'));
+check("git remote add → ask", ask("git remote add up https://x"));
+check("git submodule status (read) → allow", allow("git submodule status"));
+check("command -v (builtin) → allow", allow('echo "uv?" && command -v uv'));
+check("export-prefix + ls → allow", allow('export PATH="$HOME/.local/bin:$PATH" && ls -la'));
+check("> innerhalb Quotes ist KEIN Redirect → allow", allow(`echo "a > b" && grep -c 'x>y' file 2>/dev/null`));
+check("echter Redirect bleibt → ask", ask('echo "hi" > out.txt'));
+check("uv run bleibt → ask (führt Code aus)", ask("uv run ruff check src/x.py"));
+check("direkte python-Ausführung → ask", ask('"$VENV/bin/python" -c "import os"'));
+
 // ---- Tool-Policy ----
 check("Read tool allow", classifyToolCall("Read", { file_path: "/repo/x.ts" }, { cwd: "/repo" }).decision === "allow");
 check("Grep tool allow", classifyToolCall("Grep", { pattern: "foo" }).decision === "allow");
