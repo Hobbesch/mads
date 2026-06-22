@@ -31,6 +31,9 @@ const SAFE_CMDS = new Set([
   "whoami", "uname", "true", "false", "test", "[", "[[", "tldr", "man",
   // Shell-Builtins zur Variablen-/Existenz-Prüfung (harmlos; gefährliche Args fängt DANGER)
   "command", "export", "local", "declare", "readonly", "typeset", "unset",
+  // Projekt-Python-Dev/Test-Tooling (vom Nutzer als vertrauenswürdig gewählt; rm/Netz/
+  // sudo im selben Befehl fängt weiterhin DANGER). Siehe auch isUvRunner + .venv/bin.
+  "python", "python3", "pytest", "ruff", "mypy", "pyright", "black", "isort", "flake8", "pylint", "coverage",
   // lokale Datei-Op (Policy erlaubt Datei-Änderungen)
   "mkdir", "touch", "mv", "cp",
   // git: nur erlaubt zusammen mit erlaubtem Subcommand (siehe classifyGit)
@@ -50,7 +53,7 @@ const DANGER = [
   { re: /(^|[\s;&|(])(curl|wget|nc|ncat|telnet|ssh|scp|sftp|rsync|ftp)(\s|$)/, why: "Netzwerkzugriff" },
   { re: /(^|[\s;&|(])(brew|apt|apt-get|yum|dnf|port|docker|podman|launchctl|crontab|systemctl)(\s|$)/, why: "System-/Paket-/Dienst-Verwaltung" },
   { re: /(^|[\s;&|(])(npm|pnpm|yarn|bun|npx|pip|pip3|gem|cargo|go)(\s|$)/, why: "Paketmanager/Build (kann Skripte ausführen oder ins Netz gehen)" },
-  { re: /(^|[\s;&|(])(eval|exec|source|\.)(\s|$)/, why: "führt dynamisch Code aus (eval/exec/source)" },
+  { re: /(^|[\s;&|(])(eval|exec)(\s|$)/, why: "führt dynamisch Code aus (eval/exec)" },
   { re: /(^|[\s;&|(])(osascript|defaults|open|pbcopy|pbpaste)(\s|$)/, why: "greift auf macOS-Systemfunktionen zu" },
   { re: /(^|[\s;&|(])gh(\s|$)/, why: "GitHub-CLI (außen-sichtbar: PR/Issue/API)" },
   { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)" },
@@ -98,6 +101,8 @@ function segmentCommands(cmd: string): string[][] {
   // 1) Quoted-Strings entfernen (enthalten ggf. Operatoren wie | die keine sind).
   // 2) Kommando-Substitution öffnen, damit innere Kommandos mitgeprüft werden.
   const s = cmd
+    // Heredoc-Inhalte (<<'TAG' … TAG) sind Eingabedaten (z.B. python3 - <<PY …), keine Befehle.
+    .replace(/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n[ \t]*\2\b/g, " ")
     .replace(/'[^']*'/g, " ")
     .replace(/"[^"]*"/g, " ")
     .replace(/`/g, " ")
@@ -141,6 +146,8 @@ export function classifyBashCommand(command: string): AutoDecision {
     const c = toks[0];
     if (SAFE_CMDS.has(c)) continue;
     if (isUvRunner(toks)) continue;
+    if (/(^|\/)\.venv\/bin\//.test(c)) continue; // Projekt-venv-Tool (z.B. .venv/bin/ruff)
+    if ((c === "source" || c === ".") && /(^|\/)activate$/.test(toks[1] ?? "")) continue; // venv aktivieren
     return ASK(`enthält nicht-eingestuften Befehl „${c}“`);
   }
   return ALLOW;

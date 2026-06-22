@@ -66,7 +66,21 @@ check("uv add (Netz/Deps) → ask", ask("uv add requests"));
 check("uv sync → ask", ask("uv sync"));
 check("uv pip install → ask", ask("uv pip install x"));
 check("uv run mit rm im Inneren → ask (DANGER greift)", ask('uv run python -c "import os" && rm -rf build'));
-check("direkte python-Ausführung → ask", ask('"$VENV/bin/python" -c "import os"'));
+
+// ---- Projekt-Python-/venv-Tooling (vertrauenswürdig) + Fehlalarm-Fixes ----
+check("ruff check . (Punkt ist Arg, kein source) → allow", allow("uv run --no-sync ruff check . 2>&1 | tail -8"));
+check("compound ruff check + format → allow", allow('cd /wt && export PATH="$HOME/.local/bin:$PATH" && echo "===" && uv run --no-sync ruff check . && uv run --no-sync ruff format --check .'));
+check(".venv/bin/ruff → allow", allow(".venv/bin/ruff check src/x.py 2>&1 | tail -20"));
+check(".venv/bin/python → allow", allow(".venv/bin/python -m pytest -q"));
+check("source venv-activate + pytest → allow", allow("source .venv/bin/activate && python -m pytest tests/x.py -q 2>&1 | tail -25"));
+check("env-probe (which/ls/source/python) → allow", allow('which uv; ls -la .venv/bin/python 2>/dev/null; echo "---"; source .venv/bin/activate 2>/dev/null && python -c "import sys; print(sys.executable)"'));
+check("python3 heredoc liest agents.json → allow", allow("python3 - <<'PY'\nimport json\nwith open('.mads/agents.json') as f:\n    d = json.load(f)\nprint(len(d['agents']))\nPY"));
+check("pytest direkt → allow", allow("pytest -q tests/"));
+// Sicherheit bleibt:
+check("source einer Fremd-Datei → ask", ask("source ./evil.sh"));
+check("python mit rm im -c → ask (DANGER)", ask('python -c "import os" ; rm -rf build'));
+check("eval bleibt → ask", ask('eval "$x"'));
+check(".venv/bin/python mit curl-String → ask (DANGER)", ask('.venv/bin/python -c "x" && curl http://x'));
 
 // ---- Tool-Policy ----
 check("Read tool allow", classifyToolCall("Read", { file_path: "/repo/x.ts" }, { cwd: "/repo" }).decision === "allow");
