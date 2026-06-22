@@ -782,6 +782,30 @@ button.primary:hover {
   display: flex;
   flex-direction: column;
 }
+/* „Zum Ende springen" — schwebt unten rechts, wenn man hochgescrollt ist. */
+.tl-jump {
+  position: sticky;
+  bottom: 10px;
+  align-self: flex-end;
+  margin-top: -34px; /* überlagert die Bottom-Padding-Zone, kein Layout-Sprung */
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+}
+.tl-jump:hover {
+  background: var(--panel-2);
+}
 .tl-empty {
   color: var(--text-faint);
   font-size: 13px;

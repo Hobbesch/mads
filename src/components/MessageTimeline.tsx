@@ -140,10 +140,34 @@ export function MessageTimeline({ agentId }: { agentId: string }) {
   const currentStep = useStore((s) => s.agents[agentId]?.currentStep);
   const workStartedAt = useStore((s) => s.agents[agentId]?.workStartedAt);
   const endRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [atBottom, setAtBottom] = useState(true);
 
+  // Den scrollenden Eltern-Container (.timeline-wrap) beobachten: sind wir am Ende?
   useEffect(() => {
+    const el = rootRef.current?.parentElement;
+    if (!el) return;
+    const onScroll = () => setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // Beim Wechsel des Agenten ans Ende springen.
+  useEffect(() => {
+    setAtBottom(true);
     endRef.current?.scrollIntoView({ block: "end" });
-  }, [events.length]);
+  }, [agentId]);
+
+  // Auto-Scroll nur, wenn der Nutzer ohnehin am Ende ist (sonst Lese-Position halten).
+  useEffect(() => {
+    if (atBottom) endRef.current?.scrollIntoView({ block: "end" });
+  }, [events.length, atBottom]);
+
+  const scrollToEnd = () => {
+    setAtBottom(true);
+    endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  };
 
   const active = status === "running" || status === "starting";
   const stepLabel =
@@ -152,7 +176,7 @@ export function MessageTimeline({ agentId }: { agentId: string }) {
       : currentStep;
 
   return (
-    <div className="timeline">
+    <div className="timeline" ref={rootRef}>
       {events.length === 0 && !active && <div className="tl-empty">Noch keine Ausgabe.</div>}
       {events.map(renderEvent)}
       {active && (
@@ -165,6 +189,11 @@ export function MessageTimeline({ agentId }: { agentId: string }) {
         </div>
       )}
       <div ref={endRef} />
+      {!atBottom && (
+        <button className="tl-jump" onClick={scrollToEnd} title="Zum Ende springen" aria-label="Zum Ende springen">
+          ↓
+        </button>
+      )}
     </div>
   );
 }
