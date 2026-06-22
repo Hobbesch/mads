@@ -274,7 +274,7 @@ export class Orchestrator {
     if (!this.project) return;
     const agents: RegistryEntry[] = [];
     for (const s of this.pool.values()) {
-      if (s.mock || !s.sessionId || s.status === "done") continue; // nur resumebare, echte Agenten
+      if (s.mock || !s.sessionId) continue; // echte Agenten mit Session sind resumebar (auch fertige/Integrator)
       agents.push({
         agentId: s.agentId,
         label: s.label ?? s.agentId,
@@ -300,10 +300,10 @@ export class Orchestrator {
     const resumable = loadRegistry(repoRoot).filter(
       (e) =>
         e.sessionId &&
-        e.status !== "done" &&
-        !!e.worktreePath &&
-        existsSync(e.worktreePath) &&
-        !this.pool.has(e.agentId),
+        !this.pool.has(e.agentId) &&
+        // Sub-Agenten brauchen ihren Worktree; der Integrator läuft im Haupt-Checkout
+        // (kein Worktree) und ist trotzdem fortsetzbar.
+        (e.worktreePath ? existsSync(e.worktreePath) : true),
     );
     if (resumable.length > 0) {
       this.emit({ ...envelope(), type: "resumable_agents", agents: resumable });

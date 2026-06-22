@@ -604,6 +604,9 @@ export const useStore = create<MadsState>((set) => {
         resumeSessionId: r.sessionId,
         resumeWorktreePath: r.worktreePath,
         repoRoot: project?.repoRoot,
+        // Ohne Worktree (Integrator) im Haupt-Checkout fortsetzen — sonst landet der
+        // Agent im falschen Arbeitsverzeichnis.
+        cwd: project?.repoRoot,
         branch: r.branch,
       });
     },
