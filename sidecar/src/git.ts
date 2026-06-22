@@ -157,7 +157,13 @@ export async function pushBranch(
   worktree: string,
   branch: string,
 ): Promise<{ ok: true } | { ok: false; kind: EscalationKind; error: string }> {
-  const push = await git(["-C", worktree, "push", "-u", "origin", branch], worktree);
+  let push = await git(["-C", worktree, "push", "-u", "origin", branch], worktree);
+  // Wurde der Branch lokal umgeschrieben (z.B. Rebase onto origin/main), lehnt ein
+  // normaler Push als „non-fast-forward" ab. mads-Branches sind single-owner → sicher
+  // per --force-with-lease nachziehen (clobbert nur, wenn das Remote unverändert ist).
+  if (push.code !== 0 && /\[rejected\]|non-fast-forward|fetch first|tip of your current branch is behind/i.test(`${push.stderr}\n${push.stdout}`)) {
+    push = await git(["-C", worktree, "push", "--force-with-lease", "-u", "origin", branch], worktree);
+  }
   if (push.code !== 0) return { ok: false, kind: classifyGitError(push.stderr) ?? "push_rejected", error: push.stderr };
   return { ok: true };
 }
