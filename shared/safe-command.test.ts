@@ -57,7 +57,15 @@ check("command -v (builtin) → allow", allow('echo "uv?" && command -v uv'));
 check("export-prefix + ls → allow", allow('export PATH="$HOME/.local/bin:$PATH" && ls -la'));
 check("> innerhalb Quotes ist KEIN Redirect → allow", allow(`echo "a > b" && grep -c 'x>y' file 2>/dev/null`));
 check("echter Redirect bleibt → ask", ask('echo "hi" > out.txt'));
-check("uv run bleibt → ask (führt Code aus)", ask("uv run ruff check src/x.py"));
+check("uv run → allow (vom Nutzer freigegeben)", allow("uv run ruff check src/x.py"));
+check("uvx → allow", allow("uvx ruff check src/x.py"));
+check("uv run im Compound-Befehl → allow", allow('cd /wt && export PATH="$HOME/.local/bin:$PATH" && uv run --no-sync ruff check --fix scripts/x.py 2>&1 | tail -4'));
+check("uv run mit vollem Pfad → allow", allow("~/.local/bin/uv run pytest -q tests/x.py"));
+check("uv tool run → allow", allow("uv tool run ruff check x"));
+check("uv add (Netz/Deps) → ask", ask("uv add requests"));
+check("uv sync → ask", ask("uv sync"));
+check("uv pip install → ask", ask("uv pip install x"));
+check("uv run mit rm im Inneren → ask (DANGER greift)", ask('uv run python -c "import os" && rm -rf build'));
 check("direkte python-Ausführung → ask", ask('"$VENV/bin/python" -c "import os"'));
 
 // ---- Tool-Policy ----

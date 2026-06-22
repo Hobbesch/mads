@@ -90,8 +90,11 @@ const LEADING_SKIP = new Set([
 // Segment-Köpfe ohne ausführbares Kommando (Loop-/case-Header; Body steht in `do`-Segmenten).
 const SEGMENT_HEAD_NOCMD = new Set(["for", "select", "case", "in"]);
 
-/** Kommando-Wörter aus einer (ggf. zusammengesetzten) Bash-Zeile extrahieren. */
-function commandWords(cmd: string): string[] {
+/**
+ * Pro Segment einer (ggf. zusammengesetzten) Bash-Zeile die Kommando-Tokens liefern
+ * (führende Keywords/Zuweisungen übersprungen). [0] = Kommando, [1..] = dessen Argumente.
+ */
+function segmentCommands(cmd: string): string[][] {
   // 1) Quoted-Strings entfernen (enthalten ggf. Operatoren wie | die keine sind).
   // 2) Kommando-Substitution öffnen, damit innere Kommandos mitgeprüft werden.
   const s = cmd
@@ -101,16 +104,25 @@ function commandWords(cmd: string): string[] {
     .replace(/\$\(/g, " ")
     .replace(/[()]/g, " ; ");
   const segments = s.split(/(?:\|\||&&|\||;|\n)+/);
-  const words: string[] = [];
+  const out: string[][] = [];
   for (const seg of segments) {
     const toks = seg.trim().split(/\s+/).filter(Boolean);
     if (toks.length === 0) continue;
     if (SEGMENT_HEAD_NOCMD.has(toks[0])) continue; // z.B. `for n in 0063 0064` → kein Kommando
     let i = 0;
     while (i < toks.length && (LEADING_SKIP.has(toks[i]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[i]))) i++;
-    if (i < toks.length) words.push(toks[i]);
+    if (i < toks.length) out.push(toks.slice(i));
   }
-  return words;
+  return out;
+}
+
+/** uv-Runner gilt als sicher (vom Nutzer freigegeben): `uv run …`, `uv tool run …`, `uvx …`
+ * — auch mit vollem Pfad (`~/.local/bin/uv run …`). `uv add/sync/pip …` (Netz/Deps) NICHT. */
+function isUvRunner(toks: string[]): boolean {
+  const base = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
+  if (base === "uvx") return true;
+  if (base === "uv") return toks[1] === "run" || (toks[1] === "tool" && toks[2] === "run");
+  return false;
 }
 
 export function classifyBashCommand(command: string): AutoDecision {
@@ -123,10 +135,13 @@ export function classifyBashCommand(command: string): AutoDecision {
   const git = classifyGit(cmd);
   if (git) return git;
 
-  const words = commandWords(cmd);
-  if (words.length === 0) return ASK("Befehl nicht eindeutig");
-  for (const w of words) {
-    if (!SAFE_CMDS.has(w)) return ASK(`enthält nicht-eingestuften Befehl „${w}“`);
+  const segs = segmentCommands(cmd);
+  if (segs.length === 0) return ASK("Befehl nicht eindeutig");
+  for (const toks of segs) {
+    const c = toks[0];
+    if (SAFE_CMDS.has(c)) continue;
+    if (isUvRunner(toks)) continue;
+    return ASK(`enthält nicht-eingestuften Befehl „${c}“`);
   }
   return ALLOW;
 }
