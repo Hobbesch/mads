@@ -58,6 +58,31 @@ function cap(text: string, max = 4000): string {
   return text.length > max ? `${text.slice(0, max)}\n… [${text.length - max} Zeichen gekürzt]` : text;
 }
 
+/** SDKAssistantMessageError → klare deutsche Meldung + ob es sich lohnt, erneut zu versuchen. */
+function apiErrorInfo(err: string): { message: string; recoverable: boolean } {
+  switch (err) {
+    case "rate_limit":
+      return { message: "Rate-Limit / Nutzungskontingent erreicht (Abo). Kurz warten und erneut senden.", recoverable: true };
+    case "overloaded":
+      return { message: "Anthropic-Server überlastet (529). Kurz warten und erneut versuchen.", recoverable: true };
+    case "server_error":
+      return { message: "Server-Fehler bei Anthropic. Erneut versuchen.", recoverable: true };
+    case "max_output_tokens":
+      return { message: "Antwort abgeschnitten (max. Output-Tokens erreicht).", recoverable: true };
+    case "billing_error":
+      return { message: "Abrechnungs-/Kontingentproblem mit dem Anthropic-Konto.", recoverable: false };
+    case "authentication_failed":
+    case "oauth_org_not_allowed":
+      return { message: "Authentifizierung fehlgeschlagen — Claude-Login/Token prüfen.", recoverable: false };
+    case "model_not_found":
+      return { message: "Angefordertes Modell nicht verfügbar.", recoverable: false };
+    case "invalid_request":
+      return { message: "Ungültige Anfrage ans Modell.", recoverable: false };
+    default:
+      return { message: `API-Fehler: ${err}`, recoverable: true };
+  }
+}
+
 function userMsg(text: string, images?: ImageInput[]): SdkUserMessage {
   if (images && images.length > 0) {
     const content: unknown[] = [{ type: "text", text }];
@@ -335,6 +360,20 @@ export class AgentSession {
                 this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId: String(block.id), name: String(block.name), input: (block.input ?? {}) as Record<string, unknown> } });
                 this.setStatus("running", String(block.name));
               }
+            }
+            // API-Fehler dieser Antwort (rate_limit, overloaded, …) klar melden statt
+            // als generisches „Fehler".
+            if (typeof m.error === "string" && m.error) {
+              const info = apiErrorInfo(m.error);
+              this.emit({
+                ...envelope(),
+                type: "error",
+                agentId: this.agentId,
+                scope: "agent",
+                code: m.error,
+                message: info.message,
+                recoverable: info.recoverable,
+              });
             }
             // Token-Verbrauch dieser Assistant-Antwort kumulieren und live melden —
             // so steigt die Token-Anzeige im UI sichtbar während des Laufs.
