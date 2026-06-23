@@ -192,9 +192,12 @@ export class AgentSession {
             sdk.tool(
               "spawn_substreams",
               "Startet neue parallele Sub-Streams (Sub-Agenten) in mads — jeder mit eigener " +
-                "Branch/Worktree und eigenständiger Aufgabe. Nutze dies, wenn der Mensch dich bittet, " +
-                "mehrere unabhängige Punkte/Aufgaben parallel zu bearbeiten (z. B. „eröffne für Punkt " +
-                "1–4 vier Sub-Streams“). Pro Stream: kurzes Label + klarer, in sich abgeschlossener Auftrag (brief).",
+                "Branch/Worktree, im Dashboard SICHTBAR und steuerbar. IMMER dieses Tool verwenden, wenn " +
+                "der Mensch dich bittet, Aufgaben/Punkte in Sub-Agenten/Sub-Streams aufzuteilen und parallel " +
+                "zu starten (z. B. „teile die offenen Punkte in Sub-Agenten auf und starte sie parallel“, " +
+                "„eröffne für Punkt 1–4 vier Sub-Streams“). Verwende dafür NICHT das `Agent`/Task-Tool — " +
+                "dessen Subagenten laufen nur intern, erscheinen NICHT im Dashboard und sind nicht steuerbar. " +
+                "Pro Stream: kurzes Label + klarer, in sich abgeschlossener Auftrag (brief).",
               {
                 streams: z
                   .array(
@@ -256,12 +259,18 @@ export class AgentSession {
               "Schritte (Sync, PR erstellen, Integrieren/Merge, Branch-Cleanup) übernimmt mads über " +
               "die UI-Buttons; manuelle Pushes/Rebases würden den Branch divergieren lassen." +
               (this.role === "integrator"
-                ? "\nSub-Streams: Wenn der Mensch dich bittet, mehrere unabhängige Punkte/Aufgaben " +
-                  "parallel zu bearbeiten (z. B. „eröffne für Punkt 1–4 je einen Sub-Stream“), rufe " +
-                  "das Tool spawn_substreams auf — ein Eintrag pro Stream (kurzes Label + " +
-                  "eigenständiger, in sich abgeschlossener Auftrag). Erkläre kurz die geplante " +
-                  "Aufteilung, aber führe sie dann auch wirklich über das Tool aus; die Sub-Agenten " +
-                  "laufen danach eigenständig in mads (eigener Worktree/Branch) — mergen tust nur du."
+                ? "\nParallele Arbeit — ZWEI Mechanismen, NICHT verwechseln:\n" +
+                  "• spawn_substreams (mads-Tool): erzeugt ECHTE, im Dashboard sichtbare und steuerbare " +
+                  "mads-Sub-Streams mit eigenem Worktree/Branch. NUTZE IMMER DIESES, wenn der Mensch dich " +
+                  "bittet, Aufgaben/Punkte in Sub-Agenten/Sub-Streams aufzuteilen und parallel zu starten " +
+                  "(„starte Sub-Agenten“, „parallel aufteilen“, „eröffne Streams“). Ein Eintrag pro Stream; " +
+                  "sie laufen danach eigenständig weiter, der Mensch sieht und steuert sie. Erkläre kurz die " +
+                  "Aufteilung und führe sie dann WIRKLICH über spawn_substreams aus — nicht still seriell selbst.\n" +
+                  "• Das `Agent`/Task-Tool (SDK-Helfer-Subagent): NUR für kurze, interne Lese-/Analyse-Hilfen " +
+                  "innerhalb deiner eigenen Antwort (z. B. einen Diff security-reviewen). Es erscheint NICHT im " +
+                  "Dashboard, ist nicht steuerbar und ist KEIN Ersatz für spawn_substreams — nutze es NIEMALS, " +
+                  "um die vom Menschen gewünschte parallele Sub-Agenten-Arbeit zu erledigen.\n" +
+                  "Außen-git (push/pr/merge) macht weiterhin nur mads über die UI; mergen tust nur du."
                 : ""),
           },
           // "auto" wird mads-seitig behandelt (Auto-Freigabe im canUseTool); dem SDK
