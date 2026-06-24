@@ -1,8 +1,10 @@
+import { useLayoutEffect, useRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { agentBadges, nextStep } from "../derive";
+import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
@@ -32,6 +34,15 @@ export function Inspector() {
   const setDraft = useStore((s) => s.setDraft);
   const setDraftImages = useStore((s) => s.setDraftImages);
 
+  // Auto-wachsende Composer-Höhe (Textarea): bei jeder Entwurfs-Änderung neu messen.
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [draft]);
+
   if (!agent || !selectedId) {
     return (
       <section className="inspector empty">
@@ -40,8 +51,8 @@ export function Inspector() {
     );
   }
 
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const submit = (e?: { preventDefault: () => void }) => {
+    e?.preventDefault();
     const text = draft.trim();
     if (!text && attached.length === 0) return;
     void sendInput(selectedId, text || "(siehe Screenshot)", attached.length ? attached : undefined);
@@ -68,6 +79,7 @@ export function Inspector() {
   const badges = agentBadges(agent);
   const step = nextStep(agent);
   const busy = agent.status === "running" || agent.status === "starting";
+  const color = agentColor(agent.branch ?? agent.id);
   const runStep = () => {
     if (step.kind === "commit") void commitAgent(selectedId);
     else if (step.kind === "pr") void createPr(selectedId);
@@ -76,8 +88,8 @@ export function Inspector() {
   };
 
   return (
-    <section className="inspector">
-      <header className="inspector-head">
+    <section className="inspector" style={{ "--agent-color": color } as React.CSSProperties}>
+      <header className="inspector-head agent-tinted">
         <StatusDot status={agent.status} />
         <div className="inspector-title">
           <span className="inspector-label">{agent.label}</span>
@@ -192,11 +204,21 @@ export function Inspector() {
           </div>
         )}
         <form className="composer" onSubmit={submit}>
-          <input
+          <textarea
+            ref={composerRef}
+            className="composer-input"
+            rows={1}
             value={draft}
             onChange={(e) => setDraft(selectedId, e.target.value)}
             onPaste={(e) => void onPaste(e)}
-            placeholder={`Nachricht an ${agent.label}…  (Screenshot mit ⌘V einfügen)`}
+            onKeyDown={(e) => {
+              // Enter sendet; Shift+Enter (oder während IME-Komposition) → Zeilenumbruch.
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            placeholder={`Nachricht an ${agent.label}…  (Enter senden · ⇧↵ Zeilenumbruch · ⌘V Screenshot)`}
           />
           {busy ? (
             <button

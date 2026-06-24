@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
 import { agentBadges, hasGitEscalation } from "../derive";
+import { agentColor } from "../agentColor";
 import type { AgentVM } from "../store";
 
 function AgentCard({ agent }: { agent: AgentVM }) {
@@ -16,10 +17,12 @@ function AgentCard({ agent }: { agent: AgentVM }) {
   const pending = permissions.filter((p) => p.agentId === agent.id).length;
   const badges = agentBadges(agent);
   const active = agent.status === "running" || agent.status === "starting";
+  const color = agentColor(agent.branch ?? agent.id);
 
   return (
     <button
       className={`card${selectedId === agent.id ? " selected" : ""}${needsInput ? " needs-input" : ""}${escalated ? " escalated" : ""}`}
+      style={{ "--agent-color": color } as CSSProperties}
       onClick={() => select(agent.id)}
     >
       <div className="card-head">

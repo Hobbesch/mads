@@ -5,6 +5,7 @@ import type { OpenFile, ViewMode } from "../store";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { MarkdownSource } from "./MarkdownSource";
 import { MarkdownToolbar } from "./MarkdownToolbar";
+import { openMarkdownWindow } from "../detachWindow";
 
 /**
  * Markdown-Editor-Orchestrator (docs/design/08-markdown-editor.md §2.1) — der `.md`-
@@ -20,8 +21,9 @@ const MODES: { id: ViewMode; label: string }[] = [
   { id: "split", label: "Split" },
 ];
 
-export function MarkdownEditor({ file }: { file: OpenFile }) {
+export function MarkdownEditor({ file, detached = false }: { file: OpenFile; detached?: boolean }) {
   const path = file.path;
+  const [fullscreen, setFullscreen] = useState(false);
   const buffer = useStore((s) => s.editorBuffers[path]);
   const viewMode = useStore((s) => s.editorViewMode);
   const saving = useStore((s) => !!s.editorSaving[path]);
@@ -59,6 +61,11 @@ export function MarkdownEditor({ file }: { file: OpenFile }) {
     [path, insertImageFromBlob],
   );
   const onWikiLink = useCallback((name: string) => void openWikiLink(path, name), [path, openWikiLink]);
+  // „Loslösen": eigenes OS-Fenster; klappt das nicht (Capability), Fallback = Vollbild im Fenster.
+  const onDetach = useCallback(async () => {
+    const ok = await openMarkdownWindow(path);
+    if (!ok) setFullscreen(true);
+  }, [path]);
 
   // ⌘⏎: Edit ⇄ Preview umschalten (§8). Auf Container-Ebene, damit es auch außerhalb
   // der EditorView greift (Preview-Modus).
@@ -128,14 +135,34 @@ export function MarkdownEditor({ file }: { file: OpenFile }) {
           >
             {saving ? "Speichert…" : "Speichern"}
           </button>
+          {!detached && (
+            <>
+              <button
+                className="md-iconbtn"
+                onClick={() => setFullscreen((f) => !f)}
+                title={fullscreen ? "Vollbild verlassen" : "Vollbild (ganzes Fenster nutzen)"}
+                aria-label="Vollbild umschalten"
+              >
+                {fullscreen ? "⤡" : "⤢"}
+              </button>
+              <button
+                className="md-iconbtn"
+                onClick={() => void onDetach()}
+                title="In eigenem Fenster öffnen (vom Hauptfenster loslösen)"
+                aria-label="In eigenem Fenster öffnen"
+              >
+                ↗
+              </button>
+            </>
+          )}
         </div>
       </header>
     ),
-    [path, dirty, viewMode, readOnly, saving, setEditorViewMode, onSave],
+    [path, dirty, viewMode, readOnly, saving, setEditorViewMode, onSave, detached, fullscreen, onDetach],
   );
 
   return (
-    <section className="md-editor" onKeyDown={onKeyDown}>
+    <section className={`md-editor${fullscreen ? " md-editor-fullscreen" : ""}`} onKeyDown={onKeyDown}>
       {header}
       {readOnly && (
         <div className="md-readonly-banner">

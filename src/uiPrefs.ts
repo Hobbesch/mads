@@ -1,11 +1,10 @@
 /**
- * App-weite UI-Vorlieben (Activity-Rail) — im localStorage des WebViews.
+ * App-weite UI-Vorlieben (Activity-Rail, Panel-Breite) — im localStorage des WebViews.
  *
  * Wie `src/recent.ts` (und bewusst NICHT in den autoritativen State-Stores
  * Sidecar-Pool/`agents.json`/SQLite, docs/design/10-navigation-toolbar.md §3.1):
- * `activeView` (welches Primary-Panel aktiv ist) und `railCollapsed` (Rail nur-Icon
- * vs. Icon+Text) sind reine UI-Projektion, kein Agenten-State. Sie überleben
- * App-Updates, solange der Bundle-Identifier (com.hobbesch.mads) gleich bleibt.
+ * reine UI-Projektion, kein Agenten-State. Überlebt App-Updates, solange der
+ * Bundle-Identifier (com.hobbesch.mads) gleich bleibt.
  */
 
 /** Welcher Rail-View aktiv ist. "streams" (Default) ⇒ KEIN Primary-Panel —
@@ -17,13 +16,23 @@ export type ViewId = "streams" | "files" | "settings";
 export interface UiPrefs {
   activeView: ViewId;
   railCollapsed: boolean;
+  /** Breite des Mittel-Panels (Dateien/Einstellungen) in px — vom Nutzer ziehbar. */
+  primaryPanelWidth: number;
 }
 
 const KEY = "mads.uiPrefs";
 
-const DEFAULTS: UiPrefs = { activeView: "streams", railCollapsed: false };
+export const PANEL_MIN = 240;
+export const PANEL_MAX = 1200;
+const DEFAULTS: UiPrefs = { activeView: "streams", railCollapsed: false, primaryPanelWidth: 320 };
 
 const VALID_VIEWS: ViewId[] = ["streams", "files", "settings"];
+
+export function clampPanelWidth(n: unknown): number {
+  return typeof n === "number" && Number.isFinite(n)
+    ? Math.min(PANEL_MAX, Math.max(PANEL_MIN, n))
+    : DEFAULTS.primaryPanelWidth;
+}
 
 export function loadUiPrefs(): UiPrefs {
   try {
@@ -33,15 +42,17 @@ export function loadUiPrefs(): UiPrefs {
     if (!obj || typeof obj !== "object") return { ...DEFAULTS };
     const activeView: ViewId = VALID_VIEWS.includes(obj.activeView) ? obj.activeView : DEFAULTS.activeView;
     const railCollapsed = typeof obj.railCollapsed === "boolean" ? obj.railCollapsed : DEFAULTS.railCollapsed;
-    return { activeView, railCollapsed };
+    return { activeView, railCollapsed, primaryPanelWidth: clampPanelWidth(obj.primaryPanelWidth) };
   } catch {
     return { ...DEFAULTS };
   }
 }
 
-export function saveUiPrefs(p: UiPrefs): void {
+/** Merge-Persistenz: speichert nur die übergebenen Felder, behält den Rest. */
+export function saveUiPrefs(patch: Partial<UiPrefs>): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify(p));
+    const next = { ...loadUiPrefs(), ...patch };
+    localStorage.setItem(KEY, JSON.stringify(next));
   } catch {
     /* localStorage nicht verfügbar — Präferenz bleibt nur in-memory für diese Session */
   }
