@@ -195,7 +195,7 @@ export function Inspector() {
               onClick={() => void interruptAgent(selectedId)}
             >
               <svg className="icon-stop" viewBox="0 0 16 16" width="17" height="17" aria-hidden="true">
-                <rect width="16" height="16" rx="3.5" fill="currentColor" />
+                <rect width="16" height="16" fill="currentColor" />
               </svg>
             </button>
           ) : (
