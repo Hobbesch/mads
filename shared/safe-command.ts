@@ -29,6 +29,19 @@ const SAFE_CMDS = new Set([
   "cut", "tr", "column", "awk", "sed", "jq", "yq", "diff", "comm", "stat", "du", "df",
   "date", "env", "printenv", "basename", "dirname", "realpath", "readlink", "hostname",
   "whoami", "uname", "true", "false", "test", "[", "[[", "tldr", "man",
+  // weitere nur-lesende / harmlose Textwerkzeuge (Ausgabe nur auf stdout)
+  "xargs", "seq", "yes", "nl", "tac", "rev", "paste", "fold", "join", "look", "strings",
+  "cmp", "xxd", "od", "hexdump", "base64", "zcat", "less", "more", "expand", "unexpand",
+  "bc", "dc", // Rechner (lesen stdin, schreiben nur stdout)
+  // Transparente Wrapper: führen das NÄCHSTE Token als Befehl aus. Sicher NUR, weil DANGER
+  // (rm/sudo/curl/Shell/Interpreter-Inline …) ZUERST über die Rohzeile läuft — also vor der
+  // Kopfprüfung greift und die gefährliche Innen-Aktion fängt. Reihenfolge nicht umstellen!
+  "timeout", "nice", "stdbuf", "nohup",
+  // Hashing/Checksums (lesen, schreiben nichts)
+  "shasum", "md5", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
+  // Shell-Builtins in Kommando-Position (harmlos; gefährliche Args fängt DANGER)
+  ":", "read", "continue", "break", "shift", "return", "let", "select", "getopts",
+  "function", "pushd", "popd", "dirs", "trap", "wait", "alias", "unalias", "shopt",
   // Shell-Builtins zur Variablen-/Existenz-Prüfung (harmlos; gefährliche Args fängt DANGER)
   "command", "export", "local", "declare", "readonly", "typeset", "unset",
   // Projekt-Python-Dev/Test-Tooling (vom Nutzer als vertrauenswürdig gewählt; rm/Netz/
@@ -54,6 +67,13 @@ const DANGER = [
   { re: /(^|[\s;&|(])(brew|apt|apt-get|yum|dnf|port|docker|podman|launchctl|crontab|systemctl)(\s|$)/, why: "System-/Paket-/Dienst-Verwaltung" },
   { re: /(^|[\s;&|(])(npm|pnpm|yarn|bun|npx|pip|pip3|gem|cargo|go)(\s|$)/, why: "Paketmanager/Build (kann Skripte ausführen oder ins Netz gehen)" },
   { re: /(^|[\s;&|(])(eval|exec)(\s|$)/, why: "führt dynamisch Code aus (eval/exec)" },
+  // Shell starten (auch mit Pfad: /bin/sh) — `sh -c '…'` ist arbiträrer Code.
+  { re: /(^|[\s;&|(])(?:[^\s|;&]*\/)?(sh|bash|zsh|ksh|dash|fish)(\s|$)/, why: "startet eine Shell (arbiträrer Code, z. B. sh -c)" },
+  // Interpreter mit Inline-Code (-c/-e/-r): führt beliebigen Code aus, dessen Inhalt der
+  // Token-Scan NICHT sieht (z. B. python3 -c 'import os; os.system("rm -rf …")'). python &
+  // Co. sind sonst auto-erlaubt (vom Nutzer als Dev-Tooling freigegeben) — aber NICHT als
+  // Inline-Code-Runner. Greift VOR der SAFE_CMDS-Kopfprüfung (DANGER läuft zuerst).
+  { re: /(^|[\s;&|(])(?:[^\s|;&]*\/)?(python3?|ipython|ruby|perl|php|node|deno)\s+(?:-[A-Za-z]\S*\s+)*-(c|e|E|r|x)\b/, why: "führt Inline-Code aus (-c/-e)" },
   { re: /(^|[\s;&|(])(osascript|defaults|open|pbcopy|pbpaste)(\s|$)/, why: "greift auf macOS-Systemfunktionen zu" },
   { re: /(^|[\s;&|(])gh(\s|$)/, why: "GitHub-CLI (außen-sichtbar: PR/Issue/API)" },
   { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)" },
@@ -68,6 +88,7 @@ function hasWriteRedirect(cmd: string): boolean {
   // Quotes zuerst maskieren — ein > in 'text' oder "code" ist KEIN Redirect.
   // erlaubt: >/dev/null, 2>/dev/null, 2>&1, >&2 — alles andere ist ein Schreib-Redirect.
   const cleaned = cmd
+    .replace(/\\./g, " ") // maskierte Zeichen (z.B. \> ) sind kein Redirect
     .replace(/'[^']*'/g, " ")
     .replace(/"[^"]*"/g, " ")
     .replace(/\d?>>?\s*\/dev\/null/g, " ")
@@ -98,25 +119,39 @@ const SEGMENT_HEAD_NOCMD = new Set(["for", "select", "case", "in"]);
  * (führende Keywords/Zuweisungen übersprungen). [0] = Kommando, [1..] = dessen Argumente.
  */
 function segmentCommands(cmd: string): string[][] {
+  // 0) Zeilen-Fortsetzungen (\ + Newline) ZUERST zusammenführen — sonst werden die
+  //    Folgezeilen (z.B. Dateilisten in `for … in \`, Pattern-Listen, lange Befehle)
+  //    fälschlich als eigene Kommandos behandelt → die häufigste Ursache überflüssiger
+  //    Rückfragen bei mehrzeiligen Skripten.
   // 1) Quoted-Strings entfernen (enthalten ggf. Operatoren wie | die keine sind).
   // 2) Kommando-Substitution öffnen, damit innere Kommandos mitgeprüft werden.
   const s = cmd
+    .replace(/\\\r?\n/g, " ")
     // Heredoc-Inhalte (<<'TAG' … TAG) sind Eingabedaten (z.B. python3 - <<PY …), keine Befehle.
     .replace(/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n[ \t]*\2\b/g, " ")
+    .replace(/\$'(?:[^'\\]|\\.)*'/g, " ") // ANSI-C-Quotes $'…\n…' (können \ enthalten)
     .replace(/'[^']*'/g, " ")
-    .replace(/"[^"]*"/g, " ")
+    .replace(/"(?:[^"\\]|\\.)*"/g, " ")
     .replace(/`/g, " ")
+    .replace(/<<</g, " ") // Here-String-Operator
     .replace(/\$\(/g, " ")
     .replace(/[()]/g, " ; ");
+  // NICHT auf einzelnem & splitten — das gehört meist zu Redirects (2>&1, >&2, &>).
   const segments = s.split(/(?:\|\||&&|\||;|\n)+/);
   const out: string[][] = [];
   for (const seg of segments) {
-    const toks = seg.trim().split(/\s+/).filter(Boolean);
+    // Zeilen-Kommentare (# …) abschneiden — kein Kommando.
+    const noComment = seg.replace(/(^|\s)#.*$/, "");
+    const toks = noComment.trim().split(/\s+/).filter(Boolean);
     if (toks.length === 0) continue;
     if (SEGMENT_HEAD_NOCMD.has(toks[0])) continue; // z.B. `for n in 0063 0064` → kein Kommando
     let i = 0;
     while (i < toks.length && (LEADING_SKIP.has(toks[i]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[i]))) i++;
-    if (i < toks.length) out.push(toks.slice(i));
+    if (i >= toks.length) continue;
+    // Reine Shell-Operatoren/Punktuation als „Kommando"-Kopf (z.B. übrig gebliebenes
+    // `\`, `<`, `}` aus Fortsetzungen/Prozess-Substitution) sind KEIN Befehl → nicht fragen.
+    if (!/[A-Za-z0-9]/.test(toks[i])) continue;
+    out.push(toks.slice(i));
   }
   return out;
 }
