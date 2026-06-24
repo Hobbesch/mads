@@ -694,6 +694,41 @@ button.primary:hover {
   font-weight: 600;
   margin-left: auto;
 }
+/* GitHub-Abgleich-Hinweis (was beim Öffnen automatisch bereinigt wurde). */
+.reconcile-banner {
+  background: rgba(40, 167, 69, 0.12);
+  color: #2a8a43;
+  border-bottom: 1px solid rgba(40, 167, 69, 0.28);
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 550;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.reconcile-banner .reconcile-text {
+  flex: 1;
+  min-width: 0;
+}
+/* main hängt zurück & konnte nicht automatisch nachgezogen werden → Warnfarbe (amber). */
+.reconcile-banner.warn {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+  border-bottom-color: rgba(255, 176, 32, 0.3);
+}
+/* „Erledigt (gemergt) mit lokalen Resten" — neutral-grau, Aufräumen statt Fortsetzen. */
+.resume-banner.done {
+  background: var(--panel-2);
+}
+.resume-banner.done .resume-label {
+  color: var(--text-dim, #6b7280);
+}
+.resume-banner button.resume-cleanup {
+  border-color: rgba(255, 176, 32, 0.5);
+}
+.resume-banner button.resume-cleanup:hover {
+  background: rgba(255, 176, 32, 0.16);
+}
 .collision-banner {
   background: rgba(255, 176, 32, 0.16);
   color: #b9791b;

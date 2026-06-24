@@ -9,12 +9,12 @@
 import { existsSync } from "node:fs";
 import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
-import { createPr, discoverWorktrees, getRepoInfo, gitStatus, mergePr, prStatus, removeWorktree, run, syncBranch } from "./git.js";
+import { createPr, discoverWorktrees, fastForwardMain, getRepoInfo, gitStatus, mergePr, prStatus, removeWorktree, run, syncBranch, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
-import { loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
+import { ensureMadsDir, loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
 import { parseDiffRegions, detectCollisions, type AgentRegions } from "../../shared/collision.js";
-import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig } from "../../shared/protocol.js";
+import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, ResumableAgent } from "../../shared/protocol.js";
 
 const POLL_INTERVAL_MS = 25_000;
 
@@ -118,6 +118,69 @@ export class Orchestrator {
       case "poll_project":
         await this.pollAll();
         break;
+
+      case "cleanup_worktree": {
+        if (!this.project) break;
+        const root = this.project.repoRoot;
+        const path = msg.worktreePath ?? worktreePathFor(root, msg.agentId);
+        try {
+          // Schutz (G4): einen Worktree mit lokalen Resten (ungespeichert/ungepusht)
+          // NUR mit explizitem force löschen — das Frontend setzt es erst nach der
+          // Nutzer-Bestätigung. Schützt vor versehentlichem/wiederholtem Aufruf.
+          // Ohne Branch lässt sich „unpushed" nicht prüfen → fail-closed (als Rest werten).
+          if (!msg.force && existsSync(path)) {
+            const res = msg.branch ? await worktreeResidue(path, msg.branch) : { dirty: true, unpushed: 1 };
+            if (res.dirty || res.unpushed > 0) {
+              this.emitError(
+                msg.agentId,
+                "spawn_failed",
+                `Aufräumen abgelehnt: ${msg.branch ?? path} hat (oder evtl.) lokale Reste (ungespeichert/ungepusht). Im Dialog bestätigen, um sie zu verwerfen.`,
+              );
+              break;
+            }
+          }
+          await removeWorktree(root, path, msg.branch);
+          saveRegistry(root, loadRegistry(root).filter((e) => e.agentId !== msg.agentId));
+          log(`[orchestrator] aufgeräumt: ${msg.branch ?? msg.agentId} (${path})`);
+        } catch (e) {
+          log(`[orchestrator] cleanup_worktree fehlgeschlagen: ${String(e)}`);
+        }
+        break;
+      }
+
+      case "update_main": {
+        // G5: Integrator-Aktion — main per fast-forward nachziehen (KEIN rebase/force).
+        if (!this.project) break;
+        const res = await fastForwardMain(this.project.repoRoot, this.project.defaultBranch);
+        if (res.ff > 0) {
+          this.emit({
+            ...envelope(),
+            type: "agent_event",
+            agentId: msg.agentId,
+            event: { kind: "assistant_text", text: `↻ main per fast-forward auf origin/${this.project.defaultBranch} aktualisiert (+${res.ff} Commits).` },
+          });
+        } else if (res.blocked) {
+          const why =
+            res.blocked === "dirty"
+              ? "uncommittete Änderungen an getrackten Dateien"
+              : res.blocked === "diverged"
+                ? "main ist divergiert (lokale Commits) — Merge/Rebase nötig"
+                : res.blocked === "detached"
+                  ? "detached HEAD"
+                  : "unerwartet (git-Status prüfen)";
+          this.emitError(msg.agentId, "stale_base", `main konnte nicht vorgezogen werden: ${why} (${res.behind} behind).`);
+        } else {
+          this.emit({
+            ...envelope(),
+            type: "agent_event",
+            agentId: msg.agentId,
+            event: { kind: "assistant_text", text: "main ist bereits aktuell." },
+          });
+        }
+        const s = this.pool.get(msg.agentId);
+        if (s) await this.pollAgent(s); // Badge aktualisieren
+        break;
+      }
 
       case "shutdown":
         if (this.pollTimer) clearInterval(this.pollTimer);
@@ -301,16 +364,40 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Beim Projekt-Öffnen den verwalteten Zustand gegen GitHub abgleichen (P7+).
+   *
+   * Problem: wird ein Stream auf einem anderen Rechner fertiggestellt & gemergt,
+   * bleiben auf diesem Rechner Registry-Eintrag + Worktree stehen — und würden
+   * fälschlich als „fortsetzbar/laufend" angeboten. Sauberer Vorgang:
+   *
+   *  0) `git fetch --prune` — frischer Remote-Stand.
+   *  1) main (Haupt-Checkout) sauber & behind → fast-forward auf origin/<default>.
+   *  2) Pro Kandidat den **GitHub-PR-Zustand** prüfen — die EINZIG verlässliche
+   *     „fertig"-Quelle (squash-merge bricht alle git-lokalen Heuristiken).
+   *       • PR gemergt + Worktree sauber + nichts ungepusht → automatisch aufräumen.
+   *       • PR gemergt + lokale Reste → NICHT löschen, als „erledigt – prüfen" anbieten.
+   *       • sonst (offen / kein PR) → echtes Fortsetzen anbieten.
+   *  3) Registry bereinigen, Ergebnis-Summary melden.
+   */
   private async offerResumable(repoRoot: string): Promise<void> {
+    // `.mads/` selbst-ignorieren, BEVOR wir „dirty" prüfen — sonst blockiert mads'
+    // eigener untracked-State den fast-forward von main (genau dieser Bug trat auf).
+    ensureMadsDir(repoRoot);
+    await run("git", ["-C", repoRoot, "fetch", "origin", "--prune"], repoRoot);
+    const defaultBranch = this.project?.defaultBranch ?? "main";
+    const ff = await fastForwardMain(repoRoot, defaultBranch);
+    const mainFastForwarded = ff.ff;
+
     const registry = loadRegistry(repoRoot);
     const seen = new Set<string>();
-    const resumable: RegistryEntry[] = [];
+    const candidates: RegistryEntry[] = [];
 
-    // 1) Registry-Einträge mit Claude-Session → echtes Fortsetzen.
+    // 1) Registry-Einträge mit Claude-Session → Kandidaten fürs echte Fortsetzen.
     for (const e of registry) {
       if (!e.sessionId || this.pool.has(e.agentId)) continue;
       if (e.worktreePath && !existsSync(e.worktreePath)) continue; // Worktree weg → überspringen
-      resumable.push(e);
+      candidates.push(e);
       seen.add(e.agentId);
     }
 
@@ -321,7 +408,7 @@ export class Orchestrator {
       for (const wt of await discoverWorktrees(repoRoot)) {
         if (seen.has(wt.agentId) || this.pool.has(wt.agentId)) continue;
         const known = reg.get(wt.agentId);
-        resumable.push({
+        candidates.push({
           agentId: wt.agentId,
           label: known?.label ?? wt.branch.replace(/^mads\//, "") ?? wt.agentId,
           role: "sub",
@@ -340,10 +427,59 @@ export class Orchestrator {
       log(`[orchestrator] Worktree-Discovery fehlgeschlagen: ${String(e)}`);
     }
 
-    if (resumable.length > 0) {
-      this.emit({ ...envelope(), type: "resumable_agents", agents: resumable });
-      log(`[orchestrator] ${resumable.length} fortsetzbare Streams (inkl. verwaister Worktrees)`);
+    // 3) Jeden Kandidaten gegen GitHub einordnen.
+    const offer: ResumableAgent[] = [];
+    const cleaned: string[] = [];
+    const residue: string[] = [];
+    const dropped = new Set<string>(); // aufgeräumte agentIds → aus Registry nehmen
+
+    for (const c of candidates) {
+      // Ohne Branch/Worktree (z.B. Integrator im Haupt-Checkout) → unverändert anbieten.
+      if (!c.branch || !c.worktreePath || !existsSync(c.worktreePath)) {
+        offer.push(c);
+        continue;
+      }
+      const pr = await prStatus(repoRoot, c.branch).catch(() => null);
+      const isDone = pr?.state === "MERGED" || pr?.state === "CLOSED";
+      if (!isDone) {
+        // Hinweis: ein gh-Timeout liefert pr=null → isDone=false → der Stream wird als
+        // fortsetzbar angeboten (fail-open, sicher: NIE Auto-Cleanup bei Unsicherheit).
+        offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url });
+        continue;
+      }
+      const doneWord = pr?.state === "MERGED" ? "gemergt" : "geschlossen";
+      // PR erledigt → Sicherheits-Check vor dem Löschen.
+      const res = await worktreeResidue(c.worktreePath, c.branch);
+      if (!res.dirty && res.unpushed === 0) {
+        await removeWorktree(repoRoot, c.worktreePath, c.branch);
+        dropped.add(c.agentId);
+        cleaned.push(c.label);
+        log(`[orchestrator] reconcile: ${c.branch} ${doneWord} + sauber → aufgeräumt`);
+      } else {
+        offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url, merged: true, localChanges: true });
+        residue.push(c.label);
+        log(`[orchestrator] reconcile: ${c.branch} ${doneWord}, aber lokale Reste (dirty=${res.dirty} unpushed=${res.unpushed}) → zur Prüfung`);
+      }
     }
+
+    // 4) Registry um die aufgeräumten Einträge bereinigen.
+    if (dropped.size > 0) {
+      try {
+        saveRegistry(repoRoot, registry.filter((e) => !dropped.has(e.agentId)));
+      } catch (e) {
+        log(`[orchestrator] Registry-Bereinigung fehlgeschlagen: ${String(e)}`);
+      }
+    }
+
+    // 5) Ergebnis melden — inkl. „main hängt zurück, konnte aber nicht automatisch
+    //    vorgezogen werden" (sonst arbeitet der Integrator still gegen veralteten Stand).
+    const mainBehind = ff.blocked ? ff.behind : 0;
+    const mainBlocked = ff.blocked;
+    if (offer.length > 0) this.emit({ ...envelope(), type: "resumable_agents", agents: offer });
+    if (mainFastForwarded > 0 || mainBehind > 0 || cleaned.length > 0 || residue.length > 0) {
+      this.emit({ ...envelope(), type: "reconcile_summary", mainFastForwarded, mainBehind, mainBlocked, cleaned, residue });
+    }
+    log(`[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length}`);
   }
 
   // ---------------------------------------------------------------- Polling
@@ -362,9 +498,20 @@ export class Orchestrator {
   }
 
   private async pollAgent(s: AgentSession, skipFetch = false): Promise<void> {
-    if (!this.project || !s.repoRoot || !s.branch || !s.worktreePath) return;
+    if (!this.project || !s.repoRoot) return;
+    const defaultBranch = this.project.defaultBranch;
     try {
-      const status = await gitStatus(s.repoRoot, s.worktreePath, s.branch, this.project.defaultBranch, skipFetch);
+      // Integrator (G1): kein Worktree/Branch — er sitzt im Haupt-Checkout auf
+      // <default>. Trotzdem dessen Drift gegen origin/<default> überwachen, sonst
+      // merkt der Nutzer nie, dass seine Basis veraltet ist (kein PR für main).
+      if (s.role === "integrator") {
+        const status = await gitStatus(s.repoRoot, s.repoRoot, defaultBranch, defaultBranch, skipFetch);
+        this.gitState.set(s.agentId, status);
+        this.emit({ ...envelope(), type: "git_status", agentId: s.agentId, ...status });
+        return;
+      }
+      if (!s.branch || !s.worktreePath) return; // Sub ohne Worktree → nichts zu pollen
+      const status = await gitStatus(s.repoRoot, s.worktreePath, s.branch, defaultBranch, skipFetch);
       this.gitState.set(s.agentId, status);
       this.emit({ ...envelope(), type: "git_status", agentId: s.agentId, ...status });
       const pr = await prStatus(s.repoRoot, s.branch);

@@ -56,6 +56,8 @@ export type HostMessage =
   | IntegratePrMsg
   | SetAutonomyMsg
   | PollProjectMsg
+  | CleanupWorktreeMsg
+  | UpdateMainMsg
   | ShutdownMsg;
 
 export interface ProjectInfo {
@@ -177,6 +179,36 @@ export interface StopAgentMsg extends BaseMsg {
   removeWorktree?: boolean;
 }
 
+/**
+ * Verwalteten Zustand bereinigen: Worktree + lokalen Branch eines erledigten
+ * (gemergten) Streams entfernen und aus der Resume-Registry nehmen. Wird vom
+ * Frontend für „gemergt, aber lokale Reste"-Streams nach Nutzer-Bestätigung
+ * gesendet (Reconcile beim Öffnen räumt saubere Fälle bereits selbst auf).
+ */
+export interface CleanupWorktreeMsg extends BaseMsg {
+  type: "cleanup_worktree";
+  agentId: string;
+  branch?: string;
+  worktreePath?: string;
+  /**
+   * Lokale Reste (ungespeichert/ungepusht) bewusst verwerfen. Der Sidecar weigert
+   * sich ohne dieses Flag, einen Worktree mit Resten zu löschen (Schutz vor
+   * versehentlichem/wiederholtem Aufruf); das Frontend setzt es erst NACH der
+   * Nutzer-Bestätigung des „Aufräumen"-Dialogs.
+   */
+  force?: boolean;
+}
+
+/**
+ * Integrator-Aktion: den Haupt-Checkout (main) per fast-forward auf origin/<default>
+ * nachziehen. KEIN rebase/force-push (das ist die Sub-Branch-Operation) — nur ein
+ * sicherer fast-forward. Antwortet über git_status + eine Notiz im Integrator-Stream.
+ */
+export interface UpdateMainMsg extends BaseMsg {
+  type: "update_main";
+  agentId: string;
+}
+
 export interface ShutdownMsg extends BaseMsg {
   type: "shutdown";
 }
@@ -199,6 +231,7 @@ export type SidecarMessage =
   | MergeResultMsg
   | GateResultMsg
   | ResumableAgentsMsg
+  | ReconcileSummaryMsg
   | CollisionWarningMsg
   | SpawnSubstreamsRequestMsg
   | SidecarErrorMsg;
@@ -365,10 +398,43 @@ export interface ResumableAgent {
   status: AgentStatus;
   model?: string;
   mock: boolean;
+  /**
+   * GitHub-PR-Zustand des Branches beim Öffnen abgeglichen. Verlässliche „fertig"-
+   * Quelle (squash-fest — git-Heuristiken wie `git cherry`/Diff täuschen unter Squash).
+   */
+  prState?: PullRequestInfo["state"];
+  prNumber?: number;
+  prUrl?: string;
+  /** PR ist gemergt → Stream ist erledigt: NICHT fortsetzen, sondern aufräumen. */
+  merged?: boolean;
+  /** Worktree hat ungespeicherte oder ungepushte lokale Reste → nicht still löschen. */
+  localChanges?: boolean;
 }
 export interface ResumableAgentsMsg extends BaseMsg {
   type: "resumable_agents";
   agents: ResumableAgent[];
+}
+
+/**
+ * Einmaliger Abgleich beim Projekt-Öffnen gegen GitHub: was mads automatisch in
+ * Ordnung gebracht hat. Treibt einen dismissbaren Hinweis-Banner im Frontend.
+ */
+export interface ReconcileSummaryMsg extends BaseMsg {
+  type: "reconcile_summary";
+  /** main (Haupt-Checkout) per fast-forward aktualisiert (Anzahl Commits; 0 = nichts). */
+  mainFastForwarded: number;
+  /**
+   * main lag hinter origin/<default>, konnte aber NICHT automatisch vorgezogen werden
+   * (Anzahl Commits). Treibt eine Warnung — sonst arbeitet der Integrator still gegen
+   * einen veralteten Stand (genau dieser Fehler trat auf). 0 = kein Problem.
+   */
+  mainBehind: number;
+  /** Grund, weshalb der fast-forward unterblieb (nur gesetzt, wenn mainBehind > 0). */
+  mainBlocked: "dirty" | "diverged" | "detached" | "unknown" | null;
+  /** automatisch aufgeräumt (PR gemergt + Worktree sauber + nichts ungepusht) — Labels. */
+  cleaned: string[];
+  /** PR gemergt, aber lokale Reste → zur Hand-Prüfung angeboten statt gelöscht — Labels. */
+  residue: string[];
 }
 
 /** Laufzeit-Kollisionen zwischen aktiven Agenten (leeres Array = aufgeräumt). */

@@ -21,6 +21,7 @@ import type {
   PullRequestInfo,
   GateStep,
   ResumableAgent,
+  ReconcileSummaryMsg,
   AutonomyConfig,
   PermissionMode,
   ImageInput,
@@ -200,6 +201,8 @@ export interface MadsState {
   permissions: PermissionRequestMsg[];
   escalations: SidecarErrorMsg[];
   resumables: ResumableAgent[];
+  /** Einmaliger GitHub-Abgleich beim Öffnen (FF main / aufgeräumt / Reste) — dismissbar. */
+  reconcileSummary?: ReconcileSummaryMsg;
   collisions: Collision[];
   autonomy: AutonomyConfig;
   selectedId?: string;
@@ -267,11 +270,16 @@ export interface MadsState {
   commitAgent: (id: string) => Promise<void>;
   createPr: (id: string) => Promise<void>;
   syncBranch: (id: string) => Promise<void>;
+  /** Integrator-only: main per fast-forward auf origin/<default> nachziehen (kein rebase). */
+  updateMain: (id: string) => Promise<void>;
   integratePr: (id: string) => Promise<void>;
   runGate: (id: string) => Promise<void>;
   pollProject: () => Promise<void>;
   resumeAgent: (r: ResumableAgent) => Promise<void>;
   resumeAll: () => Promise<void>;
+  /** Erledigten (gemergten) Stream mit lokalen Resten endgültig aufräumen (Worktree+Branch weg). */
+  cleanupResumable: (r: ResumableAgent) => Promise<void>;
+  dismissReconcile: () => void;
 
   // ── Activity-Rail / Primary-Panel actions (doc 10 §3.1) ──
   setActiveView: (view: ViewId) => void;
@@ -437,6 +445,11 @@ export const useStore = create<MadsState>((set) => {
           project: msg.project,
           projectStatus: "ready",
           recentProjects: rememberProject(s.recentProjects, msg.project, Date.now()),
+          // Reconcile-Artefakte des VORHERIGEN Projekts verwerfen — der frische Abgleich
+          // emittiert nur etwas, wenn es etwas zu melden gibt; sonst bliebe sonst ein
+          // veralteter Banner/Resume-Vorschlag aus dem alten Projekt stehen.
+          reconcileSummary: undefined,
+          resumables: [],
         }));
         // repoRoot im Core registrieren + als Default-Explorer-Root setzen (doc 07 §4.2:
         // „aufgerufen direkt nachdem project gesetzt ist"). Erst bei aktiver Files-View geladen.
@@ -501,6 +514,10 @@ export const useStore = create<MadsState>((set) => {
 
       case "resumable_agents":
         set({ resumables: msg.agents });
+        break;
+
+      case "reconcile_summary":
+        set({ reconcileSummary: msg });
         break;
 
       case "collision_warning":
@@ -628,6 +645,7 @@ export const useStore = create<MadsState>((set) => {
     permissions: [],
     escalations: [],
     resumables: [],
+    reconcileSummary: undefined,
     collisions: [],
     autonomy: { autoSync: true, collisionScan: true },
     selectedId: undefined,
@@ -873,9 +891,32 @@ export const useStore = create<MadsState>((set) => {
     },
 
     resumeAll: async () => {
-      const list = [...useStore.getState().resumables];
+      // Nur echt fortsetzbare Streams — gemergte „Erledigt"-Reste NICHT auto-fortsetzen.
+      const list = useStore.getState().resumables.filter((r) => !r.merged);
       for (const r of list) await useStore.getState().resumeAgent(r);
     },
+
+    cleanupResumable: async (r) => {
+      // Erledigter (gemergter) Stream mit lokalen Resten → Worktree + lokalen Branch entfernen.
+      // force: true — der Nutzer hat den „Reste verwerfen"-Dialog bereits bestätigt (G4).
+      set((s) => ({ resumables: s.resumables.filter((x) => x.agentId !== r.agentId) }));
+      await sendHost({
+        ...envelope(),
+        type: "cleanup_worktree",
+        agentId: r.agentId,
+        branch: r.branch,
+        worktreePath: r.worktreePath,
+        force: true,
+      });
+    },
+
+    updateMain: async (id) => {
+      // G5: Integrator zieht main per fast-forward nach (NICHT rebase/force — das ist Sub).
+      notice(id, "accent", "↻ main aktualisieren (fast-forward auf origin)…");
+      await sendHost({ ...envelope(), type: "update_main", agentId: id });
+    },
+
+    dismissReconcile: () => set({ reconcileSummary: undefined }),
 
     resumeAgent: async (r) => {
       const project = useStore.getState().project;
@@ -907,11 +948,33 @@ export const useStore = create<MadsState>((set) => {
         resumables: s.resumables.filter((x) => x.agentId !== r.agentId),
       }));
       notice(r.agentId, "accent", `↩︎ fortgesetzt${r.branch ? ` · ${r.branch}` : ""}`);
+      // G2: Den Integrator (arbeitet im Haupt-Checkout) über den realen Basis-Stand
+      // informieren — sonst analysiert er gegen einen veralteten Working Tree (genau
+      // dieser Fehler trat auf: main war 9 behind, er prüfte gegen den alten Stand).
+      const rc = useStore.getState().reconcileSummary;
+      const db = project?.defaultBranch ?? "main";
+      let prompt = "Setze die Arbeit fort. Fasse zuerst kurz den aktuellen Stand zusammen, dann mach weiter.";
+      if (r.role === "integrator" && rc) {
+        if (rc.mainFastForwarded > 0) {
+          prompt =
+            `WICHTIG: Dein Working Tree (${db}) wurde gerade per fast-forward auf origin/${db} ` +
+            `aktualisiert (+${rc.mainFastForwarded} Commits) — dein lokaler Stand ist jetzt aktuell. ` +
+            `Analysiere ab dem AKTUELLEN Stand (nicht ab deinem vorherigen). ` +
+            prompt;
+        } else if (rc.mainBehind > 0) {
+          prompt =
+            `ACHTUNG: Dein Working Tree (${db}) ist ${rc.mainBehind} Commits HINTER origin/${db} und konnte ` +
+            `nicht automatisch nachgezogen werden (Grund: ${rc.mainBlocked ?? "unbekannt"}). Ziehe zuerst nach ` +
+            `(Knopf „main aktualisieren" bzw. prüfe gegen origin/${db} via \`git show\`, ohne den Working Tree zu ändern), ` +
+            `bevor du Annahmen über den Code-Stand triffst. ` +
+            prompt;
+        }
+      }
       await sendHost({
         ...envelope(),
         type: "start_agent",
         agentId: r.agentId,
-        prompt: "Setze die Arbeit fort. Fasse zuerst kurz den aktuellen Stand zusammen, dann mach weiter.",
+        prompt,
         label: r.label,
         role: r.role,
         model: r.model,

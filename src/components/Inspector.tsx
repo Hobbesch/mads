@@ -22,6 +22,7 @@ export function Inspector() {
   const commitAgent = useStore((s) => s.commitAgent);
   const createPr = useStore((s) => s.createPr);
   const syncBranch = useStore((s) => s.syncBranch);
+  const updateMain = useStore((s) => s.updateMain);
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
   const setPermissionMode = useStore((s) => s.setPermissionMode);
@@ -131,9 +132,20 @@ export function Inspector() {
               Gate{agent.gate ? (agent.gate.ok ? " ✓" : " ✖") : ""}
             </button>
           )}
-          {agent.behind > 0 && (
+          {/* Sub: rebase onto origin/<default> + force-with-lease. NIE für den Integrator —
+              dessen „behind" betrifft den main-Checkout, der per fast-forward (nicht rebase!)
+              nachgezogen wird. */}
+          {agent.role === "sub" && agent.behind > 0 && (
             <button onClick={() => void syncBranch(selectedId)} title="Manuell auf origin/main rebasen (läuft sonst automatisch)">
               Sync ({agent.behind})
+            </button>
+          )}
+          {agent.role === "integrator" && agent.behind > 0 && (
+            <button
+              onClick={() => void updateMain(selectedId)}
+              title={`Dein main-Checkout ist ${agent.behind} Commits hinter origin — per fast-forward nachziehen (kein rebase/force).`}
+            >
+              main aktualisieren ({agent.behind})
             </button>
           )}
           {agent.pr && (

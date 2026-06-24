@@ -23,6 +23,9 @@ export default function App() {
   const resumables = useStore((s) => s.resumables);
   const resumeAgent = useStore((s) => s.resumeAgent);
   const resumeAll = useStore((s) => s.resumeAll);
+  const cleanupResumable = useStore((s) => s.cleanupResumable);
+  const reconcileSummary = useStore((s) => s.reconcileSummary);
+  const dismissReconcile = useStore((s) => s.dismissReconcile);
   const collisions = useStore((s) => s.collisions);
   const autonomy = useStore((s) => s.autonomy);
   const setAutonomy = useStore((s) => s.setAutonomy);
@@ -71,6 +74,10 @@ export default function App() {
   }, []);
 
   const lastEscalation = escalations[escalations.length - 1];
+  const defaultBranch = project?.defaultBranch ?? "main";
+  // Echt fortsetzbare Streams vs. erledigte (gemergte) mit lokalen Resten → getrennt anbieten.
+  const liveResumables = resumables.filter((r) => !r.merged);
+  const doneResumables = resumables.filter((r) => r.merged);
 
   return (
     <div className="app">
@@ -142,21 +149,76 @@ export default function App() {
           </div>
         )}
 
-        {resumables.length > 0 && (
+        {reconcileSummary && (
+          <div className={`reconcile-banner${reconcileSummary.mainBehind > 0 ? " warn" : ""}`}>
+            <span className="reconcile-text">
+              ↻ GitHub-Abgleich:
+              {reconcileSummary.mainFastForwarded > 0 && ` ${defaultBranch} +${reconcileSummary.mainFastForwarded} aktualisiert`}
+              {reconcileSummary.cleaned.length > 0 &&
+                `${reconcileSummary.mainFastForwarded > 0 ? " · " : " "}${reconcileSummary.cleaned.length} erledigte aufgeräumt (${reconcileSummary.cleaned.join(", ")})`}
+              {reconcileSummary.residue.length > 0 &&
+                ` · ${reconcileSummary.residue.length} gemergt mit lokalen Resten — bitte prüfen`}
+              {reconcileSummary.mainBehind > 0 &&
+                ` ⚠ ${defaultBranch} ist ${reconcileSummary.mainBehind} Commits hinter origin/${defaultBranch} und konnte nicht automatisch nachgezogen werden (${
+                  reconcileSummary.mainBlocked === "dirty"
+                    ? "uncommittete Änderungen"
+                    : reconcileSummary.mainBlocked === "diverged"
+                      ? "lokale Commits / divergiert"
+                      : reconcileSummary.mainBlocked === "detached"
+                        ? "detached HEAD"
+                        : "Grund unbekannt"
+                }) — im Integrator-Stream „main aktualisieren"`}
+            </span>
+            <button
+              className="banner-close"
+              title="Hinweis schließen"
+              aria-label="Hinweis schließen"
+              onClick={() => dismissReconcile()}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {liveResumables.length > 0 && (
           <div className="resume-banner">
-            <span className="resume-label">↩︎ {resumables.length} Stream(s) fortsetzbar:</span>
-            {resumables.map((r) => (
+            <span className="resume-label">↩︎ {liveResumables.length} Stream(s) fortsetzbar:</span>
+            {liveResumables.map((r) => (
               <button key={r.agentId} onClick={() => void resumeAgent(r)} title={r.sessionId ? "Session fortsetzen" : "Frischer Start im bestehenden Worktree"}>
                 {r.label}
                 {r.branch ? ` · ${r.branch}` : ""}
                 {!r.sessionId ? " ⟲" : ""}
               </button>
             ))}
-            {resumables.length > 1 && (
+            {liveResumables.length > 1 && (
               <button className="resume-all" onClick={() => void resumeAll()}>
                 Alle fortsetzen
               </button>
             )}
+          </div>
+        )}
+
+        {doneResumables.length > 0 && (
+          <div className="resume-banner done">
+            <span className="resume-label">✔ {doneResumables.length} erledigt (gemergt) — mit lokalen Resten:</span>
+            {doneResumables.map((r) => (
+              <button
+                key={r.agentId}
+                className="resume-cleanup"
+                title="PR ist gemergt, aber der lokale Worktree hat ungespeicherte/ungepushte Änderungen. Aufräumen verwirft diese Reste (Worktree + lokaler Branch werden entfernt)."
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `„${r.label}" ist auf GitHub gemergt${r.prNumber ? ` (PR #${r.prNumber})` : ""}, hat aber lokale Reste (ungespeicherte/ungepushte Änderungen).\n\nAufräumen entfernt Worktree + lokalen Branch und verwirft diese Reste. Fortfahren?`,
+                    )
+                  )
+                    void cleanupResumable(r);
+                }}
+              >
+                Aufräumen: {r.label}
+                {r.branch ? ` · ${r.branch}` : ""}
+              </button>
+            ))}
           </div>
         )}
 

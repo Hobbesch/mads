@@ -19,16 +19,19 @@ export interface RunResult {
   stderr: string;
 }
 
-export function run(cmd: string, args: string[], cwd?: string): Promise<RunResult> {
+export function run(cmd: string, args: string[], cwd?: string, timeoutMs?: number): Promise<RunResult> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    // timeout > 0 → execFile killt den Prozess nach Ablauf (err.killed) → code != 0.
+    execFile(cmd, args, { cwd, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) => {
       const code = err && typeof (err as { code?: number }).code === "number" ? (err as { code: number }).code : err ? 1 : 0;
       resolve({ code, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? "" });
     });
   });
 }
 const git = (args: string[], cwd?: string) => run("git", args, cwd);
-const gh = (args: string[], cwd?: string) => run("gh", args, cwd);
+const gh = (args: string[], cwd?: string, timeoutMs?: number) => run("gh", args, cwd, timeoutMs);
+/** GitHub-Aufrufe können bei Netzproblemen hängen — der Reconcile darf nie blockieren. */
+const GH_TIMEOUT_MS = 15_000;
 
 export function repoSlug(repoRoot: string): string {
   return basename(repoRoot);
@@ -113,6 +116,61 @@ export async function removeWorktree(repoRoot: string, path: string, branch?: st
   await git(["-C", repoRoot, "worktree", "remove", "--force", path], repoRoot);
   if (branch) await git(["-C", repoRoot, "branch", "-D", branch], repoRoot);
   await git(["-C", repoRoot, "worktree", "prune"], repoRoot);
+}
+
+/**
+ * Lokale „Reste" eines Worktrees: ungespeicherte Änderungen ODER Commits, die
+ * nicht im Remote-Branch liegen. Beides bedeutet: hier könnte Arbeit stecken, die
+ * nirgends sonst existiert → ein gemergter Stream darf dann NICHT still gelöscht
+ * werden. Fehlt origin/<branch> (nie gepusht), gilt alles als ungepusht (unsafe).
+ */
+export async function worktreeResidue(
+  worktree: string,
+  branch: string,
+): Promise<{ dirty: boolean; unpushed: number }> {
+  const dirtyR = await git(["-C", worktree, "status", "--porcelain"], worktree);
+  const up = await git(["-C", worktree, "rev-list", "--count", `origin/${branch}..${branch}`], worktree);
+  const unpushed = up.code === 0 ? parseInt(up.stdout.trim() || "0", 10) : Number.MAX_SAFE_INTEGER;
+  return { dirty: dirtyR.stdout.trim().length > 0, unpushed };
+}
+
+export interface FastForwardResult {
+  /** Anzahl vorgezogener Commits (>0 = main wurde aktualisiert). */
+  ff: number;
+  /** Wie viele Commits main hinter origin/<default> lag/liegt (auch wenn ff=0). */
+  behind: number;
+  /** Falls NICHT vorgezogen wurde: warum. ("unknown" = FF scheiterte unerwartet, z. B. Remote-Race.) */
+  blocked: "diverged" | "dirty" | "detached" | "unknown" | null;
+}
+
+/**
+ * Haupt-Checkout (main) per fast-forward auf origin/<default> ziehen — damit der
+ * lokale Stand nach Merges auf einem anderen Rechner aktuell ist.
+ *
+ * Sicher, aber NICHT übervorsichtig: ein fast-forward ändert nur getrackte Dateien
+ * und kann keine Konflikte erzeugen (HEAD muss Vorfahr von origin/<default> sein).
+ * Deshalb blockieren **untracked** Dateien (z. B. mads' eigenes `.mads/`) den FF
+ * NICHT mehr — nur echte uncommittete Änderungen an getrackten Dateien (`-uno`) tun
+ * das, weil die ein FF zu Recht ablehnen würde. Liefert behind/blocked auch dann,
+ * wenn nicht vorgezogen werden konnte (→ der Aufrufer kann warnen statt still
+ * gegen einen veralteten Stand weiterzuarbeiten).
+ */
+export async function fastForwardMain(repoRoot: string, defaultBranch: string): Promise<FastForwardResult> {
+  const cur = (await git(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], repoRoot)).stdout.trim();
+  const base = `origin/${defaultBranch}`;
+  const behind = parseInt((await git(["-C", repoRoot, "rev-list", "--count", `HEAD..${base}`], repoRoot)).stdout.trim() || "0", 10);
+  const ahead = parseInt((await git(["-C", repoRoot, "rev-list", "--count", `${base}..HEAD`], repoRoot)).stdout.trim() || "0", 10);
+  if (cur === "HEAD") return { ff: 0, behind, blocked: "detached" }; // detached blockiert FF immer
+  if (cur !== defaultBranch) return { ff: 0, behind: 0, blocked: null }; // nicht auf main → nicht anfassen
+  if (behind === 0) return { ff: 0, behind: 0, blocked: null };
+  if (ahead > 0) return { ff: 0, behind, blocked: "diverged" }; // braucht echten Merge/Rebase → Mensch
+  // Nur getrackte uncommittete Änderungen blockieren einen FF (untracked ist egal).
+  const trackedDirty = (await git(["-C", repoRoot, "status", "--porcelain", "-uno"], repoRoot)).stdout.trim();
+  if (trackedDirty.length > 0) return { ff: 0, behind, blocked: "dirty" };
+  // Ab hier MUSS der FF gelingen (Tree sauber, HEAD Vorfahr von base). Scheitert er
+  // dennoch (z. B. Remote-Ref-Race), ehrlich als "unknown" melden — nicht "dirty".
+  const ff = await git(["-C", repoRoot, "merge", "--ff-only", base], repoRoot);
+  return ff.code === 0 ? { ff: behind, behind, blocked: null } : { ff: 0, behind, blocked: "unknown" };
 }
 
 export async function gitStatus(
@@ -221,8 +279,8 @@ export async function prStatus(
   branch: string,
 ): Promise<PullRequestInfo | null> {
   const fields = "number,url,state,isDraft,headRefName,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup";
-  const r = await gh(["pr", "view", branch, "--json", fields], repoRoot);
-  if (r.code !== 0) return null; // kein PR / nicht gefunden
+  const r = await gh(["pr", "view", branch, "--json", fields], repoRoot, GH_TIMEOUT_MS);
+  if (r.code !== 0) return null; // kein PR / nicht gefunden / Timeout (fail-open)
   let j: Record<string, unknown>;
   try {
     j = JSON.parse(r.stdout) as Record<string, unknown>;
