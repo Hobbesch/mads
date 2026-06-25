@@ -1,7 +1,10 @@
 import { useMemo, useState } from "react";
 import { useStore } from "../store";
 import { toolDescription, toolCommand } from "../toolText";
-import type { PermissionRequestMsg } from "../../shared/protocol";
+import type { AskQuestion, PermissionRequestMsg } from "../../shared/protocol";
+
+// Sentinel für die „Etwas anderes…"-Option (Freitext statt einer angebotenen Option).
+const CUSTOM = "__custom__";
 
 function ToolApproval({ req }: { req: PermissionRequestMsg }) {
   const answer = useStore((s) => s.answerPermission);
@@ -45,12 +48,23 @@ function QuestionForm({ req }: { req: PermissionRequestMsg }) {
   const agent = useStore((s) => s.agents[req.agentId]);
   const project = useStore((s) => s.project);
   const [picks, setPicks] = useState<Record<string, string>>({});
+  const [customText, setCustomText] = useState<Record<string, string>>({});
   const questions = req.questions ?? [];
   const optionCount = questions.reduce((n, q) => n + (q.options?.length ?? 0), 0);
   const canParallel = !!project && agent?.role === "integrator" && optionCount >= 2;
 
+  // Effektive Antwort je Frage: bei „Etwas anderes…" der getippte Freitext, sonst das Label.
+  const effective = (q: AskQuestion) =>
+    picks[q.question] === CUSTOM ? (customText[q.question] ?? "").trim() : picks[q.question];
+  const allAnswered = questions.every((q) => {
+    const p = picks[q.question];
+    return p !== undefined && (p !== CUSTOM || (customText[q.question] ?? "").trim().length > 0);
+  });
+
   const submit = () => {
-    void answer(req, { behavior: "answer_questions", answers: picks });
+    const answers: Record<string, string> = {};
+    for (const q of questions) answers[q.question] = effective(q);
+    void answer(req, { behavior: "answer_questions", answers });
   };
 
   return (
@@ -72,6 +86,24 @@ function QuestionForm({ req }: { req: PermissionRequestMsg }) {
                 </button>
               );
             })}
+            {/* „Etwas anderes…": eigene Antwort/Anweisung, falls keine Option passt. */}
+            <button
+              className={`perm-opt perm-opt-custom${picks[q.question] === CUSTOM ? " chosen" : ""}`}
+              onClick={() => setPicks((p) => ({ ...p, [q.question]: CUSTOM }))}
+            >
+              <span className="opt-label">Etwas anderes…</span>
+              <span className="opt-desc">Eigene Antwort/Anweisung eingeben statt einer der Optionen.</span>
+            </button>
+            {picks[q.question] === CUSTOM && (
+              <textarea
+                className="perm-custom"
+                autoFocus
+                rows={2}
+                placeholder="Deine Antwort oder Anweisung für diese Frage…"
+                value={customText[q.question] ?? ""}
+                onChange={(e) => setCustomText((c) => ({ ...c, [q.question]: e.target.value }))}
+              />
+            )}
           </div>
         </div>
       ))}
@@ -85,7 +117,7 @@ function QuestionForm({ req }: { req: PermissionRequestMsg }) {
             Parallel-Streams…
           </button>
         )}
-        <button className="allow" disabled={Object.keys(picks).length < questions.length} onClick={submit}>
+        <button className="allow" disabled={!allAnswered} onClick={submit}>
           Antwort senden
         </button>
       </div>

@@ -1676,6 +1676,29 @@ button.primary:hover {
   font-size: 11px;
   color: var(--text-dim);
 }
+/* „Etwas anderes…"-Option: gestrichelt, um sie von den vorgegebenen Optionen abzuheben. */
+.perm-opt-custom {
+  border-style: dashed;
+}
+.perm-custom {
+  width: 100%;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.4;
+  resize: vertical;
+  min-height: 56px;
+}
+.perm-custom:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-weak);
+}
 
 /* ---------------- New stream modal ---------------- */
 .modal-overlay {
