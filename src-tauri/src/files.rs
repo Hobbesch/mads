@@ -44,6 +44,7 @@ impl FsScope {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")] // → isDir/isSymlink (das Frontend liest camelCase)
 pub struct DirNode {
     name: String,
     path: String,
@@ -55,7 +56,7 @@ pub struct DirNode {
 /// UTF-8-Decode-Versuch gelingt ⇒ Text; schlägt fehl ⇒ Binär (base64). Der Webview
 /// bekommt nie einen rohen Byte-Head zu interpretieren.
 #[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "lowercase", rename_all_fields = "camelCase")]
 pub enum FileRead {
     Text {
         text: String,
@@ -74,7 +75,7 @@ pub enum FileRead {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "lowercase", rename_all_fields = "camelCase")]
 pub enum WriteResult {
     Saved { mtime_ms: f64, size: u64, hash: String },
     Conflict,
