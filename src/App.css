@@ -937,7 +937,8 @@ button.primary:hover {
 .inspector-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap; /* Aktionen brechen bei schmalem Inspector um statt überzulaufen */
+  gap: 6px 10px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
 }
@@ -960,6 +961,8 @@ button.primary:hover {
 }
 .inspector-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 .inspector-actions button {
@@ -2605,10 +2608,11 @@ button.primary:hover {
 .md-editor-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  height: 40px;
-  padding: 0 12px;
+  justify-content: flex-end; /* Actions auf Umbruch-Zeile rechtsbündig */
+  flex-wrap: wrap; /* statt in den Nachbarbereich zu laufen: umbrechen */
+  gap: 6px 12px;
+  min-height: 40px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--panel-2);
   flex-shrink: 0;
@@ -2616,6 +2620,7 @@ button.primary:hover {
 .md-title {
   display: flex;
   align-items: center;
+  flex: 1 1 auto; /* füllt Zeile 1 → drückt Actions nach rechts; schrumpft mit Ellipse */
   min-width: 0;
 }
 .md-name {
@@ -2631,8 +2636,10 @@ button.primary:hover {
 .md-head-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
+  flex-wrap: wrap; /* Buttons brechen intern um statt überzulaufen */
+  justify-content: flex-end;
+  gap: 6px 8px;
+  min-width: 0;
 }
 /* Segmented Control (macOS-HIG) — Stil an .toggle/.pill angelehnt (§1.4) */
 .md-segmented {
