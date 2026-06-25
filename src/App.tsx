@@ -11,7 +11,6 @@ import { NewStreamDialog } from "./components/NewStreamDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { ParallelDialog } from "./components/ParallelDialog";
 import { SaveToast } from "./components/SaveToast";
-import { RELEASE, buildDateLocal } from "./version";
 import "./App.css";
 
 export default function App() {
@@ -90,14 +89,7 @@ export default function App() {
             Dashboard
           </div>
           <div className="titlebar-right">
-            <button
-              className={`pill version${RELEASE.isPreRelease ? " prerelease" : ""}`}
-              onClick={() => setShowAbout(true)}
-              title={`${RELEASE.label} · Commit ${RELEASE.commit}${RELEASE.dirty ? "* (uncommittete Änderungen)" : ""} · Branch ${RELEASE.branch} · gebaut ${buildDateLocal()}`}
-            >
-              v{RELEASE.version} · {RELEASE.commit}
-              {RELEASE.dirty ? "*" : ""}
-            </button>
+            {/* Versions-Pille entfernt (redundant — Version/Commit stehen in „Über mads"). */}
             {project && <span className="pill repo">{project.owner}/{project.repo}</span>}
             <span className={`pill ${sidecar.status}`}>
               {sidecar.status === "ready"

@@ -2930,3 +2930,14 @@ body.col-resizing {
   -webkit-user-select: none;
   user-select: none;
 }
+
+/* Das „blaue Oval" oben links: WKWebView/Safari zeichnet einen breiten, weichen
+   blauen Focus-Ring um den vollbreiten „Kontext"-Button — schon beim Maus-Klick.
+   Nur noch bei TASTATUR-Fokus einen dezenten Ring zeigen (Accessibility bleibt). */
+.file-context-trigger:focus {
+  outline: none;
+}
+.file-context-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
