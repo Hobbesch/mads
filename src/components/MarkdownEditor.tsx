@@ -6,6 +6,7 @@ import { MarkdownPreview } from "./MarkdownPreview";
 import { MarkdownSource } from "./MarkdownSource";
 import { MarkdownToolbar } from "./MarkdownToolbar";
 import { openMarkdownWindow } from "../detachWindow";
+import { loadUiPrefs, saveUiPrefs, clampMdZoom } from "../uiPrefs";
 
 /**
  * Markdown-Editor-Orchestrator (docs/design/08-markdown-editor.md §2.1) — der `.md`-
@@ -24,6 +25,13 @@ const MODES: { id: ViewMode; label: string }[] = [
 export function MarkdownEditor({ file, detached = false }: { file: OpenFile; detached?: boolean }) {
   const path = file.path;
   const [fullscreen, setFullscreen] = useState(false);
+  // Zoom der Markdown-Ansicht (persistiert; wirkt auf Vorschau UND Editor via CSS-`zoom`).
+  const [zoom, setZoom] = useState(() => loadUiPrefs().mdZoom);
+  const changeZoom = useCallback((next: number) => {
+    const v = clampMdZoom(next);
+    setZoom(v);
+    saveUiPrefs({ mdZoom: v });
+  }, []);
   const buffer = useStore((s) => s.editorBuffers[path]);
   const viewMode = useStore((s) => s.editorViewMode);
   const saving = useStore((s) => !!s.editorSaving[path]);
@@ -113,6 +121,22 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
           )}
         </div>
         <div className="md-head-actions">
+          <div className="md-zoom" role="group" aria-label="Zoom">
+            <button className="md-iconbtn" onClick={() => changeZoom(zoom - 0.1)} title="Verkleinern" aria-label="Verkleinern">
+              −
+            </button>
+            <button
+              className="md-iconbtn md-zoom-val"
+              onClick={() => changeZoom(1)}
+              title="Zoom auf 100% zurücksetzen"
+              aria-label={`Zoom ${Math.round(zoom * 100)} Prozent, klicken für 100%`}
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button className="md-iconbtn" onClick={() => changeZoom(zoom + 0.1)} title="Vergrößern" aria-label="Vergrößern">
+              +
+            </button>
+          </div>
           <div className="md-segmented" role="tablist" aria-label="Ansicht">
             {MODES.map((m) => (
               <button
@@ -158,11 +182,15 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
         </div>
       </header>
     ),
-    [path, dirty, viewMode, readOnly, saving, setEditorViewMode, onSave, detached, fullscreen, onDetach],
+    [path, dirty, viewMode, readOnly, saving, setEditorViewMode, onSave, detached, fullscreen, onDetach, zoom, changeZoom],
   );
 
   return (
-    <section className={`md-editor${fullscreen ? " md-editor-fullscreen" : ""}`} onKeyDown={onKeyDown}>
+    <section
+      className={`md-editor${fullscreen ? " md-editor-fullscreen" : ""}`}
+      style={{ "--md-zoom": zoom } as React.CSSProperties}
+      onKeyDown={onKeyDown}
+    >
       {header}
       {readOnly && (
         <div className="md-readonly-banner">
