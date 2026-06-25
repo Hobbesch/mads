@@ -2286,7 +2286,9 @@ button.primary:hover {
   flex-shrink: 0;
   background: var(--s-gray);
 }
-.ctx-dot.main {
+/* Modifier bewusst NICHT `.main` — das kollidiert mit der globalen Layout-Klasse
+   `.main { flex: 1 }` und bläht den 10px-Punkt zu einem breiten Oval auf. */
+.ctx-dot.ctx-main {
   background: var(--accent);
 }
 .file-context-menu {

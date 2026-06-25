@@ -57,7 +57,7 @@ export function StreamContextSwitcher() {
         {currentAgent ? (
           <StatusDot status={currentAgent.status} />
         ) : (
-          <span className="ctx-dot main" title="main / Integrator" />
+          <span className="ctx-dot ctx-main" title="main / Integrator" />
         )}
         <span className="file-context-label" title={activeRoot?.path}>
           Kontext: {currentLabel}
@@ -75,7 +75,7 @@ export function StreamContextSwitcher() {
                 role="option"
                 aria-selected={activeRoot?.kind === "project"}
               >
-                <span className="ctx-dot main" />
+                <span className="ctx-dot ctx-main" />
                 <span className="ctx-name">main · {project?.owner}/{project?.repo}</span>
               </button>
             </li>
