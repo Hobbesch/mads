@@ -91,7 +91,9 @@ check("Edit außerhalb cwd → ask", classifyToolCall("Edit", { file_path: "/etc
 check("Edit .env → ask", classifyToolCall("Write", { file_path: "/repo/.env" }, { cwd: "/repo" }).decision === "ask");
 check("Edit .git → ask", classifyToolCall("Edit", { file_path: "/repo/.git/config" }, { cwd: "/repo" }).decision === "ask");
 check("Edit .. escape → ask", classifyToolCall("Write", { file_path: "../outside.ts" }, { cwd: "/repo" }).decision === "ask");
-check("WebFetch → ask", classifyToolCall("WebFetch", { url: "https://x" }).decision === "ask");
+check("WebFetch → allow (nur-lesende Recherche, wie Claude Code)", classifyToolCall("WebFetch", { url: "https://x" }).decision === "allow");
+check("WebSearch → allow", classifyToolCall("WebSearch", { query: "x" }).decision === "allow");
+check("Bash curl bleibt → ask (beliebiger Netzzugriff)", classifyBashCommand("curl https://x").decision === "ask");
 check("Task → ask", classifyToolCall("Task", {}).decision === "ask");
 check("Drittanbieter-mcp → ask", classifyToolCall("mcp__foo__bar", {}).decision === "ask");
 // Erstanbieter-mads-Tools (spawn_substreams etc.) sind im Auto-Modus ohne Rückfrage erlaubt.

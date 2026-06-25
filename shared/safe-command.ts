@@ -259,7 +259,12 @@ export function classifyToolCall(
   // „eröffne Sub-Streams für die Punkte" still auf einer Permission-Rückfrage.
   if (toolName.startsWith("mcp__mads__")) return ALLOW;
 
-  // Drittanbieter-MCP-Tools, WebFetch/WebSearch, Task, Unbekanntes → fragen.
-  if (toolName === "WebFetch" || toolName === "WebSearch") return ASK("Netzwerkzugriff");
+  // WebFetch/WebSearch: nur-lesende Web-Recherche (GET + Zusammenfassung, kein POST,
+  // kein lokaler Seiteneffekt) — wie in Claude Code ohne Rückfrage. Sonst kam pro URL
+  // eine Frage, und „Immer erlauben" merkte sich nur die EINE URL → Dauer-Nachfragen.
+  // Beliebiger Netzwerkzugriff via Bash (curl/wget/ssh/nc) fragt weiterhin (siehe DANGER).
+  if (toolName === "WebFetch" || toolName === "WebSearch") return ALLOW;
+
+  // Drittanbieter-MCP-Tools, Task, Unbekanntes → fragen.
   return ASK(`Tool „${toolName}“ nicht als auto-sicher eingestuft`);
 }
