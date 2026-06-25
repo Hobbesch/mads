@@ -2885,3 +2885,48 @@ body.col-resizing {
   padding: 24px;
   text-align: center;
 }
+
+/* ============================================================================
+   Fix: Toolbar bei schmalem Fenster + versehentliche Text-Markierung in der Chrome
+   ============================================================================ */
+
+/* Toolbar (Dashboard-Kopf) bricht jetzt sauber auf MEHRERE Zeilen um, statt den
+   Chip-TEXT umzubrechen oder zu beschneiden. */
+.titlebar {
+  height: auto;
+  min-height: 48px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  padding: 6px 16px;
+}
+.titlebar-right {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 6px;
+}
+/* Jeder Chip bleibt EINZEILIG (kein „Auto-Sync\nan", kein „+ Neuer\nStream"). */
+.pill,
+.titlebar-right button,
+.resume-banner button {
+  white-space: nowrap;
+}
+
+/* Chrome (Toolbar/Navigation/Kontext-Leiste/Banner/Baum/Kacheln) ist NICHT
+   selektierbar → keine versehentlichen blauen Text-Markierungen mehr. Inhalt
+   (Chat-Timeline, Markdown-Vorschau, Editor, Datei-Inhalt) bleibt selektierbar. */
+.titlebar,
+.activity-rail,
+.file-context,
+.primary-panel-head,
+.file-filter,
+.file-tree,
+.card,
+.resume-banner,
+.reconcile-banner,
+.collision-banner,
+.escalation-banner,
+.inspector-head,
+.inspector-actions {
+  -webkit-user-select: none;
+  user-select: none;
+}
