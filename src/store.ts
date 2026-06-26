@@ -32,6 +32,18 @@ import { loadRecentProjects, rememberProject, forgetProject, type RecentProject 
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
 import { toolCommand } from "./toolText";
 import { blobToBase64, base64ToBytes, extForMime, dirname } from "./blob";
+import { openMarkdownWindow } from "./detachWindow";
+
+/** `rel` relativ zu `baseDir` auflösen (mit `..`/`.`-Kollaps). Führendes `/` = absolut. */
+function resolveRel(baseDir: string, rel: string): string {
+  const out = rel.startsWith("/") ? [] : baseDir.split("/").filter(Boolean);
+  for (const seg of rel.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") out.pop();
+    else out.push(seg);
+  }
+  return "/" + out.join("/");
+}
 import { EDIT_TOOLS, toEditOp, editPath, type EditOp } from "./editOps";
 
 export type AgentRole = "integrator" | "sub";
@@ -343,6 +355,8 @@ export interface MadsState {
   insertImageFromBlob: (path: string, blob: Blob, cursor: number) => Promise<number>;
   /** `[[name]]` relativ zur aktuell offenen .md auf `./<name>.md` auflösen und öffnen (§1.2/§5.4). */
   openWikiLink: (fromPath: string, name: string) => Promise<void>;
+  /** Interner `.md`-Verweis (relativer Link) → Ziel auflösen und in eigenem Fenster öffnen. */
+  openMdReference: (fromPath: string, href: string) => Promise<void>;
   clearSaveNotice: () => void;
 }
 
@@ -1413,12 +1427,24 @@ export const useStore = create<MadsState>((set) => {
     },
 
     openWikiLink: async (fromPath, name) => {
-      // `[[name]]` → `./<name>.md` relativ zum Verzeichnis der aktuellen Datei (§1.2/§5.4).
-      // Keine externe URL-Interpretation; Scope-Check liegt im Core (öffnet sonst mit fsError).
-      const dir = dirname(fromPath);
+      // `[[name]]` → `./<name>.md` relativ zur aktuellen Datei; öffnet wie jeder interne
+      // Verweis in einem eigenen Fenster (§1.2/§5.4).
       const slug = name.endsWith(".md") ? name : `${name}.md`;
-      const target = `${dir}/${slug}`;
-      await useStore.getState().openFilePath(target);
+      await useStore.getState().openMdReference(fromPath, `./${slug}`);
+    },
+
+    openMdReference: async (fromPath, href) => {
+      // Interner Markdown-Verweis → Ziel relativ zur aktuellen Datei auflösen und in einem
+      // EIGENEN Fenster öffnen (Detach). Anker/Query strippen; `..`/`.` werden aufgelöst.
+      // Bare Name ohne Endung → `.md` annehmen. Nicht-.md oder Fenster-Fehlschlag →
+      // im Haupt-Viewer öffnen (Fallback). Scope-Check liegt im Core (sonst fsError).
+      const clean = href.split("#")[0].split("?")[0].trim();
+      if (!clean) return; // reiner Anker → (noch) kein In-Doc-Scroll
+      let target = resolveRel(dirname(fromPath), clean);
+      const lastSeg = target.split("/").pop() ?? "";
+      if (!lastSeg.includes(".")) target += ".md"; // bloßer Name → .md annehmen
+      if (/\.md$/i.test(target) && (await openMarkdownWindow(target))) return;
+      await useStore.getState().openFilePath(target); // Nicht-.md oder Fenster-Fehlschlag
     },
   };
 });

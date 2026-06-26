@@ -6,7 +6,11 @@ import { MarkdownPreview } from "./MarkdownPreview";
 import { MarkdownSource } from "./MarkdownSource";
 import { MarkdownToolbar } from "./MarkdownToolbar";
 import { openMarkdownWindow } from "../detachWindow";
+import { openExternalLink } from "../openExternal";
 import { loadUiPrefs, saveUiPrefs, clampMdZoom } from "../uiPrefs";
+
+/** Hat der Link ein URI-Schema (http:, https:, mailto:, …)? Dann extern; sonst interner Pfad. */
+const isExternalHref = (href: string) => /^[a-z][a-z0-9+.-]*:/i.test(href);
 
 /**
  * Markdown-Editor-Orchestrator (docs/design/08-markdown-editor.md §2.1) — der `.md`-
@@ -41,6 +45,7 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
   const saveFile = useStore((s) => s.saveFile);
   const insertImageFromBlob = useStore((s) => s.insertImageFromBlob);
   const openWikiLink = useStore((s) => s.openWikiLink);
+  const openMdReference = useStore((s) => s.openMdReference);
 
   const [view, setView] = useState<EditorView | null>(null);
   const previewRef = useRef<HTMLDivElement>(null);
@@ -69,6 +74,11 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
     [path, insertImageFromBlob],
   );
   const onWikiLink = useCallback((name: string) => void openWikiLink(path, name), [path, openWikiLink]);
+  // Normaler Link: externe per Policy, interne `.md`-Verweise relativ zur Datei in eigenem Fenster.
+  const onLink = useCallback(
+    (href: string) => (isExternalHref(href) ? openExternalLink(href) : void openMdReference(path, href)),
+    [path, openMdReference],
+  );
   // „Loslösen": eigenes OS-Fenster; klappt das nicht (Capability), Fallback = Vollbild im Fenster.
   const onDetach = useCallback(async () => {
     const ok = await openMarkdownWindow(path);
@@ -216,7 +226,7 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
         )}
         {viewMode !== "edit" && (
           <div className="md-pane md-pane-preview">
-            <MarkdownPreview ref={previewRef} source={previewSource} onWikiLink={onWikiLink} />
+            <MarkdownPreview ref={previewRef} source={previewSource} onWikiLink={onWikiLink} onLink={onLink} />
           </div>
         )}
       </div>

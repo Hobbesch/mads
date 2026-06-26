@@ -12,11 +12,14 @@ export interface MarkdownPreviewProps {
   source: string;
   /** Klick auf `[[name]]` → in-App-Navigation (Aufrufer öffnet `./<name>.md`). */
   onWikiLink(name: string): void;
+  /** Klick auf normalen Link: interne `.md`-Verweise öffnet der Aufrufer (eigenes Fenster),
+   *  externe Links per Default-Policy. Default = nur externe Links (openExternalLink). */
+  onLink?(href: string): void;
   onScrollRatio?(ratio: number): void;
 }
 
 export const MarkdownPreview = forwardRef<HTMLDivElement, MarkdownPreviewProps>(
-  function MarkdownPreview({ source, onWikiLink, onScrollRatio }, ref) {
+  function MarkdownPreview({ source, onWikiLink, onLink, onScrollRatio }, ref) {
     let raf: number | null = null;
     const onScroll = (e: React.UIEvent) => {
       if (!onScrollRatio) return;
@@ -30,7 +33,7 @@ export const MarkdownPreview = forwardRef<HTMLDivElement, MarkdownPreviewProps>(
     };
     return (
       <div className="md-preview-pane" ref={ref} onScroll={onScroll}>
-        <MarkdownView source={source} onLink={openExternalLink} onWikiLink={onWikiLink} />
+        <MarkdownView source={source} onLink={onLink ?? openExternalLink} onWikiLink={onWikiLink} />
       </div>
     );
   },
