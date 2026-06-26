@@ -26,6 +26,7 @@ export function Inspector() {
   const createPr = useStore((s) => s.createPr);
   const syncBranch = useStore((s) => s.syncBranch);
   const updateMain = useStore((s) => s.updateMain);
+  const continueStream = useStore((s) => s.continueStream);
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
   const setPermissionMode = useStore((s) => s.setPermissionMode);
@@ -86,6 +87,9 @@ export function Inspector() {
   const step = nextStep(agent);
   const busy = agent.status === "running" || agent.status === "starting";
   const color = agentColor(agent.branch ?? agent.id);
+  // Passiv wiederhergestellt (nicht im Pool): nur Verlauf ansehen; Git-Aktionen erst nach
+  // „Fortsetzen" (oder durch Senden einer Nachricht, das den Stream lazy aktiviert).
+  const live = agent.live !== false;
   const runStep = () => {
     if (step.kind === "commit") void commitAgent(selectedId);
     else if (step.kind === "pr") void createPr(selectedId);
@@ -134,8 +138,14 @@ export function Inspector() {
             <option value="auto">Auto — nur Risiko fragen</option>
             <option value="bypassPermissions">Bypass — nie fragen</option>
           </select>
+          {/* Passiv wiederhergestellt → erst reaktivieren, bevor Git-Aktionen möglich sind. */}
+          {!live && (
+            <button className="step-primary" title="Stream fortsetzen (Session reaktivieren, dann weiterarbeiten)" onClick={() => void continueStream(selectedId)}>
+              ▶ Fortsetzen
+            </button>
+          )}
           {/* Geführter „nächster Schritt": Committen → PR erstellen → Integrieren */}
-          {step.kind !== "none" && (
+          {live && step.kind !== "none" && (
             <button
               className={`step-primary${step.kind === "cleanup" ? " cleanup" : ""}`}
               disabled={step.disabled}
@@ -145,7 +155,7 @@ export function Inspector() {
               {step.label}
             </button>
           )}
-          {agent.role === "sub" && agent.worktreePath && (
+          {live && agent.role === "sub" && agent.worktreePath && (
             <button onClick={() => void runGate(selectedId)} title="Clean-Code-Gate: lint/type/test + Secret-Scan (läuft beim PR automatisch)">
               Gate{agent.gate ? (agent.gate.ok ? " ✓" : " ✖") : ""}
             </button>
@@ -153,12 +163,12 @@ export function Inspector() {
           {/* Sub: rebase onto origin/<default> + force-with-lease. NIE für den Integrator —
               dessen „behind" betrifft den main-Checkout, der per fast-forward (nicht rebase!)
               nachgezogen wird. */}
-          {agent.role === "sub" && agent.behind > 0 && (
+          {live && agent.role === "sub" && agent.behind > 0 && (
             <button onClick={() => void syncBranch(selectedId)} title="Manuell auf origin/main rebasen (läuft sonst automatisch)">
               Sync ({agent.behind})
             </button>
           )}
-          {agent.role === "integrator" && agent.behind > 0 && (
+          {live && agent.role === "integrator" && agent.behind > 0 && (
             <button
               onClick={() => void updateMain(selectedId)}
               title={`Dein main-Checkout ist ${agent.behind} Commits hinter origin — per fast-forward nachziehen (kein rebase/force).`}

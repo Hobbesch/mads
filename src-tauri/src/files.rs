@@ -421,6 +421,50 @@ pub fn mads_register_root(
     Ok(())
 }
 
+/// Agent-ID validieren (UUID-artig) — verhindert Pfad-Traversal im Transkript-Dateinamen.
+fn sanitize_agent_id(id: &str) -> Result<String, String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("ungültige Agent-ID".into());
+    }
+    Ok(id.to_string())
+}
+
+/// Session-Restore (Resume-UX): den UI-Verlauf eines Streams persistieren. Liegt unter
+/// `<repoRoot>/.mads/transcripts/<agentId>.json` (vom `.mads/.gitignore` ausgenommen).
+#[tauri::command]
+pub fn mads_save_transcript(
+    scope: State<'_, FsScope>,
+    repo_root: String,
+    agent_id: String,
+    content: String,
+) -> Result<(), String> {
+    let id = sanitize_agent_id(&agent_id)?;
+    let dir = Path::new(&repo_root).join(".mads").join("transcripts");
+    let p = dir.join(format!("{id}.json"));
+    ensure_in_scope(&scope, &p.to_string_lossy())?; // muss in einem registrierten Root liegen
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(&p, content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn mads_load_transcript(
+    scope: State<'_, FsScope>,
+    repo_root: String,
+    agent_id: String,
+) -> Result<Option<String>, String> {
+    let id = sanitize_agent_id(&agent_id)?;
+    let p = Path::new(&repo_root)
+        .join(".mads")
+        .join("transcripts")
+        .join(format!("{id}.json"));
+    if !p.exists() {
+        return Ok(None);
+    }
+    ensure_in_scope(&scope, &p.to_string_lossy())?;
+    Ok(Some(std::fs::read_to_string(&p).map_err(|e| e.to_string())?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

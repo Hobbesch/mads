@@ -101,6 +101,9 @@ export interface AgentVM {
   dirty: boolean;
   pr?: PullRequestInfo;
   gate?: { ok: boolean; steps: GateStep[] };
+  /** true = im Sidecar-Pool aktiv (gestartet/fortgesetzt). false = passiv wiederhergestellt
+   *  (Kachel + Verlauf sichtbar, aber KEINE laufende KI — wird beim ersten Senden fortgesetzt). */
+  live?: boolean;
 }
 
 export interface SidecarInfo {
@@ -295,6 +298,12 @@ export interface MadsState {
   pollProject: () => Promise<void>;
   resumeAgent: (r: ResumableAgent) => Promise<void>;
   resumeAll: () => Promise<void>;
+  /** Beim Öffnen: alle Streams als passive Kacheln + Verlauf wiederherstellen, nur laufende fortsetzen. */
+  restoreSessions: (agents: ResumableAgent[]) => Promise<void>;
+  /** Persistierten Chat-Verlauf eines Streams laden. */
+  loadTranscript: (agentId: string) => Promise<void>;
+  /** Passiv wiederhergestellten Stream aktiv fortsetzen (Knopf „Fortsetzen"). */
+  continueStream: (id: string) => Promise<void>;
   // ── Spracheingabe ──
   checkWhisper: () => Promise<void>;
   downloadWhisper: () => Promise<void>;
@@ -338,6 +347,26 @@ export interface MadsState {
 
 const mkId = () => crypto.randomUUID();
 
+// Transkript-Persistenz (Session-Restore): den UI-Verlauf je Stream debounced auf Platte
+// schreiben (<repoRoot>/.mads/transcripts/<agentId>.json), damit er nach dem Neustart
+// wieder erscheint. Pro Agent ein Timer; häufige Events werden gebündelt.
+const transcriptTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function scheduleTranscriptSave(agentId: string): void {
+  const existing = transcriptTimers.get(agentId);
+  if (existing) clearTimeout(existing);
+  transcriptTimers.set(
+    agentId,
+    setTimeout(() => {
+      transcriptTimers.delete(agentId);
+      const st = useStore.getState();
+      const repo = st.project?.repoRoot;
+      const evs = st.events[agentId];
+      if (!repo || !evs || evs.length === 0) return;
+      void invoke("mads_save_transcript", { repoRoot: repo, agentId, content: JSON.stringify(evs) }).catch(() => {});
+    }, 1500),
+  );
+}
+
 function slugifyBranch(label: string): string {
   const slug = label
     .toLowerCase()
@@ -364,6 +393,7 @@ export const useStore = create<MadsState>((set) => {
       if (next.length > 800) next.splice(0, next.length - 800); // Ringpuffer
       return { events: { ...s.events, [agentId]: next } };
     });
+    scheduleTranscriptSave(agentId); // Verlauf für Session-Restore persistieren (debounced)
   }
 
   function notice(agentId: string, tone: NoticeTone, text: string) {
@@ -539,7 +569,7 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "resumable_agents":
-        set({ resumables: msg.agents });
+        void useStore.getState().restoreSessions(msg.agents);
         break;
 
       case "reconcile_summary":
@@ -775,6 +805,7 @@ export const useStore = create<MadsState>((set) => {
         behind: 0,
         ahead: 0,
         dirty: false,
+        live: true,
       };
       set((s) => ({ agents: { ...s.agents, [id]: agent }, order: [...s.order, id], selectedId: id }));
       pushEvent(id, { id: mkId(), kind: "user", text: prompt });
@@ -852,8 +883,30 @@ export const useStore = create<MadsState>((set) => {
     cancelParallelPicker: () => set({ parallelPicker: undefined }),
 
     sendInput: async (id, text, images) => {
+      const a = useStore.getState().agents[id];
       pushEvent(id, { id: mkId(), kind: "user", text, images: images?.length });
-      patchAgent(id, { status: "running", workStartedAt: Date.now() });
+      patchAgent(id, { status: "running", workStartedAt: Date.now(), live: true });
+      if (a && a.live === false) {
+        // Passiv wiederhergestellter Stream (nicht im Pool) → Session erst fortsetzen,
+        // diese Nachricht ist der Resume-Prompt. (Bilder werden beim Resume nicht mitgesendet.)
+        const project = useStore.getState().project;
+        await sendHost({
+          ...envelope(),
+          type: "start_agent",
+          agentId: id,
+          prompt: text,
+          label: a.label,
+          role: a.role,
+          mock: false,
+          permissionMode: a.permissionMode,
+          resumeSessionId: a.sessionId,
+          resumeWorktreePath: a.worktreePath,
+          repoRoot: project?.repoRoot,
+          cwd: a.worktreePath ?? project?.repoRoot,
+          branch: a.branch,
+        });
+        return;
+      }
       await sendHost({ ...envelope(), type: "send_input", agentId: id, text, images });
     },
 
@@ -953,6 +1006,77 @@ export const useStore = create<MadsState>((set) => {
 
     dismissReconcile: () => set({ reconcileSummary: undefined }),
 
+    // ── Session-Restore beim Öffnen ──────────────────────────────────────────
+    loadTranscript: async (agentId) => {
+      const repo = useStore.getState().project?.repoRoot;
+      if (!repo) return;
+      try {
+        const json = (await invoke("mads_load_transcript", { repoRoot: repo, agentId })) as string | null;
+        if (!json) return;
+        const evs = JSON.parse(json) as TimelineEvent[];
+        if (Array.isArray(evs) && evs.length) set((s) => ({ events: { ...s.events, [agentId]: evs } }));
+      } catch {
+        /* kein/kaputtes Transkript → ignorieren */
+      }
+    },
+
+    restoreSessions: async (agents) => {
+      const live = agents.filter((r) => !r.merged); // gemergte Reste bleiben Aufräum-Banner
+      const residue = agents.filter((r) => r.merged);
+      // 1) ALLE Streams als PASSIVE Kacheln wiederherstellen (sichtbar, kein KI-Start).
+      set((s) => {
+        const next = { ...s.agents };
+        const order = [...s.order];
+        for (const r of live) {
+          if (next[r.agentId]) continue;
+          next[r.agentId] = {
+            id: r.agentId,
+            label: r.label,
+            role: r.role,
+            status: r.status,
+            costUsd: 0,
+            numTurns: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            sessionId: r.sessionId,
+            mock: false,
+            permissionMode: "auto",
+            createdAt: Date.now(),
+            lastEventAt: Date.now(),
+            branch: r.branch,
+            worktreePath: r.worktreePath,
+            behind: 0,
+            ahead: 0,
+            dirty: false,
+            live: false, // passiv — erst beim Senden / „Fortsetzen" aktivieren
+          };
+          if (!order.includes(r.agentId)) order.push(r.agentId);
+        }
+        return { agents: next, order, resumables: residue };
+      });
+      // 2) Chat-Verläufe laden (erscheinen wie vor dem Schließen).
+      for (const r of live) void useStore.getState().loadTranscript(r.agentId);
+      // 3) NUR beim Schließen laufende (unterbrochene) Streams automatisch fortsetzen.
+      for (const r of live.filter((r) => r.status === "running" || r.status === "starting")) {
+        void useStore.getState().resumeAgent(r);
+      }
+    },
+
+    continueStream: async (id) => {
+      const a = useStore.getState().agents[id];
+      if (!a || a.live) return; // schon aktiv
+      await useStore.getState().resumeAgent({
+        agentId: id,
+        label: a.label,
+        role: a.role,
+        sessionId: a.sessionId,
+        branch: a.branch,
+        worktreePath: a.worktreePath,
+        status: a.status,
+        mock: false,
+      });
+    },
+
     // ── Spracheingabe (lokales Whisper) ──────────────────────────────────────
     checkWhisper: async () => {
       try {
@@ -1044,6 +1168,7 @@ export const useStore = create<MadsState>((set) => {
         behind: 0,
         ahead: 0,
         dirty: false,
+        live: true,
       };
       set((s) => ({
         agents: { ...s.agents, [r.agentId]: agent },

@@ -7,8 +7,8 @@ use dictation::{
     DictationState,
 };
 use files::{
-    mads_read_dir, mads_read_file, mads_register_root, mads_write_file, mads_write_file_bytes,
-    FsScope,
+    mads_load_transcript, mads_read_dir, mads_read_file, mads_register_root, mads_save_transcript,
+    mads_write_file, mads_write_file_bytes, FsScope,
 };
 use sidecar::{sidecar_send, start_sidecar, stop_sidecar, SidecarState};
 use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
@@ -84,6 +84,8 @@ pub fn run() {
             mads_write_file,
             mads_write_file_bytes,
             mads_register_root,
+            mads_save_transcript,
+            mads_load_transcript,
             whisper_model_status,
             whisper_download_model,
             dictation_start,
