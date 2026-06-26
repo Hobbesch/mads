@@ -207,7 +207,7 @@ export class Orchestrator {
     const pre = await gitStatus(s.repoRoot, s.worktreePath, s.branch, this.project.defaultBranch);
     if (pre.ahead === 0) {
       const msg = pre.dirty
-        ? `Kein PR möglich: Der Branch ${s.branch} hat noch keine Commits gegenüber ${this.project.defaultBranch} — die Änderungen sind nicht committet. Lass den Agenten zuerst committen (eure Commit-Konvention, z. B. scripts/paix-commit.sh), dann erneut „PR erstellen".`
+        ? `Kein PR möglich: Der Branch ${s.branch} hat noch keine Commits gegenüber ${this.project.defaultBranch} — die Änderungen sind nicht committet. Lass den Agenten zuerst LOKAL committen (git add -A && git commit; KEINE Push-Skripte wie scripts/paix-commit.sh — die pushen auf main), dann erneut „PR erstellen".`
         : `Kein PR möglich: Keine Commits und keine Änderungen auf ${s.branch} gegenüber ${this.project.defaultBranch}.`;
       this.emitError(agentId, "push_rejected", msg);
       return;
