@@ -301,7 +301,12 @@ export function Inspector() {
           <div className="composer-note">⬇︎ Sprachmodell lädt… {Math.round(whisper.progress * 100)}% (einmalig, ~1,5 GB)</div>
         )}
         {dictation.recording && <div className="composer-note rec">● Aufnahme läuft — ⇧Leertaste loslassen oder Mikro klicken zum Stoppen</div>}
-        {dictation.transcribing && <div className="composer-note">⌛ Transkribiere…</div>}
+        {dictation.transcribing && (
+          <div className="composer-note transcribing" aria-live="polite">
+            <span className="tl-spinner" /> Transkribiere…
+            <span className="cn-dim"> der erkannte Text erscheint gleich (bei langem Text etwas Geduld)</span>
+          </div>
+        )}
         {dictation.error && <div className="composer-note err">{dictation.error}</div>}
         <form className="composer" onSubmit={submit}>
           <textarea
@@ -318,7 +323,11 @@ export function Inspector() {
                 submit();
               }
             }}
-            placeholder={`Nachricht an ${agent.label}…  (Enter senden · ⇧↵ Zeilenumbruch · ⌘V Screenshot)`}
+            placeholder={
+              dictation.transcribing
+                ? "⌛ Transkribiere… der erkannte Text erscheint gleich hier"
+                : `Nachricht an ${agent.label}…  (Enter senden · ⇧↵ Zeilenumbruch · ⌘V Screenshot)`
+            }
           />
           {whisper.downloading ? (
             <button type="button" className="composer-btn mic" disabled title={`Sprachmodell lädt… ${Math.round(whisper.progress * 100)}%`}>

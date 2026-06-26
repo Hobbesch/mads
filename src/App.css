@@ -3112,6 +3112,21 @@ body.col-resizing .tree-resizer {
   color: #d33b30;
   font-weight: 600;
 }
+.composer-note.transcribing {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 12px;
+}
+.composer-note.transcribing .tl-spinner {
+  margin-top: 0; /* in der Flex-Zeile mittig statt mit Text-Offset */
+}
+.composer-note .cn-dim {
+  color: var(--text-faint);
+  font-weight: 400;
+}
 .composer-note.err {
   color: #d33b30;
 }
