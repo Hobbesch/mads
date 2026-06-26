@@ -1,10 +1,11 @@
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Mic } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
-import { agentBadges, nextStep } from "../derive";
+import { agentBadges, nextStep, unsavedWork, gateDisabledReason, syncDisabledReason } from "../derive";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
 import { Elapsed } from "./Elapsed";
@@ -40,6 +41,11 @@ export function Inspector() {
   const dictation = useStore((s) => s.dictation);
   const startDictation = useStore((s) => s.startDictation);
   const stopDictation = useStore((s) => s.stopDictation);
+  // Bestätigungs-Dialog vor irreversiblen Aktionen (Merge / Stop-mit-Resten). Hook MUSS
+  // vor dem early-return stehen (Rules of Hooks).
+  const [confirm, setConfirm] = useState<
+    null | { title: string; body: React.ReactNode; confirmLabel: string; danger?: boolean; onConfirm: () => void }
+  >(null);
 
   // Auto-wachsende Composer-Höhe (Textarea): bei jeder Entwurfs-Änderung neu messen.
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -90,11 +96,58 @@ export function Inspector() {
   // Passiv wiederhergestellt (nicht im Pool): nur Verlauf ansehen; Git-Aktionen erst nach
   // „Fortsetzen" (oder durch Senden einer Nachricht, das den Stream lazy aktiviert).
   const live = agent.live !== false;
+  // Merge ist irreversibel & außen-wirksam (landet auf dem geteilten main) → bestätigen.
+  const askMerge = (keep: boolean) =>
+    setConfirm({
+      title: keep ? "Mergen & weiterarbeiten?" : "PR nach main mergen?",
+      body: (
+        <>
+          <p>
+            Der PR von <strong>{agent.label}</strong> wird nach <code>main</code> gemergt — eine außen-sichtbare,
+            nicht umkehrbare Aktion auf dem geteilten Branch.
+          </p>
+          <p>
+            {keep
+              ? "Branch + Stream bleiben erhalten (auf main zurückgesetzt) — du arbeitest direkt weiter."
+              : "Danach werden Worktree + Branch aufgeräumt und der Stream beendet."}
+          </p>
+        </>
+      ),
+      confirmLabel: keep ? "Mergen & weiterarbeiten" : "Nach main mergen",
+      onConfirm: () => void integratePr(selectedId, keep),
+    });
+
+  // Stop entfernt Worktree + Branch → bei ungesicherter Arbeit erst warnen (sonst Verlust).
+  const askStop = () => {
+    if (!unsavedWork(agent)) {
+      void stopAgent(selectedId, agent.role === "sub");
+      return;
+    }
+    setConfirm({
+      title: "Stream stoppen — ungesicherte Arbeit",
+      danger: true,
+      body: (
+        <>
+          <p>
+            <strong>{agent.label}</strong> hat ungesicherte Arbeit{" "}
+            {agent.dirty ? "(uncommittete/untracked Änderungen)" : `(${agent.ahead} Commit(s) ohne PR)`}.
+          </p>
+          <p>
+            Stoppen entfernt Worktree + Branch — diese Arbeit geht dann <strong>verloren</strong>. Besser erst
+            „Committen" bzw. „PR erstellen".
+          </p>
+        </>
+      ),
+      confirmLabel: "Trotzdem stoppen & verwerfen",
+      onConfirm: () => void stopAgent(selectedId, agent.role === "sub"),
+    });
+  };
+
   const runStep = () => {
     if (step.kind === "commit") void commitAgent(selectedId);
     else if (step.kind === "pr") void createPr(selectedId);
-    else if (step.kind === "integrate") void integratePr(selectedId);
-    else if (step.kind === "cleanup") void stopAgent(selectedId, true);
+    else if (step.kind === "integrate") askMerge(false);
+    else if (step.kind === "cleanup") void stopAgent(selectedId, true); // bereits gemergt → sicher
   };
 
   return (
@@ -161,22 +214,36 @@ export function Inspector() {
             <button
               disabled={step.disabled}
               title="Mergt den PR nach main, behält aber Branch + Stream (auf main zurückgesetzt) — zum asynchronen Weiterarbeiten am selben Branch."
-              onClick={() => void integratePr(selectedId, true)}
+              onClick={() => askMerge(true)}
             >
               Mergen & weiterarbeiten
             </button>
           )}
           {live && agent.role === "sub" && agent.worktreePath && (
-            <button onClick={() => void runGate(selectedId)} title="Clean-Code-Gate: lint/type/test + Secret-Scan (läuft beim PR automatisch)">
+            <button
+              disabled={!!gateDisabledReason(agent)}
+              onClick={() => void runGate(selectedId)}
+              title={gateDisabledReason(agent) ?? "Clean-Code-Gate: lint/type/test + Secret-Scan (läuft beim PR automatisch)"}
+            >
               Gate{agent.gate ? (agent.gate.ok ? " ✓" : " ✖") : ""}
             </button>
           )}
           {/* Sub: rebase onto origin/<default> + force-with-lease. NIE für den Integrator —
               dessen „behind" betrifft den main-Checkout, der per fast-forward (nicht rebase!)
               nachgezogen wird. */}
-          {live && agent.role === "sub" && agent.behind > 0 && (
-            <button onClick={() => void syncBranch(selectedId)} title="Manuell auf origin/main rebasen (läuft sonst automatisch)">
-              Sync ({agent.behind})
+          {live && agent.role === "sub" && (agent.behind > 0 || agent.syncBlocked) && (
+            <button
+              disabled={!!syncDisabledReason(agent)}
+              onClick={() => void syncBranch(selectedId)}
+              title={
+                syncDisabledReason(agent) ??
+                (agent.syncBlocked
+                  ? "Auto-Sync ist wegen eines Konflikts pausiert. Konflikt im Worktree lösen, dann erneut Sync."
+                  : "Manuell auf origin/main rebasen (läuft sonst automatisch)")
+              }
+            >
+              Sync{agent.behind > 0 ? ` (${agent.behind})` : ""}
+              {agent.syncBlocked ? " ⚠︎" : ""}
             </button>
           )}
           {live && agent.role === "integrator" && agent.behind > 0 && (
@@ -194,7 +261,7 @@ export function Inspector() {
           )}
           <button
             className="danger"
-            onClick={() => void stopAgent(selectedId, agent.role === "sub")}
+            onClick={askStop}
             title="Stoppen + aufräumen (Worktree/Branch entfernen bei Sub)"
           >
             Stop
@@ -326,6 +393,16 @@ export function Inspector() {
           )}
         </form>
       </div>
+      {confirm && (
+        <ConfirmDialog
+          title={confirm.title}
+          body={confirm.body}
+          confirmLabel={confirm.confirmLabel}
+          danger={confirm.danger}
+          onConfirm={confirm.onConfirm}
+          onClose={() => setConfirm(null)}
+        />
+      )}
     </section>
   );
 }

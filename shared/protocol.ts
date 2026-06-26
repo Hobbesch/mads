@@ -334,7 +334,8 @@ export interface GitStatusMsg extends BaseMsg {
   agentId: string;
   behind: number; // commits hinter origin/<default> (stale-base-Badge)
   ahead: number;
-  dirty: boolean;
+  dirty: boolean; // uncommitted ODER untracked (git status --porcelain nicht leer)
+  syncBlocked?: boolean; // Auto-Sync wegen Rebase-Konflikt pausiert (autoSyncConflicted)
 }
 
 export type PrChecksState = "SUCCESS" | "FAILURE" | "PENDING" | "ERROR" | "EXPECTED" | null;

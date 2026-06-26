@@ -4,7 +4,7 @@ import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
-import { agentBadges, hasGitEscalation } from "../derive";
+import { agentBadges, hasGitEscalation, unsavedWork } from "../derive";
 import { agentColor } from "../agentColor";
 import type { AgentVM } from "../store";
 
@@ -13,7 +13,9 @@ function AgentCard({ agent }: { agent: AgentVM }) {
   const selectedId = useStore((s) => s.selectedId);
   const permissions = useStore((s) => s.permissions);
   const needsInput = agent.status === "waiting_input";
-  const escalated = agent.status === "escalation" || agent.status === "error" || hasGitEscalation(agent);
+  const escalated =
+    agent.status === "escalation" || agent.status === "error" || agent.syncBlocked === true || hasGitEscalation(agent);
+  const unsaved = unsavedWork(agent);
   const pending = permissions.filter((p) => p.agentId === agent.id).length;
   const badges = agentBadges(agent);
   const active = agent.status === "running" || agent.status === "starting";
@@ -63,6 +65,8 @@ function AgentCard({ agent }: { agent: AgentVM }) {
         </span>
       </div>
       {needsInput && <div className="card-flag yellow">● braucht Input{pending ? ` (${pending})` : ""}</div>}
+      {unsaved && <div className="card-flag red" title="Uncommittete/untrackte Arbeit oder Commits ohne PR — geht beim Aufräumen verloren">● Arbeit nicht gesichert</div>}
+      {agent.syncBlocked && <div className="card-flag red" title="Auto-Sync wegen Rebase-Konflikt pausiert — Konflikt lösen, dann Sync">⚠︎ Sync blockiert (Konflikt)</div>}
     </button>
   );
 }

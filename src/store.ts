@@ -98,7 +98,8 @@ export interface AgentVM {
   worktreePath?: string;
   behind: number;
   ahead: number;
-  dirty: boolean;
+  dirty: boolean; // uncommitted ODER untracked
+  syncBlocked?: boolean; // Auto-Sync pausiert (Rebase-Konflikt) — manuelles Eingreifen nötig
   pr?: PullRequestInfo;
   gate?: { ok: boolean; steps: GateStep[] };
   /** true = im Sidecar-Pool aktiv (gestartet/fortgesetzt). false = passiv wiederhergestellt
@@ -542,7 +543,7 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "git_status":
-        patchAgent(msg.agentId, { behind: msg.behind, ahead: msg.ahead, dirty: msg.dirty });
+        patchAgent(msg.agentId, { behind: msg.behind, ahead: msg.ahead, dirty: msg.dirty, syncBlocked: msg.syncBlocked ?? false });
         break;
 
       case "pr_update":

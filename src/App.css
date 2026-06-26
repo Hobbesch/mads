@@ -1790,6 +1790,24 @@ button.primary:hover {
   color: #fff;
   border-color: transparent;
 }
+.modal-actions .danger {
+  background: #d33b30;
+  color: #fff;
+  border-color: transparent;
+}
+/* Bestätigungs-Dialog: Folgen-Text */
+.confirm-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.confirm-body p {
+  margin: 0 0 8px;
+}
+.confirm-body code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
 .modal-actions button:disabled {
   opacity: 0.45;
   cursor: default;

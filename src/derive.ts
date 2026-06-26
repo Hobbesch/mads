@@ -38,6 +38,25 @@ export function hasGitEscalation(a: AgentVM): boolean {
   return a.behind > 0 || a.pr?.checksState === "FAILURE" || a.pr?.mergeable === "CONFLICTING";
 }
 
+/**
+ * Ungesicherte Arbeit: uncommitted/untracked ODER committet-aber-kein-PR. Solche Arbeit
+ * geht beim Stop/Aufräumen verloren → auf der Kachel laut markieren und vor Stop bestätigen.
+ */
+export function unsavedWork(a: AgentVM): boolean {
+  if (a.role !== "sub" || a.pr?.state === "MERGED") return false;
+  return a.dirty || (a.ahead > 0 && !a.pr);
+}
+
+/** Grund, warum „Gate" gerade nicht sinnvoll ist (sonst null = erlaubt). */
+export function gateDisabledReason(a: AgentVM): string | null {
+  return a.dirty ? "Erst committen — das Gate prüft den committeten Stand." : null;
+}
+
+/** Grund, warum „Sync" gerade gesperrt ist (sonst null = erlaubt). */
+export function syncDisabledReason(a: AgentVM): string | null {
+  return a.dirty ? "Erst committen — der Rebase braucht einen sauberen Arbeitsbaum." : null;
+}
+
 /** Ist der PR dieses Agenten merge-reif? (Gleiche Logik wie der Sidecar-Gate.) */
 export function mergeReadiness(a: AgentVM): MergeGate {
   return preMergeGate(a.pr, a.behind);

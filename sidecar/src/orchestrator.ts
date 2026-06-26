@@ -282,7 +282,7 @@ export class Orchestrator {
     if (s.worktreePath) {
       const st = await gitStatus(s.repoRoot, s.worktreePath, s.branch, this.project.defaultBranch);
       behind = st.behind;
-      this.emit({ ...envelope(), type: "git_status", agentId, ...st });
+      this.emitGitStatus(agentId, st);
     }
     const pr = await prStatus(s.repoRoot, s.branch);
     if (pr) this.emit({ ...envelope(), type: "pr_update", agentId, pr });
@@ -316,7 +316,7 @@ export class Orchestrator {
         resyncOk = reset.code === 0;
         const st = await gitStatus(s.repoRoot, s.worktreePath, s.branch, base);
         this.gitState.set(agentId, st);
-        this.emit({ ...envelope(), type: "git_status", agentId, ...st });
+        this.emitGitStatus(agentId, st);
       }
       this.emit({ ...envelope(), type: "pr_update", agentId, pr: undefined }); // PR-Badge löschen
       this.emit({ ...envelope(), type: "status_update", agentId, status: "waiting_input", currentStep: undefined });
@@ -549,13 +549,13 @@ export class Orchestrator {
       if (s.role === "integrator") {
         const status = await gitStatus(s.repoRoot, s.repoRoot, defaultBranch, defaultBranch, skipFetch);
         this.gitState.set(s.agentId, status);
-        this.emit({ ...envelope(), type: "git_status", agentId: s.agentId, ...status });
+        this.emitGitStatus(s.agentId, status);
         return;
       }
       if (!s.branch || !s.worktreePath) return; // Sub ohne Worktree → nichts zu pollen
       const status = await gitStatus(s.repoRoot, s.worktreePath, s.branch, defaultBranch, skipFetch);
       this.gitState.set(s.agentId, status);
-      this.emit({ ...envelope(), type: "git_status", agentId: s.agentId, ...status });
+      this.emitGitStatus(s.agentId, status);
       const pr = await prStatus(s.repoRoot, s.branch);
       if (pr) {
         const suppressed = this.suppressedMergedPr.get(s.agentId);
@@ -627,6 +627,10 @@ export class Orchestrator {
 
   private emitError(agentId: string, code: EscalationKind, message: string): void {
     this.emit({ ...envelope(), type: "error", agentId, scope: "agent", code, message, recoverable: true });
+  }
+  /** git_status emittieren + den (orchestrator-eigenen) syncBlocked-Zustand mitliefern. */
+  private emitGitStatus(agentId: string, st: { behind: number; ahead: number; dirty: boolean }): void {
+    this.emit({ ...envelope(), type: "git_status", agentId, ...st, syncBlocked: this.autoSyncConflicted.has(agentId) });
   }
   private emit(obj: unknown): void {
     void send(obj);
