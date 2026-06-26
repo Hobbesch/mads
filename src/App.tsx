@@ -75,7 +75,8 @@ export default function App() {
   // Spracheingabe-Hotkey: ⇧Leertaste = Push-to-talk (halten). Im Composer-Textarea wird
   // die Leertaste abgefangen (kein Leerzeichen); in ANDEREN Editierfeldern (CodeMirror,
   // Datei-Filter …) NICHT gekapert, damit dort normal getippt werden kann.
-  const pttActive = useRef(false);
+  const pttActive = useRef(false); // eine PTT-Aufnahme läuft (Backend nimmt auf)
+  const pttHeld = useRef(false); // Shift+Space als Hotkey erkannt UND Leertaste noch gehalten
   useEffect(() => {
     const editable = (el: Element | null): boolean => {
       if (!el) return false;
@@ -91,29 +92,57 @@ export default function App() {
       if (ae && (ae as HTMLElement).classList?.contains("composer-input")) return true; // Composer → diktieren
       return !editable(ae); // anderes Eingabefeld → nicht kapern; sonst (Body etc.) → ja
     };
+    // PTT-Latch zurücksetzen (Fokusverlust): sonst bleibt `pttHeld`/`pttActive` hängen,
+    // weil das Space-keyup an die andere App/Spotlight geht und nie bei uns ankommt —
+    // dann würde JEDES spätere Leerzeichen für immer geschluckt. visibilitychange(hidden)
+    // statt `blur`, damit der erstmalige Mikrofon-TCC-Dialog (App bleibt sichtbar) die
+    // laufende Aufnahme nicht abwürgt.
+    const resetLatch = () => {
+      const wasRecording = pttActive.current;
+      pttActive.current = false;
+      pttHeld.current = false;
+      if (wasRecording) void useStore.getState().stopDictation();
+    };
     const onDown = (e: KeyboardEvent) => {
-      if (e.code !== "Space" || !e.shiftKey || e.repeat || pttActive.current) return;
-      if (!shouldHandle()) return;
-      const s = useStore.getState();
-      if (s.dictation.recording || s.dictation.transcribing || s.whisper.downloading) {
-        if (!s.whisper.installed) e.preventDefault();
+      if (e.code !== "Space") return;
+      if (e.isComposing || e.keyCode === 229) return; // IME-Komposition: Space gehört dem Editor
+      // Hotkey erkannt & Leertaste wird gehalten (auch nach Shift-Loslassen / während
+      // Download/Transkription): JEDES Space-keydown schlucken, inkl. OS-Auto-Repeats.
+      if (pttActive.current || pttHeld.current) {
+        e.preventDefault();
         return;
       }
+      // Hotkey nur im Composer / außerhalb anderer Eingabefelder kapern.
+      if (!e.shiftKey || !shouldHandle()) return;
+      // Ab hier ist Shift+Space als Diktat-Hotkey erkannt → Leerzeichen NIE durchlassen.
       e.preventDefault();
+      pttHeld.current = true; // ab jetzt schluckt der Guard oben alle Repeats, egal ob Shift noch hält
+      if (e.repeat) return;
+      const s = useStore.getState();
+      if (s.dictation.recording || s.dictation.transcribing || s.whisper.downloading) return; // busy: nur schlucken
       pttActive.current = true;
       void s.startDictation();
     };
     const onUp = (e: KeyboardEvent) => {
-      if (e.code !== "Space" || !pttActive.current) return;
+      if (e.code !== "Space" || (!pttActive.current && !pttHeld.current)) return;
+      const wasRecording = pttActive.current;
       pttActive.current = false;
+      pttHeld.current = false;
       e.preventDefault();
-      void useStore.getState().stopDictation();
+      if (wasRecording) void useStore.getState().stopDictation();
     };
-    window.addEventListener("keydown", onDown);
-    window.addEventListener("keyup", onUp);
+    const onVisibility = () => {
+      if (document.hidden) resetLatch();
+    };
+    // Capture-Phase, damit ein upstream stopPropagation (React/CodeMirror) den Hotkey
+    // nicht aushebeln kann.
+    window.addEventListener("keydown", onDown, true);
+    window.addEventListener("keyup", onUp, true);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      window.removeEventListener("keydown", onDown);
-      window.removeEventListener("keyup", onUp);
+      window.removeEventListener("keydown", onDown, true);
+      window.removeEventListener("keyup", onUp, true);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
