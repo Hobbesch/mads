@@ -11,7 +11,7 @@ import { MessageTimeline } from "./MessageTimeline";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
 import { blobToBase64 } from "../blob";
-import type { PermissionMode, ImageInput } from "../../shared/protocol";
+import type { PermissionMode, ImageInput, AutopilotLevel } from "../../shared/protocol";
 
 // Stabile Leer-Referenz: ein zustand-Selektor darf NICHT bei jedem Render ein neues []
 // zurückgeben (sonst Endlos-Render-Schleife → App-Crash / graues Fenster).
@@ -31,6 +31,7 @@ export function Inspector() {
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
   const setPermissionMode = useStore((s) => s.setPermissionMode);
+  const setAutopilot = useStore((s) => s.setAutopilot);
   // Composer-Entwürfe je Agent (im Store) — beim Umschalten bleibt jeder Entwurf erhalten.
   const draft = useStore((s) => (s.selectedId ? s.drafts[s.selectedId] ?? "" : ""));
   const attached = useStore((s) => (s.selectedId ? s.draftImages[s.selectedId] ?? NO_IMAGES : NO_IMAGES));
@@ -191,6 +192,18 @@ export function Inspector() {
             <option value="auto">Auto — nur Risiko fragen</option>
             <option value="bypassPermissions">Bypass — nie fragen</option>
           </select>
+          {agent.role === "sub" && (
+            <select
+              className="mode-select"
+              value={agent.autopilot ?? "assisted"}
+              onChange={(e) => void setAutopilot(selectedId, e.target.value as AutopilotLevel)}
+              title="Autopilot automatisiert die reversible Seite (committen, pushen, PR) — Merge bleibt dein Klick."
+            >
+              <option value="manual">🤖 Manuell</option>
+              <option value="assisted">🤖 Assisted — auto commit/push/PR</option>
+              <option value="autopilot">🤖 Autopilot</option>
+            </select>
+          )}
           {/* Passiv wiederhergestellt → erst reaktivieren, bevor Git-Aktionen möglich sind. */}
           {!live && (
             <button className="step-primary" title="Stream fortsetzen (Session reaktivieren, dann weiterarbeiten)" onClick={() => void continueStream(selectedId)}>

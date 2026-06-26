@@ -22,6 +22,8 @@ import type {
   PermissionDecision,
   AgentStatus,
   ImageInput,
+  AutopilotLevel,
+  PullRequestInfo,
 } from "../../shared/protocol.js";
 
 // Loses SDK-Typing: die exakte API entwickelt sich (0.3.x). Wir casten defensiv.
@@ -139,6 +141,10 @@ export class AgentSession {
   model?: string;
   lastPrompt?: string;
   mock = false;
+  // Autopilot (Phase 2): vom Orchestrator gesetzt/gelesen (treibt autopilotPass). Default
+  // „assisted". `lastPr` spiegelt den zuletzt gepollten PR-Zustand für die Autopilot-Logik.
+  autopilot: AutopilotLevel = "assisted";
+  lastPr?: PullRequestInfo;
   // Aktueller Permission-Modus + Arbeitsverzeichnis — für die mads-Auto-Freigabe.
   private permissionMode?: string;
   private cwd?: string;
@@ -153,9 +159,15 @@ export class AgentSession {
     this.onChange = onChange;
   }
 
+  /** Wartet eine Permission-Rückfrage? (Autopilot agiert nur, wenn der Stream ruhig ist.) */
+  hasPending(): boolean {
+    return this.pending.size > 0;
+  }
+
   // --------------------------------------------------------------------------
   async start(msg: StartAgentMsg): Promise<void> {
     this.mock = msg.mock ?? false;
+    if (msg.autopilot) this.autopilot = msg.autopilot;
     this.repoRoot = msg.repoRoot;
     this.branch = msg.branch;
     this.label = msg.label;

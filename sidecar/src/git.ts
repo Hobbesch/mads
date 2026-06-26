@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { EscalationKind, PullRequestInfo, PrChecksState } from "../../shared/protocol.js";
-import { scanSecrets } from "../../shared/secrets.js";
+import { scanSecrets, type SecretHit } from "../../shared/secrets.js";
 
 export interface RunResult {
   code: number;
@@ -219,6 +219,36 @@ async function secretGateBeforePush(
       `🔒 Push blockiert: mögliche Secrets in den zu pushenden Änderungen (${kinds}; ${hits.length} Treffer). ` +
       `Entferne sie aus den Commits (und rotiere den Wert), bevor erneut gepusht wird.`,
   };
+}
+
+/**
+ * Autopilot-Commit: alle Änderungen stagen, auf Secrets prüfen, dann committen. Fail-closed:
+ * bei Secret-Treffer wird NICHT committet (Treffer zurückgegeben → eskalieren). `nothing`,
+ * wenn es nichts zu committen gab.
+ */
+export async function autoCommit(
+  worktree: string,
+  message: string,
+): Promise<{ ok: boolean; secrets?: SecretHit[]; nothing?: boolean }> {
+  await git(["-C", worktree, "add", "-A"], worktree);
+  const diff = await git(["-C", worktree, "diff", "--cached"], worktree);
+  if (!diff.stdout.trim()) {
+    await git(["-C", worktree, "reset", "-q"], worktree);
+    return { ok: false, nothing: true };
+  }
+  const hits = scanSecrets(diff.stdout);
+  if (hits.length) {
+    await git(["-C", worktree, "reset", "-q"], worktree); // nicht im Staged-Zustand hängen lassen
+    return { ok: false, secrets: hits };
+  }
+  const c = await git(["-C", worktree, "commit", "-m", message], worktree);
+  return { ok: c.code === 0 };
+}
+
+/** Lokale Commits, die noch nicht auf origin/<branch> liegen (für „PR aktuell halten"). */
+export async function unpushedCount(worktree: string, branch: string): Promise<number> {
+  const r = await git(["-C", worktree, "rev-list", "--count", `origin/${branch}..HEAD`], worktree);
+  return r.code === 0 ? parseInt(r.stdout.trim() || "0", 10) : 0;
 }
 
 /** rebase onto origin/<default> + force-with-lease — der stale-base-Killer. */

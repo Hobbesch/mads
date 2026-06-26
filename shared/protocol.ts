@@ -55,6 +55,7 @@ export type HostMessage =
   | GateTaskMsg
   | IntegratePrMsg
   | SetAutonomyMsg
+  | SetAutopilotMsg
   | PollProjectMsg
   | CleanupWorktreeMsg
   | UpdateMainMsg
@@ -101,6 +102,8 @@ export interface StartAgentMsg extends BaseMsg {
   role?: "integrator" | "sub";
   /** Demo ohne echte Claude-Auth: scripted Stream statt query(). */
   mock?: boolean;
+  /** Autopilot-Stufe (Default „assisted"). */
+  autopilot?: AutopilotLevel;
 }
 
 export interface CreatePrMsg extends BaseMsg {
@@ -133,14 +136,29 @@ export interface GateTaskMsg extends BaseMsg {
   agentId: string;
 }
 
+/**
+ * Autopilot-Stufe je Stream (reversible Seite automatisieren, Irreversibles bleibt menschlich):
+ * - manual: nichts automatisch (wie früher).
+ * - assisted (Default): Commit/Push/PR der reversiblen Arbeit automatisch; NIE mergen/verwerfen.
+ * - autopilot: wie assisted + (künftig) Merge-Vorschlagskarte bei grünem Gate.
+ */
+export type AutopilotLevel = "manual" | "assisted" | "autopilot";
+
 /** Halb-autonomer Integrator: Auto-Sync + Kollisions-Scan an/aus. */
 export interface AutonomyConfig {
   autoSync: boolean; // Sub-Branches automatisch onto origin/<default> rebasen
   collisionScan: boolean; // Code-Kollisionen zwischen aktiven Agenten erkennen
+  autopilotDefault?: AutopilotLevel; // Default-Stufe für neue Streams (Default: "assisted")
 }
 export interface SetAutonomyMsg extends BaseMsg {
   type: "set_autonomy";
   config: AutonomyConfig;
+}
+/** Autopilot-Stufe eines laufenden Streams ändern. */
+export interface SetAutopilotMsg extends BaseMsg {
+  type: "set_autopilot";
+  agentId: string;
+  level: AutopilotLevel;
 }
 
 export interface PollProjectMsg extends BaseMsg {

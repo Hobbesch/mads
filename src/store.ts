@@ -25,6 +25,7 @@ import type {
   ReconcileSummaryMsg,
   AutonomyConfig,
   PermissionMode,
+  AutopilotLevel,
   ImageInput,
 } from "../shared/protocol";
 import type { Collision } from "../shared/collision";
@@ -102,6 +103,7 @@ export interface AgentVM {
   sessionId?: string;
   mock: boolean;
   permissionMode: PermissionMode;
+  autopilot: AutopilotLevel; // Autopilot-Stufe dieses Streams (Default „assisted")
   createdAt: number;
   lastEventAt: number;
   /** Zeitpunkt, ab dem der aktuelle aktive Lauf zählt (für die Laufzeit-Anzeige). */
@@ -299,6 +301,7 @@ export interface MadsState {
   cancelParallelPicker: () => void;
   sendInput: (id: string, text: string, images?: ImageInput[]) => Promise<void>;
   setPermissionMode: (id: string, mode: PermissionMode) => Promise<void>;
+  setAutopilot: (id: string, level: AutopilotLevel) => Promise<void>;
   interruptAgent: (id: string) => Promise<void>;
   stopAgent: (id: string, removeWorktree: boolean) => Promise<void>;
   commitAgent: (id: string) => Promise<void>;
@@ -814,6 +817,7 @@ export const useStore = create<MadsState>((set) => {
         outputTokens: 0,
         mock,
         permissionMode: mode,
+        autopilot: "assisted",
         createdAt: Date.now(),
         lastEventAt: Date.now(),
         workStartedAt: Date.now(),
@@ -837,6 +841,7 @@ export const useStore = create<MadsState>((set) => {
         model: finalModel,
         mock,
         permissionMode: mode,
+        autopilot: "assisted",
         ...(useWorktree && project
           ? { repoRoot: project.repoRoot, branch: finalBranch, baseRef: `origin/${project.defaultBranch}` }
           : project && !mock
@@ -914,6 +919,7 @@ export const useStore = create<MadsState>((set) => {
           role: a.role,
           mock: false,
           permissionMode: a.permissionMode,
+          autopilot: a.autopilot ?? "assisted",
           resumeSessionId: a.sessionId,
           resumeWorktreePath: a.worktreePath,
           repoRoot: project?.repoRoot,
@@ -929,6 +935,14 @@ export const useStore = create<MadsState>((set) => {
       patchAgent(id, { permissionMode: mode });
       notice(id, "accent", `⚙ Permission-Modus: ${mode}`);
       await sendHost({ ...envelope(), type: "set_permission_mode", agentId: id, mode });
+    },
+
+    setAutopilot: async (id, level) => {
+      patchAgent(id, { autopilot: level });
+      const label =
+        level === "manual" ? "Manuell" : level === "autopilot" ? "Autopilot" : "Assisted (auto commit/push/PR)";
+      notice(id, "accent", `🤖 Autopilot: ${label}`);
+      await sendHost({ ...envelope(), type: "set_autopilot", agentId: id, level });
     },
 
     interruptAgent: async (id) => {
@@ -1060,6 +1074,7 @@ export const useStore = create<MadsState>((set) => {
             sessionId: r.sessionId,
             mock: false,
             permissionMode: "auto",
+            autopilot: "assisted",
             createdAt: Date.now(),
             lastEventAt: Date.now(),
             branch: r.branch,
@@ -1179,6 +1194,7 @@ export const useStore = create<MadsState>((set) => {
         sessionId: r.sessionId,
         mock: false,
         permissionMode: "auto",
+        autopilot: "assisted",
         createdAt: Date.now(),
         lastEventAt: Date.now(),
         workStartedAt: Date.now(),
@@ -1228,6 +1244,7 @@ export const useStore = create<MadsState>((set) => {
         model: r.model,
         mock: false,
         permissionMode: "auto",
+        autopilot: "assisted",
         resumeSessionId: r.sessionId,
         resumeWorktreePath: r.worktreePath,
         repoRoot: project?.repoRoot,

@@ -9,8 +9,9 @@
 import { existsSync } from "node:fs";
 import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
-import { createPr, discoverWorktrees, fastForwardMain, getRepoInfo, gitStatus, mergePr, prStatus, removeWorktree, run, syncBranch, worktreePathFor, worktreeResidue } from "./git.js";
+import { autoCommit, createPr, discoverWorktrees, fastForwardMain, getRepoInfo, gitStatus, mergePr, prStatus, pushBranch, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
+import { autopilotDecision } from "../../shared/autopilot.js";
 import { ensureMadsDir, loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
 import { parseDiffRegions, detectCollisions, type AgentRegions } from "../../shared/collision.js";
@@ -30,6 +31,10 @@ export class Orchestrator {
   // Nach „Mergen & weiterarbeiten": die Nummer des gemergten PRs, die der Poll ignoriert,
   // bis ein NEUER PR aufgeht (sonst zeigt `gh pr view <branch>` weiter den Alt-PR als MERGED).
   private readonly suppressedMergedPr = new Map<string, number>();
+  // Autopilot (Phase 2): PR-Erstellung pro „ahead"-Stand nur einmal versuchen (kein Gate-Spam
+  // bei rotem Gate); Secret-Eskalation pro Episode nur einmal melden.
+  private readonly autopilotPrTried = new Map<string, number>();
+  private readonly autopilotSecretNotified = new Set<string>();
 
   async dispatch(msg: HostMessage): Promise<void> {
     switch (msg.type) {
@@ -108,6 +113,17 @@ export class Orchestrator {
       case "gate_task":
         await this.handleGate(msg.agentId);
         break;
+
+      case "set_autopilot": {
+        const s = this.pool.get(msg.agentId);
+        if (s) {
+          s.autopilot = msg.level;
+          this.autopilotPrTried.delete(msg.agentId);
+          this.autopilotSecretNotified.delete(msg.agentId);
+          log(`[orchestrator] autopilot ${msg.agentId} → ${msg.level}`);
+        }
+        break;
+      }
 
       case "set_autonomy":
         this.autonomy = msg.config;
@@ -536,7 +552,77 @@ export class Orchestrator {
     await run("git", ["-C", this.project.repoRoot, "fetch", "origin"], this.project.repoRoot);
     for (const s of this.pool.values()) await this.pollAgent(s, true);
     if (this.autonomy.autoSync) await this.autoSyncPass();
+    await this.autopilotPass();
     if (this.autonomy.collisionScan) await this.collisionPass();
+  }
+
+  /**
+   * Autopilot (Phase 2): automatisiert die REVERSIBLE Seite je Sub-Stream gemäß seiner Stufe
+   * (assisted/autopilot) — committen → pushen → PR. EINE Aktion pro Zyklus & Stream, nur wenn
+   * der Stream ruhig ist (nicht laufend, keine Permission-Rückfrage, kein Sync-Konflikt).
+   * Irreversibles (Merge/Force/Aufräumen) bleibt menschlich. Secret-gescannt (fail-closed).
+   */
+  private async autopilotPass(): Promise<void> {
+    if (!this.project) return;
+    for (const s of this.pool.values()) {
+      if (s.role !== "sub" || !s.worktreePath || !s.branch) continue;
+      const st = this.gitState.get(s.agentId);
+      if (!st) continue;
+      const prOpen = s.lastPr?.state === "OPEN";
+      const unpushed = prOpen ? await unpushedCount(s.worktreePath, s.branch) : 0;
+      const { action } = autopilotDecision({
+        level: s.autopilot,
+        role: "sub",
+        status: s.status,
+        dirty: st.dirty,
+        ahead: st.ahead,
+        unpushed,
+        hasPr: !!s.lastPr,
+        prOpen,
+        syncBlocked: this.autoSyncConflicted.has(s.agentId),
+        busyPermission: s.hasPending(),
+        secretBlocked: false, // der echte Secret-Gate sitzt in autoCommit (re-scannt jeden Zyklus)
+      });
+      if (action === "none") continue;
+      try {
+        if (action === "commit") {
+          const res = await autoCommit(s.worktreePath, `chore(autopilot): checkpoint — ${s.label ?? s.branch}`);
+          if (res.secrets?.length) {
+            if (!this.autopilotSecretNotified.has(s.agentId)) {
+              this.autopilotSecretNotified.add(s.agentId);
+              const kinds = [...new Set(res.secrets.map((h) => h.kind))].join(", ");
+              this.emitError(
+                s.agentId,
+                "secret_detected",
+                `Autopilot: Commit gestoppt — mögliches Secret im Worktree (${kinds}). Entferne es; danach committet der Autopilot automatisch weiter.`,
+              );
+            }
+            continue;
+          }
+          this.autopilotSecretNotified.delete(s.agentId);
+          if (res.ok) {
+            this.emit({
+              ...envelope(),
+              type: "agent_event",
+              agentId: s.agentId,
+              event: { kind: "assistant_text", text: "↻ Autopilot: Arbeit lokal committet." },
+            });
+            await this.pollAgent(s, true);
+          }
+        } else if (action === "push") {
+          const r = await pushBranch(s.worktreePath, s.branch, this.project.defaultBranch);
+          if (r.ok) await this.pollAgent(s, true);
+          else this.emitError(s.agentId, r.kind, `Autopilot-Push gestoppt: ${r.error}`);
+        } else if (action === "create_pr") {
+          if (this.autopilotPrTried.get(s.agentId) === st.ahead) continue; // diesen Stand schon versucht
+          this.autopilotPrTried.set(s.agentId, st.ahead);
+          await this.handleCreatePr(s.agentId); // Gate + push + PR; bei rotem Gate kein PR
+          await this.pollAgent(s, true);
+        }
+      } catch (e) {
+        log(`[orchestrator] autopilot ${s.agentId} (${action}) failed: ${String(e)}`);
+      }
+    }
   }
 
   private async pollAgent(s: AgentSession, skipFetch = false): Promise<void> {
@@ -557,16 +643,17 @@ export class Orchestrator {
       this.gitState.set(s.agentId, status);
       this.emitGitStatus(s.agentId, status);
       const pr = await prStatus(s.repoRoot, s.branch);
-      if (pr) {
-        const suppressed = this.suppressedMergedPr.get(s.agentId);
-        // Nach „Mergen & weiterarbeiten": den gemergten Alt-PR ignorieren, bis ein NEUER
-        // (offener) PR aufgeht — dann Unterdrückung aufheben und normal emittieren.
-        if (suppressed !== undefined && pr.number === suppressed && pr.state !== "OPEN") {
-          // ignorieren
-        } else {
-          if (pr.number !== suppressed) this.suppressedMergedPr.delete(s.agentId);
-          this.emit({ ...envelope(), type: "pr_update", agentId: s.agentId, pr });
-        }
+      const suppressed = this.suppressedMergedPr.get(s.agentId);
+      // Nach „Mergen & weiterarbeiten": den gemergten Alt-PR ignorieren, bis ein NEUER
+      // (offener) PR aufgeht. `s.lastPr` spiegelt den Autopilot-relevanten PR-Zustand.
+      if (pr && suppressed !== undefined && pr.number === suppressed && pr.state !== "OPEN") {
+        s.lastPr = undefined;
+      } else if (pr) {
+        if (pr.number !== suppressed) this.suppressedMergedPr.delete(s.agentId);
+        s.lastPr = pr;
+        this.emit({ ...envelope(), type: "pr_update", agentId: s.agentId, pr });
+      } else {
+        s.lastPr = undefined;
       }
     } catch (e) {
       log(`[orchestrator] poll ${s.agentId} failed:`, String(e));
