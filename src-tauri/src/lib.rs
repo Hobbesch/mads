@@ -18,6 +18,10 @@ use tauri::Emitter;
 /// im Frontend (Event `show-about`) statt des starren nativen About-Panels.
 fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
     let about_item = MenuItem::with_id(app, "about", "Über mads", true, None::<&str>)?;
+    // Eigener „Beenden"-Punkt statt des Standard-.quit(): der Standard ruft AppKit
+    // `terminate:` → libc `exit()` → C++-Static-Destruktoren, und ggml-metal (whisper)
+    // bricht dort mit `ggml_abort` ab. Wir beenden stattdessen über graceful_exit (_exit).
+    let quit_item = MenuItem::with_id(app, "quit", "mads beenden", true, Some("CmdOrCtrl+Q"))?;
 
     let app_menu = SubmenuBuilder::new(app, "mads")
         .item(&about_item)
@@ -28,7 +32,7 @@ fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
         .hide_others()
         .show_all()
         .separator()
-        .quit()
+        .item(&quit_item)
         .build()?;
 
     let edit_menu = SubmenuBuilder::new(app, "Bearbeiten")
@@ -70,10 +74,12 @@ pub fn run() {
             build_app_menu(app)?;
             Ok(())
         })
-        .on_menu_event(|app, event| {
-            if event.id().as_ref() == "about" {
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "about" => {
                 let _ = app.emit("show-about", ());
             }
+            "quit" => graceful_exit(app),
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             start_sidecar,
@@ -92,6 +98,25 @@ pub fn run() {
             dictation_stop,
             dictation_cancel
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Jeder reguläre Exit-Pfad (Dock-Beenden, letztes Fenster zu …) wird abgefangen
+            // und über graceful_exit beendet — sonst crasht der ggml-metal-Teardown.
+            if let tauri::RunEvent::Exit = event {
+                graceful_exit(app_handle);
+            }
+        });
+}
+
+/// Sauberer, harter Prozess-Exit: erst den Sidecar-Child beenden (sonst verwaist er),
+/// dann via `_exit()` raus — das UMGEHT die C++-Static-Destruktoren (`__cxa_finalize`).
+/// Nötig, weil ggml-metal (whisper) in seinem Device-Destructor `ggml_abort` aufruft und
+/// die App sonst beim Beenden mit „unerwartet beendet" (SIGABRT) abstürzt.
+fn graceful_exit(app: &tauri::AppHandle) -> ! {
+    use tauri::Manager;
+    if let Some(state) = app.try_state::<SidecarState>() {
+        state.kill_child();
+    }
+    unsafe { libc::_exit(0) }
 }

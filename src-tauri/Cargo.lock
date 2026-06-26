@@ -2234,6 +2234,7 @@ dependencies = [
  "base64 0.22.1",
  "cpal",
  "ignore",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

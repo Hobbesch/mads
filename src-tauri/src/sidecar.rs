@@ -24,6 +24,19 @@ pub struct SidecarState {
     stdin: Mutex<Option<ChildStdin>>,
 }
 
+impl SidecarState {
+    /// Den Sidecar-Child-Prozess beenden — beim App-Quit nötig, sonst verwaist der
+    /// Node-Prozess (wir verlassen den App-Prozess hart via _exit, siehe lib.rs).
+    pub fn kill_child(&self) {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
 /// Channel-Payload Core -> Frontend. Spiegelt shared/protocol.ts `SidecarChannelEvent`.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
