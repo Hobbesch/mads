@@ -857,7 +857,21 @@ export const useStore = create<MadsState>((set) => {
       });
     },
 
-    selectAgent: (id) => set({ selectedId: id }),
+    selectAgent: (id) => {
+      set({ selectedId: id });
+      // Datei-Basis dem gewählten Stream folgen lassen — sonst betrachtet man leicht die
+      // falschen Dateien (anderer/alter Kontext). Sub → sein Worktree; Integrator bzw. ohne
+      // Worktree → Projekt-Root (main-Checkout). Nur umschalten, wenn sich der Pfad ändert.
+      const st = useStore.getState();
+      const a = st.agents[id];
+      if (!a) return;
+      const target: ExplorerRoot | null = a.worktreePath
+        ? { kind: "worktree", agentId: id, path: a.worktreePath }
+        : st.project
+          ? { kind: "project", path: st.project.repoRoot }
+          : null;
+      if (target && st.activeRoot?.path !== target.path) void st.setActiveRoot(target);
+    },
 
     dismissEscalations: () => set({ escalations: [] }),
 
