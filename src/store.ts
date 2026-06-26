@@ -922,8 +922,12 @@ export const useStore = create<MadsState>((set) => {
     },
 
     resumeAll: async () => {
-      // Nur echt fortsetzbare Streams — gemergte „Erledigt"-Reste NICHT auto-fortsetzen.
-      const list = useStore.getState().resumables.filter((r) => !r.merged);
+      // NUR Streams fortsetzen, die beim Beenden LIEFEN (durch den Shutdown unterbrochene
+      // Arbeit) — nicht idle/wartende/erledigte und keine gemergten Reste. Wer einen idle
+      // Stream zurückholen will, klickt ihn einzeln an.
+      const list = useStore
+        .getState()
+        .resumables.filter((r) => !r.merged && (r.status === "running" || r.status === "starting"));
       for (const r of list) await useStore.getState().resumeAgent(r);
     },
 

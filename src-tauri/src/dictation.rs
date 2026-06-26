@@ -8,7 +8,7 @@
 //! Kommandos: whisper_model_status, whisper_download_model, dictation_start,
 //! dictation_stop, dictation_cancel. Auto-Sprache (multilingual, large-v3-turbo).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -33,7 +33,7 @@ pub struct DictationState {
     samples: Arc<Mutex<Vec<f32>>>,                       // gesammelte Mono-Samples
     active: Mutex<Option<(Sender<()>, JoinHandle<()>)>>, // Stop-Signal + Thread der laufenden Aufnahme
     input_rate: Mutex<u32>,                              // Sample-Rate des Geräts
-    ctx: Mutex<Option<WhisperContext>>,                  // gecachtes Modell (teurer Load)
+    ctx: Arc<Mutex<Option<WhisperContext>>>,             // gecachtes Modell (teurer Load; im Hintergrund vorgeladen)
 }
 
 fn model_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -114,9 +114,21 @@ pub async fn whisper_download_model(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Lädt das Modell in den Cache (idempotent). Wird beim Aufnahme-Start im Hintergrund
+/// vorgeladen, damit der Stop nicht erst Sekunden auf den ~1,5-GB-Load warten muss.
+fn ensure_model(ctx: &Arc<Mutex<Option<WhisperContext>>>, path: &Path) -> Result<(), String> {
+    let mut g = ctx.lock().unwrap();
+    if g.is_none() {
+        let mut cp = WhisperContextParameters::new();
+        cp.use_gpu(true); // dank `metal`-Feature
+        *g = Some(WhisperContext::new_with_params(path, cp).map_err(|e| format!("Modell laden: {e}"))?);
+    }
+    Ok(())
+}
+
 /// Startet die Aufnahme. Liefert einen Fehler (z. B. Mikrofon verweigert / kein Gerät) sofort.
 #[tauri::command]
-pub fn dictation_start(state: tauri::State<'_, DictationState>) -> Result<(), String> {
+pub fn dictation_start(app: AppHandle, state: tauri::State<'_, DictationState>) -> Result<(), String> {
     if state.active.lock().unwrap().is_some() {
         return Ok(()); // läuft bereits
     }
@@ -140,6 +152,15 @@ pub fn dictation_start(state: tauri::State<'_, DictationState>) -> Result<(), St
         Ok(Ok(rate)) => {
             *state.input_rate.lock().unwrap() = rate;
             *state.active.lock().unwrap() = Some((stop_tx, handle));
+            // Modell schon WÄHREND der Aufnahme im Hintergrund laden → Stop reagiert sofort.
+            if let Ok(p) = model_path(&app) {
+                if p.exists() {
+                    let ctx = state.ctx.clone();
+                    std::thread::spawn(move || {
+                        let _ = ensure_model(&ctx, &p);
+                    });
+                }
+            }
             Ok(())
         }
         Ok(Err(e)) => {
@@ -170,18 +191,12 @@ pub fn dictation_stop(
     }
     let pcm = resample_to_16k(&samples, rate);
 
-    let mut guard = state.ctx.lock().unwrap();
-    if guard.is_none() {
-        let p = model_path(&app)?;
-        if !p.exists() {
-            return Err("Sprachmodell nicht installiert".into());
-        }
-        let mut cp = WhisperContextParameters::new();
-        cp.use_gpu(true); // dank `metal`-Feature
-        let ctx =
-            WhisperContext::new_with_params(&p, cp).map_err(|e| format!("Modell laden: {e}"))?;
-        *guard = Some(ctx);
+    let p = model_path(&app)?;
+    if !p.exists() {
+        return Err("Sprachmodell nicht installiert".into());
     }
+    ensure_model(&state.ctx, &p)?; // wartet ggf. auf den Hintergrund-Preload
+    let guard = state.ctx.lock().unwrap();
     transcribe(guard.as_ref().unwrap(), &pcm)
 }
 

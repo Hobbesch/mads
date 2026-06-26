@@ -3041,3 +3041,20 @@ body.col-resizing {
 .composer-note.err {
   color: #d33b30;
 }
+
+/* Diktat: expliziter Stopp-Knopf (neben dem roten „on air"-Mikro). */
+.composer button.composer-btn.dict-stop {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+}
+.composer button.composer-btn.dict-stop:hover {
+  background: var(--panel-2);
+}
+
+/* Resume-Banner: beim Beenden laufende (unterbrochene) Streams hervorheben. */
+.resume-banner button.was-running {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}

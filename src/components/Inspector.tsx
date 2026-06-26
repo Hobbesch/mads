@@ -37,7 +37,8 @@ export function Inspector() {
   // Spracheingabe (lokales Whisper)
   const whisper = useStore((s) => s.whisper);
   const dictation = useStore((s) => s.dictation);
-  const toggleDictation = useStore((s) => s.toggleDictation);
+  const startDictation = useStore((s) => s.startDictation);
+  const stopDictation = useStore((s) => s.stopDictation);
 
   // Auto-wachsende Composer-Höhe (Textarea): bei jeder Entwurfs-Änderung neu messen.
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -231,32 +232,54 @@ export function Inspector() {
             }}
             placeholder={`Nachricht an ${agent.label}…  (Enter senden · ⇧↵ Zeilenumbruch · ⌘V Screenshot)`}
           />
-          <button
-            type="button"
-            className={`composer-btn mic${dictation.recording ? " recording" : ""}`}
-            title={
-              whisper.downloading
-                ? `Sprachmodell lädt… ${Math.round(whisper.progress * 100)}%`
-                : !whisper.installed
-                  ? "Sprachmodell (~1,5 GB) für Spracheingabe herunterladen"
-                  : dictation.recording
-                    ? "Aufnahme stoppen & Text einfügen"
-                    : dictation.transcribing
-                      ? "Transkribiere…"
-                      : "Diktieren — klicken (an/aus) oder ⇧Leertaste halten"
-            }
-            aria-label="Diktieren"
-            disabled={dictation.transcribing || whisper.downloading}
-            onClick={() => void toggleDictation()}
-          >
-            {whisper.downloading ? (
+          {whisper.downloading ? (
+            <button type="button" className="composer-btn mic" disabled title={`Sprachmodell lädt… ${Math.round(whisper.progress * 100)}%`}>
               <span className="mic-pct">{Math.round(whisper.progress * 100)}%</span>
-            ) : dictation.transcribing ? (
+            </button>
+          ) : dictation.transcribing ? (
+            <button type="button" className="composer-btn mic" disabled title="Transkribiere…" aria-label="Transkribiere">
               <span className="tl-spinner" />
-            ) : (
+            </button>
+          ) : dictation.recording ? (
+            <>
+              {/* „On air": rot/pulsierend; Klick stoppt ebenfalls. */}
+              <button
+                type="button"
+                className="composer-btn mic recording"
+                title="Aufnahme läuft — klicken oder Stopp-Knopf drücken"
+                aria-label="Aufnahme läuft (klicken zum Stoppen)"
+                onClick={() => void stopDictation()}
+              >
+                <Mic size={16} aria-hidden="true" />
+              </button>
+              {/* Expliziter Stopp-Knopf: beendet, transkribiert, fügt ein (sendet NICHT). */}
+              <button
+                type="button"
+                className="composer-btn dict-stop"
+                title="Aufnahme stoppen & Text einfügen (wird noch nicht gesendet)"
+                aria-label="Aufnahme stoppen und einfügen"
+                onClick={() => void stopDictation()}
+              >
+                <svg className="icon-stop" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                  <rect width="16" height="16" rx="2" fill="currentColor" />
+                </svg>
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="composer-btn mic"
+              title={
+                !whisper.installed
+                  ? "Sprachmodell (~1,5 GB) für Spracheingabe herunterladen"
+                  : "Diktieren — klicken zum Starten (oder ⇧Leertaste halten)"
+              }
+              aria-label="Diktieren"
+              onClick={() => void startDictation()}
+            >
               <Mic size={16} aria-hidden="true" />
-            )}
-          </button>
+            </button>
+          )}
           {busy ? (
             <button
               type="button"

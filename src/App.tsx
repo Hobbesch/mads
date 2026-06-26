@@ -122,6 +122,9 @@ export default function App() {
   // Echt fortsetzbare Streams vs. erledigte (gemergte) mit lokalen Resten → getrennt anbieten.
   const liveResumables = resumables.filter((r) => !r.merged);
   const doneResumables = resumables.filter((r) => r.merged);
+  const wasRunning = (r: { status: string }) => r.status === "running" || r.status === "starting";
+  // Beim Shutdown unterbrochene (laufende) Streams — nur die werden gesammelt fortgesetzt.
+  const interrupted = liveResumables.filter(wasRunning);
 
   return (
     <div className="app">
@@ -220,16 +223,35 @@ export default function App() {
         {liveResumables.length > 0 && (
           <div className="resume-banner">
             <span className="resume-label">↩︎ {liveResumables.length} Stream(s) fortsetzbar:</span>
-            {liveResumables.map((r) => (
-              <button key={r.agentId} onClick={() => void resumeAgent(r)} title={r.sessionId ? "Session fortsetzen" : "Frischer Start im bestehenden Worktree"}>
-                {r.label}
-                {r.branch ? ` · ${r.branch}` : ""}
-                {!r.sessionId ? " ⟲" : ""}
-              </button>
-            ))}
-            {liveResumables.length > 1 && (
-              <button className="resume-all" onClick={() => void resumeAll()}>
-                Alle fortsetzen
+            {liveResumables.map((r) => {
+              const running = wasRunning(r);
+              return (
+                <button
+                  key={r.agentId}
+                  className={running ? "was-running" : ""}
+                  onClick={() => void resumeAgent(r)}
+                  title={
+                    running
+                      ? "Lief beim Beenden — Arbeit fortsetzen"
+                      : r.sessionId
+                        ? "War pausiert/wartend — Session fortsetzen"
+                        : "Frischer Start im bestehenden Worktree"
+                  }
+                >
+                  {running ? "● " : ""}
+                  {r.label}
+                  {r.branch ? ` · ${r.branch}` : ""}
+                  {!r.sessionId ? " ⟲" : ""}
+                </button>
+              );
+            })}
+            {interrupted.length > 0 && (
+              <button
+                className="resume-all"
+                onClick={() => void resumeAll()}
+                title="Nur die beim Beenden laufenden (unterbrochenen) Streams fortsetzen"
+              >
+                Unterbrochene fortsetzen ({interrupted.length})
               </button>
             )}
           </div>
