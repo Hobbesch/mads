@@ -495,6 +495,7 @@ export type EscalationKind =
   | "consume_failed"
   | "ownership_trespass" // Agent editiert eine Region, die einem anderen Stream gehört
   | "secret_detected" // Secret im zu pushenden Diff (LEAK-1: Push fail-closed blockiert)
+  | "main_edited" // Integrator hat main direkt geändert → in Sub-Stream auslagern (proaktiver Hinweis)
   | "max_budget";
 
 export interface SidecarErrorMsg extends BaseMsg {

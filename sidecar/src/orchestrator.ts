@@ -35,6 +35,8 @@ export class Orchestrator {
   // bei rotem Gate); Secret-Eskalation pro Episode nur einmal melden.
   private readonly autopilotPrTried = new Map<string, number>();
   private readonly autopilotSecretNotified = new Set<string>();
+  // Proaktiver Hinweis „main direkt geändert" pro Integrator nur einmal je dirty-Episode.
+  private readonly mainDirtyNotified = new Set<string>();
   // 3.2: Integrationen serialisieren (kein Merge-Race zweier fast gleichzeitiger Merges).
   private integrateLock: Promise<void> = Promise.resolve();
   // A: PR-Erstellungen serialisieren, damit die ADR-Nummern-Vergabe (Scan aller Worktrees +
@@ -751,6 +753,19 @@ export class Orchestrator {
       if (s.role === "integrator") {
         const status = await gitStatus(s.repoRoot, s.repoRoot, defaultBranch, defaultBranch, skipFetch);
         this.gitState.set(s.agentId, status);
+        // Proaktiv: direkte Edits am main-Checkout erkennen und EINMAL je Episode darauf hinweisen
+        // (main ändert sich nur über grüne PR-Merges → in Sub-Stream auslagern). Status-neutral.
+        if (status.dirty && !this.mainDirtyNotified.has(s.agentId)) {
+          this.mainDirtyNotified.add(s.agentId);
+          this.emitError(
+            s.agentId,
+            "main_edited",
+            "Du hast den main-Checkout direkt geändert. main bleibt nur über grün-getestete PR-Merges aktuell — " +
+              "lager die Änderungen aus: Main-Stream wählen → „In Sub-Stream auslagern“.",
+          );
+        } else if (!status.dirty) {
+          this.mainDirtyNotified.delete(s.agentId);
+        }
         this.emitGitStatus(s.agentId, status);
         return;
       }

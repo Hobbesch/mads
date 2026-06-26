@@ -680,7 +680,10 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "error":
-        if (msg.agentId) {
+        if (msg.agentId && msg.code === "main_edited") {
+          // Proaktiver Hinweis (kein Fehler-Status): main-Edits → auslagern. Status bleibt unberührt.
+          notice(msg.agentId, "accent", "↗ main direkt geändert — in Sub-Stream auslagern empfohlen");
+        } else if (msg.agentId) {
           patchAgent(msg.agentId, { status: msg.recoverable ? "escalation" : "error" });
           notice(msg.agentId, "err", `✖ ${msg.code}: ${msg.message}`);
         } else if (useStore.getState().projectStatus === "opening") {
