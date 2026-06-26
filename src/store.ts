@@ -307,6 +307,8 @@ export interface MadsState {
   commitAgent: (id: string) => Promise<void>;
   createPr: (id: string) => Promise<void>;
   syncBranch: (id: string) => Promise<void>;
+  /** Geführte Konfliktlösung: beauftragt den Agenten, den Rebase-Konflikt im Worktree zu lösen. */
+  resolveConflict: (id: string) => Promise<void>;
   /** Integrator-only: main per fast-forward auf origin/<default> nachziehen (kein rebase). */
   updateMain: (id: string) => Promise<void>;
   integratePr: (id: string, keep?: boolean) => Promise<void>;
@@ -987,6 +989,22 @@ export const useStore = create<MadsState>((set) => {
     syncBranch: async (id) => {
       notice(id, "accent", "▶ Sync (rebase onto origin/main)");
       await sendHost({ ...envelope(), type: "sync_branch", agentId: id });
+    },
+
+    resolveConflict: async (id) => {
+      // Geführte Konfliktlösung (3.4): den Agenten den Rebase IN SEINEM Worktree lösen lassen
+      // (reine git-Arbeit; kein Push/PR/Merge — das macht mads). Das syncBlocked-Flag löscht der
+      // Sidecar automatisch, sobald der Branch wieder aufgeholt hat (behind=0).
+      const db = useStore.getState().project?.defaultBranch ?? "main";
+      notice(id, "accent", "▶ Konflikt lösen (Agent rebaset im Worktree)");
+      await useStore.getState().sendInput(
+        id,
+        `Dein Branch hat einen Rebase-Konflikt mit origin/${db}. Bitte löse ihn IN DIESEM Worktree: ` +
+          `führe \`git rebase origin/${db}\` aus, behebe die Konfliktmarkierungen in den betroffenen Dateien, ` +
+          `dann \`git add -A && git rebase --continue\` (ggf. mehrfach, bis der Rebase durch ist). ` +
+          `NICHT pushen, keinen PR, keinen Merge — Push/PR/Integration übernimmt mads. ` +
+          `Fasse am Ende kurz zusammen, welche Dateien du angepasst hast.`,
+      );
     },
 
     integratePr: async (id, keep = false) => {

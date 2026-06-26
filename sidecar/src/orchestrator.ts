@@ -35,6 +35,8 @@ export class Orchestrator {
   // bei rotem Gate); Secret-Eskalation pro Episode nur einmal melden.
   private readonly autopilotPrTried = new Map<string, number>();
   private readonly autopilotSecretNotified = new Set<string>();
+  // 3.2: Integrationen serialisieren (kein Merge-Race zweier fast gleichzeitiger Merges).
+  private integrateLock: Promise<void> = Promise.resolve();
 
   async dispatch(msg: HostMessage): Promise<void> {
     switch (msg.type) {
@@ -278,11 +280,30 @@ export class Orchestrator {
   }
 
   /**
-   * Integrator-Merge (Invariante 1: nur diese Op landet auf main). Serialisiert,
-   * gegated: holt frischen git-/PR-Status, prüft das Vor-Merge-Gate, merged nur bei
-   * grün, räumt danach den Worktree auf. Sub-Agents haben KEINE Merge-Op.
+   * Integrator-Merge (Invariante 1: nur diese Op landet auf main). 3.2: über `integrateLock`
+   * SERIALISIERT — zwei fast gleichzeitige Merges würden sich gegenseitig veralten lassen.
+   * Jede Integration wartet auf die vorige; `doIntegrate` holt oben jeweils frischen
+   * git-/PR-Status + prüft das Vor-Merge-Gate neu (sieht also den Stand nach dem Vorgänger).
    */
   private async handleIntegrate(
+    agentId: string,
+    method: "squash" | "merge" | "rebase",
+    keepBranch = false,
+  ): Promise<void> {
+    const prev = this.integrateLock;
+    let release!: () => void;
+    this.integrateLock = new Promise<void>((r) => (release = r));
+    await prev.catch(() => {});
+    try {
+      await this.doIntegrate(agentId, method, keepBranch);
+    } finally {
+      release();
+    }
+  }
+
+  /** gegated: holt frischen git-/PR-Status, prüft das Vor-Merge-Gate, merged nur bei grün,
+   *  rebaset danach die anderen Streams (3.1) und räumt auf bzw. behält den Branch. */
+  private async doIntegrate(
     agentId: string,
     method: "squash" | "merge" | "rebase",
     keepBranch = false,
@@ -349,6 +370,7 @@ export class Orchestrator {
         },
       });
       this.persist();
+      await this.rebaseOthersOnMain(agentId); // 3.1: die anderen Streams sofort nachziehen
       return;
     }
 
@@ -371,6 +393,7 @@ export class Orchestrator {
     s.status = "done";
     await s.stop(false); // Query schließen; Karte bleibt als "merged" sichtbar
     this.persist(); // gemergten Agenten aus der Resume-Registry entfernen
+    await this.rebaseOthersOnMain(agentId); // 3.1: origin/main bewegte sich → andere nachziehen
   }
 
   private emitMergeResult(agentId: string, ok: boolean, reasons: string[], prNumber?: number): void {
@@ -641,6 +664,9 @@ export class Orchestrator {
       if (!s.branch || !s.worktreePath) return; // Sub ohne Worktree → nichts zu pollen
       const status = await gitStatus(s.repoRoot, s.worktreePath, s.branch, defaultBranch, skipFetch);
       this.gitState.set(s.agentId, status);
+      // 3.4: Hat der Branch wieder aufgeholt (behind=0), ist ein zuvor pausierter Sync-Konflikt
+      // gelöst (manuell oder vom Agenten rebaset) → Auto-Sync-Pause aufheben (Flag clearen).
+      if (status.behind === 0 && this.autoSyncConflicted.has(s.agentId)) this.autoSyncConflicted.delete(s.agentId);
       this.emitGitStatus(s.agentId, status);
       const pr = await prStatus(s.repoRoot, s.branch);
       const suppressed = this.suppressedMergedPr.get(s.agentId);
@@ -663,31 +689,49 @@ export class Orchestrator {
   /** Auto-Sync: idle, saubere Sub-Branches, die hinter origin/<default> liegen, automatisch rebasen. */
   private async autoSyncPass(): Promise<void> {
     if (!this.project) return;
+    for (const s of this.pool.values()) await this.syncOne(s);
+  }
+
+  /** Einen sauberen, zurückliegenden Sub-Branch onto origin/<default> rebasen (force-with-lease).
+   *  Konflikt → an den Menschen eskalieren + Auto-Sync pausieren (autoSyncConflicted). */
+  private async syncOne(s: AgentSession): Promise<void> {
+    if (!this.project || s.role !== "sub" || !s.worktreePath || !s.branch) return;
+    if (s.status === "running") return; // nicht unter laufender Arbeit rebasen
+    if (this.syncing.has(s.agentId) || this.autoSyncConflicted.has(s.agentId)) return;
+    const st = this.gitState.get(s.agentId);
+    if (!st || st.behind <= 0 || st.dirty) return; // nur saubere, zurückliegende Branches
+    this.syncing.add(s.agentId);
+    const res = await syncBranch(s.worktreePath, s.branch, this.project.defaultBranch);
+    this.syncing.delete(s.agentId);
+    if (res.ok) {
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId: s.agentId,
+        event: {
+          kind: "assistant_text",
+          text: `↻ Auto-Sync: rebaset onto origin/${this.project.defaultBranch} (war ${st.behind} behind).`,
+        },
+      });
+      await this.pollAgent(s, true);
+    } else {
+      this.autoSyncConflicted.add(s.agentId);
+      this.emitError(s.agentId, res.kind, `Auto-Sync gestoppt (manuell „Sync" nötig): ${res.error}`);
+    }
+  }
+
+  /**
+   * 3.1: Nach einem Merge nach origin/<default> ALLE anderen sauberen Sub-Branches SOFORT
+   * nachziehen (statt bis zum nächsten 25s-Poll zu warten) — das Drift-Fenster, das die
+   * meisten Rebase-Konflikte erzeugt, schrumpft auf ~0. Jeder andere Stream wird frisch
+   * gepollt (neuer behind-Stand), dann rebaset. Dirty/Konflikt → wie beim Auto-Sync behandelt.
+   */
+  private async rebaseOthersOnMain(exceptAgentId: string): Promise<void> {
+    if (!this.project) return;
     for (const s of this.pool.values()) {
-      if (s.role !== "sub" || !s.worktreePath || !s.branch) continue;
-      if (s.status === "running") continue; // nicht unter laufender Arbeit rebasen
-      if (this.syncing.has(s.agentId) || this.autoSyncConflicted.has(s.agentId)) continue;
-      const st = this.gitState.get(s.agentId);
-      if (!st || st.behind <= 0 || st.dirty) continue; // nur saubere, zurückliegende Branches
-      this.syncing.add(s.agentId);
-      const res = await syncBranch(s.worktreePath, s.branch, this.project.defaultBranch);
-      this.syncing.delete(s.agentId);
-      if (res.ok) {
-        this.emit({
-          ...envelope(),
-          type: "agent_event",
-          agentId: s.agentId,
-          event: {
-            kind: "assistant_text",
-            text: `↻ Auto-Sync: rebaset onto origin/${this.project.defaultBranch} (war ${st.behind} behind).`,
-          },
-        });
-        await this.pollAgent(s, true);
-      } else {
-        // semantischer/Push-Konflikt → an den Menschen eskalieren, Auto-Sync pausieren
-        this.autoSyncConflicted.add(s.agentId);
-        this.emitError(s.agentId, res.kind, `Auto-Sync gestoppt (manuell „Sync" nötig): ${res.error}`);
-      }
+      if (s.agentId === exceptAgentId || s.role !== "sub" || !s.worktreePath || !s.branch) continue;
+      await this.pollAgent(s); // frischer behind-Stand (origin/main hat sich gerade bewegt)
+      await this.syncOne(s);
     }
   }
 

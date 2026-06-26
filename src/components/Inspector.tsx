@@ -26,6 +26,7 @@ export function Inspector() {
   const commitAgent = useStore((s) => s.commitAgent);
   const createPr = useStore((s) => s.createPr);
   const syncBranch = useStore((s) => s.syncBranch);
+  const resolveConflict = useStore((s) => s.resolveConflict);
   const updateMain = useStore((s) => s.updateMain);
   const continueStream = useStore((s) => s.continueStream);
   const integratePr = useStore((s) => s.integratePr);
@@ -244,6 +245,15 @@ export function Inspector() {
           {/* Sub: rebase onto origin/<default> + force-with-lease. NIE für den Integrator —
               dessen „behind" betrifft den main-Checkout, der per fast-forward (nicht rebase!)
               nachgezogen wird. */}
+          {live && agent.role === "sub" && agent.syncBlocked && (
+            <button
+              className="step-primary"
+              title="Den Agenten den Rebase-Konflikt in seinem Worktree lösen lassen (git rebase + Konflikte beheben, kein Push/PR)."
+              onClick={() => void resolveConflict(selectedId)}
+            >
+              ⚠ Konflikt lösen
+            </button>
+          )}
           {live && agent.role === "sub" && (agent.behind > 0 || agent.syncBlocked) && (
             <button
               disabled={!!syncDisabledReason(agent)}
