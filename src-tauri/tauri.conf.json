@@ -41,7 +41,9 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "signingIdentity": "Developer ID Application: Medici Engineering GmbH (726765YMVL)"
+      "signingIdentity": "Developer ID Application: Medici Engineering GmbH (726765YMVL)",
+      "entitlements": "Entitlements.plist",
+      "minimumSystemVersion": "11.0"
     }
   }
 }

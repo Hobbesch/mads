@@ -9,6 +9,7 @@
  */
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { startSidecar, sendHost, envelope, pickFolder } from "./ipc";
 import type {
   AgentStatus,
@@ -43,6 +44,20 @@ export interface TodoItem {
 }
 
 export type NoticeTone = "info" | "warn" | "err" | "ok" | "accent";
+
+/** Status des lokalen Whisper-Sprachmodells (Spracheingabe). */
+export interface WhisperVM {
+  installed: boolean;
+  checked: boolean;
+  downloading: boolean;
+  progress: number; // 0..1
+}
+/** Laufzeit-Status des Diktats (Aufnahme/Transkription). */
+export interface DictationVM {
+  recording: boolean;
+  transcribing: boolean;
+  error?: string;
+}
 
 export type TimelineEvent =
   | { id: string; kind: "user"; text: string; images?: number }
@@ -204,6 +219,9 @@ export interface MadsState {
   /** Einmaliger GitHub-Abgleich beim Öffnen (FF main / aufgeräumt / Reste) — dismissbar. */
   reconcileSummary?: ReconcileSummaryMsg;
   collisions: Collision[];
+  // ── Spracheingabe (lokales Whisper) ──
+  whisper: WhisperVM;
+  dictation: DictationVM;
   autonomy: AutonomyConfig;
   selectedId?: string;
   debugLog: string[];
@@ -277,6 +295,14 @@ export interface MadsState {
   pollProject: () => Promise<void>;
   resumeAgent: (r: ResumableAgent) => Promise<void>;
   resumeAll: () => Promise<void>;
+  // ── Spracheingabe ──
+  checkWhisper: () => Promise<void>;
+  downloadWhisper: () => Promise<void>;
+  /** Mikro-Icon: Toggle (Start/Stop). */
+  toggleDictation: () => Promise<void>;
+  /** Hotkey: Push-to-talk. */
+  startDictation: () => Promise<void>;
+  stopDictation: () => Promise<void>;
   /** Erledigten (gemergten) Stream mit lokalen Resten endgültig aufräumen (Worktree+Branch weg). */
   cleanupResumable: (r: ResumableAgent) => Promise<void>;
   dismissReconcile: () => void;
@@ -647,6 +673,8 @@ export const useStore = create<MadsState>((set) => {
     resumables: [],
     reconcileSummary: undefined,
     collisions: [],
+    whisper: { installed: false, checked: false, downloading: false, progress: 0 },
+    dictation: { recording: false, transcribing: false },
     autonomy: { autoSync: true, collisionScan: true },
     selectedId: undefined,
     debugLog: [],
@@ -696,6 +724,7 @@ export const useStore = create<MadsState>((set) => {
 
     init: async () => {
       set({ sidecar: { status: "starting", sdkAvailable: false } });
+      void useStore.getState().checkWhisper(); // Sprachmodell-Status für das Mikro-Icon
       try {
         await startSidecar(handleChannelEvent);
       } catch (e) {
@@ -917,6 +946,75 @@ export const useStore = create<MadsState>((set) => {
     },
 
     dismissReconcile: () => set({ reconcileSummary: undefined }),
+
+    // ── Spracheingabe (lokales Whisper) ──────────────────────────────────────
+    checkWhisper: async () => {
+      try {
+        const st = (await invoke("whisper_model_status")) as { installed: boolean };
+        set((s) => ({ whisper: { ...s.whisper, installed: st.installed, checked: true } }));
+      } catch {
+        set((s) => ({ whisper: { ...s.whisper, checked: true } }));
+      }
+    },
+
+    downloadWhisper: async () => {
+      if (useStore.getState().whisper.downloading) return;
+      set((s) => ({ whisper: { ...s.whisper, downloading: true, progress: 0 } }));
+      const un = await listen<{ downloaded: number; total: number }>("whisper-download-progress", (e) => {
+        const p = e.payload.total > 0 ? e.payload.downloaded / e.payload.total : 0;
+        set((s) => ({ whisper: { ...s.whisper, progress: p } }));
+      });
+      try {
+        await invoke("whisper_download_model");
+        set((s) => ({ whisper: { ...s.whisper, installed: true, downloading: false, progress: 1 } }));
+      } catch (e) {
+        set((s) => ({
+          whisper: { ...s.whisper, downloading: false },
+          dictation: { ...s.dictation, error: `Modell-Download fehlgeschlagen: ${String(e)}` },
+        }));
+      } finally {
+        un();
+      }
+    },
+
+    startDictation: async () => {
+      const s = useStore.getState();
+      if (!s.selectedId || s.dictation.recording || s.dictation.transcribing) return;
+      if (!s.whisper.installed) {
+        void s.downloadWhisper(); // erst Modell laden — dann erneut auslösen
+        return;
+      }
+      set(() => ({ dictation: { recording: true, transcribing: false, error: undefined } }));
+      try {
+        await invoke("dictation_start");
+      } catch (e) {
+        set(() => ({ dictation: { recording: false, transcribing: false, error: `Mikrofon: ${String(e)}` } }));
+      }
+    },
+
+    stopDictation: async () => {
+      const s = useStore.getState();
+      if (!s.dictation.recording) return;
+      const id = s.selectedId;
+      set((st) => ({ dictation: { ...st.dictation, recording: false, transcribing: true } }));
+      try {
+        const text = ((await invoke("dictation_stop")) as string).trim();
+        if (text && id) {
+          const cur = useStore.getState().drafts[id] ?? "";
+          useStore.getState().setDraft(id, cur ? `${cur} ${text}` : text);
+        }
+        set(() => ({ dictation: { recording: false, transcribing: false } }));
+      } catch (e) {
+        set(() => ({ dictation: { recording: false, transcribing: false, error: `Transkription: ${String(e)}` } }));
+      }
+    },
+
+    toggleDictation: async () => {
+      const s = useStore.getState();
+      if (s.dictation.transcribing) return;
+      if (s.dictation.recording) await s.stopDictation();
+      else await s.startDictation();
+    },
 
     resumeAgent: async (r) => {
       const project = useStore.getState().project;

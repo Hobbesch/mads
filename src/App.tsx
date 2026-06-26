@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "./store";
 import { ActivityRail } from "./components/ActivityRail";
@@ -70,6 +70,51 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Spracheingabe-Hotkey: ⇧Leertaste = Push-to-talk (halten). Im Composer-Textarea wird
+  // die Leertaste abgefangen (kein Leerzeichen); in ANDEREN Editierfeldern (CodeMirror,
+  // Datei-Filter …) NICHT gekapert, damit dort normal getippt werden kann.
+  const pttActive = useRef(false);
+  useEffect(() => {
+    const editable = (el: Element | null): boolean => {
+      if (!el) return false;
+      const h = el as HTMLElement;
+      if (h.isContentEditable) return true; // CodeMirror (cm-content)
+      const tag = h.tagName;
+      return tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT";
+    };
+    const shouldHandle = (): boolean => {
+      const s = useStore.getState();
+      if (!s.selectedId) return false;
+      const ae = document.activeElement;
+      if (ae && (ae as HTMLElement).classList?.contains("composer-input")) return true; // Composer → diktieren
+      return !editable(ae); // anderes Eingabefeld → nicht kapern; sonst (Body etc.) → ja
+    };
+    const onDown = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || !e.shiftKey || e.repeat || pttActive.current) return;
+      if (!shouldHandle()) return;
+      const s = useStore.getState();
+      if (s.dictation.recording || s.dictation.transcribing || s.whisper.downloading) {
+        if (!s.whisper.installed) e.preventDefault();
+        return;
+      }
+      e.preventDefault();
+      pttActive.current = true;
+      void s.startDictation();
+    };
+    const onUp = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || !pttActive.current) return;
+      pttActive.current = false;
+      e.preventDefault();
+      void useStore.getState().stopDictation();
+    };
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+    };
   }, []);
 
   const lastEscalation = escalations[escalations.length - 1];

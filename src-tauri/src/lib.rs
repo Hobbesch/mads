@@ -1,6 +1,11 @@
+mod dictation;
 mod files;
 mod sidecar;
 
+use dictation::{
+    dictation_cancel, dictation_start, dictation_stop, whisper_download_model, whisper_model_status,
+    DictationState,
+};
 use files::{
     mads_read_dir, mads_read_file, mads_register_root, mads_write_file, mads_write_file_bytes,
     FsScope,
@@ -60,6 +65,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init()) // doc 07 §4.2 — für watch + Plugin-Scope
         .manage(SidecarState::default())
         .manage(FsScope::default()) // doc 07 §4.2 — Laufzeit-Allow-Liste
+        .manage(DictationState::default()) // Spracheingabe (Whisper)
         .setup(|app| {
             build_app_menu(app)?;
             Ok(())
@@ -77,7 +83,12 @@ pub fn run() {
             mads_read_file,
             mads_write_file,
             mads_write_file_bytes,
-            mads_register_root
+            mads_register_root,
+            whisper_model_status,
+            whisper_download_model,
+            dictation_start,
+            dictation_stop,
+            dictation_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

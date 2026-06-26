@@ -1,0 +1,12 @@
+# whisper.cpp/ggml fügt auf ARM sonst `-mcpu=native` hinzu — das lehnt Apple clang ab
+# ("unsupported argument 'native' to option '-mcpu='"). whisper-rs-sys reicht GGML_*-
+# Umgebungsvariablen als CMake-Defines durch, daher hier global GGML_NATIVE=OFF.
+# Performance bleibt gut: die Inferenz läuft über Metal (GPU); die CPU-Pfade nutzen
+# weiterhin den arm64-Baseline (NEON).
+[env]
+GGML_NATIVE = "OFF"
+# ggml nutzt std::filesystem (ab macOS 10.15). Deployment-Target hochsetzen, sonst
+# scheitert der Release-Build ("path is unavailable"). whisper-rs-sys reicht CMAKE_*
+# Env-Variablen als Defines durch; MACOSX_DEPLOYMENT_TARGET deckt cc/cmake zusätzlich ab.
+CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
+MACOSX_DEPLOYMENT_TARGET = "11.0"

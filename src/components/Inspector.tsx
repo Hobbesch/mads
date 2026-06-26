@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef } from "react";
+import { Mic } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
 import { STATUS_META } from "../status";
@@ -33,6 +34,10 @@ export function Inspector() {
   const attached = useStore((s) => (s.selectedId ? s.draftImages[s.selectedId] ?? NO_IMAGES : NO_IMAGES));
   const setDraft = useStore((s) => s.setDraft);
   const setDraftImages = useStore((s) => s.setDraftImages);
+  // Spracheingabe (lokales Whisper)
+  const whisper = useStore((s) => s.whisper);
+  const dictation = useStore((s) => s.dictation);
+  const toggleDictation = useStore((s) => s.toggleDictation);
 
   // Auto-wachsende Composer-Höhe (Textarea): bei jeder Entwurfs-Änderung neu messen.
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -203,6 +208,12 @@ export function Inspector() {
             ))}
           </div>
         )}
+        {whisper.downloading && (
+          <div className="composer-note">⬇︎ Sprachmodell lädt… {Math.round(whisper.progress * 100)}% (einmalig, ~1,5 GB)</div>
+        )}
+        {dictation.recording && <div className="composer-note rec">● Aufnahme läuft — ⇧Leertaste loslassen oder Mikro klicken zum Stoppen</div>}
+        {dictation.transcribing && <div className="composer-note">⌛ Transkribiere…</div>}
+        {dictation.error && <div className="composer-note err">{dictation.error}</div>}
         <form className="composer" onSubmit={submit}>
           <textarea
             ref={composerRef}
@@ -220,6 +231,32 @@ export function Inspector() {
             }}
             placeholder={`Nachricht an ${agent.label}…  (Enter senden · ⇧↵ Zeilenumbruch · ⌘V Screenshot)`}
           />
+          <button
+            type="button"
+            className={`composer-btn mic${dictation.recording ? " recording" : ""}`}
+            title={
+              whisper.downloading
+                ? `Sprachmodell lädt… ${Math.round(whisper.progress * 100)}%`
+                : !whisper.installed
+                  ? "Sprachmodell (~1,5 GB) für Spracheingabe herunterladen"
+                  : dictation.recording
+                    ? "Aufnahme stoppen & Text einfügen"
+                    : dictation.transcribing
+                      ? "Transkribiere…"
+                      : "Diktieren — klicken (an/aus) oder ⇧Leertaste halten"
+            }
+            aria-label="Diktieren"
+            disabled={dictation.transcribing || whisper.downloading}
+            onClick={() => void toggleDictation()}
+          >
+            {whisper.downloading ? (
+              <span className="mic-pct">{Math.round(whisper.progress * 100)}%</span>
+            ) : dictation.transcribing ? (
+              <span className="tl-spinner" />
+            ) : (
+              <Mic size={16} aria-hidden="true" />
+            )}
+          </button>
           {busy ? (
             <button
               type="button"
