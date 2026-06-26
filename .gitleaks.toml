@@ -1,0 +1,18 @@
+# gitleaks-Konfiguration für mads.
+# Default-Regelsatz + Allowlist bekannter False Positives. ECHTE Secrets liegen in
+# gitignored Dateien (.env.notarize, ~/.appstoreconnect/*.p8) und werden nie gescannt.
+title = "mads gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Bekannte False Positives: Design-Doku nennt Security-Tools; Secret-Scanner-Test-Fixtures"
+# Test-Fixtures des eigenen Secret-Scanners enthalten ABSICHTLICH Fake-Secrets:
+paths = [
+  '''shared/secrets\.test\.ts''',
+]
+# Doku nennt die Tools „gitleaks/trufflehog" — kein Credential (generic-api-key-Fehlalarm):
+regexes = [
+  '''gitleaks/trufflehog''',
+]
