@@ -20,6 +20,8 @@ export interface UiPrefs {
   primaryPanelWidth: number;
   /** Zoom-Faktor der Markdown-Ansicht (1 = 100%), vom Nutzer einstellbar. */
   mdZoom: number;
+  /** Breite der Ordner-Spalte im Datei-Explorer in px — vom Nutzer ziehbar. */
+  treePaneWidth: number;
 }
 
 const KEY = "mads.uiPrefs";
@@ -28,7 +30,9 @@ export const PANEL_MIN = 240;
 export const PANEL_MAX = 1200;
 export const MD_ZOOM_MIN = 0.5;
 export const MD_ZOOM_MAX = 2;
-const DEFAULTS: UiPrefs = { activeView: "streams", railCollapsed: false, primaryPanelWidth: 320, mdZoom: 1 };
+export const TREE_MIN = 140;
+export const TREE_MAX = 700;
+const DEFAULTS: UiPrefs = { activeView: "streams", railCollapsed: false, primaryPanelWidth: 320, mdZoom: 1, treePaneWidth: 200 };
 
 const VALID_VIEWS: ViewId[] = ["streams", "files", "settings"];
 
@@ -36,6 +40,12 @@ export function clampPanelWidth(n: unknown): number {
   return typeof n === "number" && Number.isFinite(n)
     ? Math.min(PANEL_MAX, Math.max(PANEL_MIN, n))
     : DEFAULTS.primaryPanelWidth;
+}
+
+export function clampTreePaneWidth(n: unknown): number {
+  return typeof n === "number" && Number.isFinite(n)
+    ? Math.min(TREE_MAX, Math.max(TREE_MIN, n))
+    : DEFAULTS.treePaneWidth;
 }
 
 export function clampMdZoom(n: unknown): number {
@@ -58,6 +68,7 @@ export function loadUiPrefs(): UiPrefs {
       railCollapsed,
       primaryPanelWidth: clampPanelWidth(obj.primaryPanelWidth),
       mdZoom: clampMdZoom(obj.mdZoom),
+      treePaneWidth: clampTreePaneWidth(obj.treePaneWidth),
     };
   } catch {
     return { ...DEFAULTS };
