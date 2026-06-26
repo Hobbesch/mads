@@ -27,6 +27,7 @@ export function Inspector() {
   const createPr = useStore((s) => s.createPr);
   const syncBranch = useStore((s) => s.syncBranch);
   const resolveConflict = useStore((s) => s.resolveConflict);
+  const outsourceMain = useStore((s) => s.outsourceMain);
   const updateMain = useStore((s) => s.updateMain);
   const continueStream = useStore((s) => s.continueStream);
   const integratePr = useStore((s) => s.integratePr);
@@ -145,10 +146,33 @@ export function Inspector() {
     });
   };
 
+  // Main-Edits in einen neuen Sub-Stream auslagern (main bleibt sauber; direkter Commit auf main
+  // ist bewusst nicht vorgesehen).
+  const askOutsource = () =>
+    setConfirm({
+      title: "Main-Änderungen auslagern?",
+      body: (
+        <>
+          <p>
+            Direkte Änderungen an <code>main</code> sind nicht vorgesehen (<code>main</code> ändert sich nur über einen
+            grün-getesteten PR-Merge).
+          </p>
+          <p>
+            mads verschiebt deine uncommitteten Änderungen verlustsicher in einen <strong>neuen Sub-Stream</strong>{" "}
+            (eigener Branch ab <code>main</code>) — dort laufen sie über den normalen Commit→PR→Integrate-Fluss. Der
+            Main-Checkout wird wieder sauber.
+          </p>
+        </>
+      ),
+      confirmLabel: "In Sub-Stream auslagern",
+      onConfirm: () => void outsourceMain(selectedId),
+    });
+
   const runStep = () => {
     if (step.kind === "commit") void commitAgent(selectedId);
     else if (step.kind === "pr") void createPr(selectedId);
     else if (step.kind === "integrate") askMerge(false);
+    else if (step.kind === "outsource") askOutsource();
     else if (step.kind === "cleanup") void stopAgent(selectedId, true); // bereits gemergt → sicher
   };
 
@@ -291,6 +315,14 @@ export function Inspector() {
           </button>
         </div>
       </header>
+
+      {agent.role === "integrator" && (
+        <div className="inspector-rolehint">
+          <strong>🎛 Leitstelle.</strong> Hier wird <em>aufgeteilt</em> (neue Sub-Streams), <em>reviewt</em> und{" "}
+          <em>integriert</em> — direktes Committen auf <code>main</code> ist bewusst nicht vorgesehen. Änderungen laufen
+          über Sub-Streams; eigene Edits in <code>main</code> kannst du mit „In Sub-Stream auslagern" verschieben.
+        </div>
+      )}
 
       {(agent.branch || badges.length > 0) && (
         <div className="inspector-badges">

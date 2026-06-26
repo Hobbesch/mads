@@ -56,6 +56,7 @@ export type HostMessage =
   | IntegratePrMsg
   | SetAutonomyMsg
   | SetAutopilotMsg
+  | OutsourceMainMsg
   | PollProjectMsg
   | CleanupWorktreeMsg
   | UpdateMainMsg
@@ -159,6 +160,15 @@ export interface SetAutopilotMsg extends BaseMsg {
   type: "set_autopilot";
   agentId: string;
   level: AutopilotLevel;
+}
+/** Uncommittete Änderungen im Main-Checkout (Integrator) in einen NEUEN Sub-Stream auslagern
+ *  (main bleibt sauber; die Änderungen gehen über den normalen PR-Fluss). */
+export interface OutsourceMainMsg extends BaseMsg {
+  type: "outsource_main";
+  integratorId: string;
+  agentId: string; // neuer Sub-Stream
+  label: string;
+  branch: string;
 }
 
 export interface PollProjectMsg extends BaseMsg {

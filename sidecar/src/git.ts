@@ -300,6 +300,38 @@ export async function finalizeAdrDrafts(
   return { renamed };
 }
 
+/**
+ * Uncommittete Änderungen im Main-Checkout in einen NEUEN Sub-Worktree auslagern (main bleibt
+ * sauber, bekommt NIE einen Commit — Inv. 1/2). Verlustsicher: erst stashen (tracked+untracked),
+ * dann main per FF nachziehen, frischen Worktree ab origin/<base> anlegen, den Stash dort ANWENDEN
+ * (apply, nicht pop) und nur bei sauberem Erfolg droppen — bei Fehler/Konflikt bleibt der Stash
+ * als Sicherheitsnetz erhalten.
+ */
+export async function outsourceMainChanges(
+  repoRoot: string,
+  defaultBranch: string,
+  worktreePath: string,
+  branch: string,
+): Promise<{ ok: true; conflicted: boolean } | { ok: false; error: string }> {
+  const dirty = await git(["-C", repoRoot, "status", "--porcelain"], repoRoot);
+  if (!dirty.stdout.trim()) return { ok: false, error: "Keine uncommitteten Änderungen im Main-Checkout." };
+  const stash = await git(["-C", repoRoot, "stash", "push", "-u", "-m", `mads:outsource ${branch}`], repoRoot);
+  if (stash.code !== 0) return { ok: false, error: `git stash fehlgeschlagen: ${stash.stderr || stash.stdout}` };
+  const stashSha = (await git(["-C", repoRoot, "rev-parse", "stash@{0}"], repoRoot)).stdout.trim();
+  await fastForwardMain(repoRoot, defaultBranch); // jetzt möglich (main clean); best effort
+  try {
+    await createWorktree(repoRoot, worktreePath, branch, `origin/${defaultBranch}`);
+  } catch (e) {
+    await git(["-C", repoRoot, "stash", "pop"], repoRoot); // Worktree fehlgeschlagen → Stash zurück nach main
+    return { ok: false, error: `Worktree konnte nicht erstellt werden (Änderungen sind zurück im Main-Checkout): ${String(e)}` };
+  }
+  const apply = await git(["-C", worktreePath, "stash", "apply", stashSha], worktreePath);
+  const conflicted = apply.code !== 0 || /CONFLICT|Merge conflict/i.test(`${apply.stdout}\n${apply.stderr}`);
+  if (!conflicted) await git(["-C", repoRoot, "stash", "drop", "stash@{0}"], repoRoot); // sauber → Stash weg
+  // bei Konflikt: Stash BEWUSST behalten (Sicherheitsnetz), Konflikt wird auf dem Sub eskaliert
+  return { ok: true, conflicted };
+}
+
 /** Lokale Commits, die noch nicht auf origin/<branch> liegen (für „PR aktuell halten"). */
 export async function unpushedCount(worktree: string, branch: string): Promise<number> {
   const r = await git(["-C", worktree, "rev-list", "--count", `origin/${branch}..HEAD`], worktree);

@@ -1814,6 +1814,19 @@ button.primary:hover {
   font-family: var(--mono);
   font-size: 12px;
 }
+/* Rollen-Hinweis des Main-Streams (Integrator) — erklärt, dass hier orchestriert/integriert wird. */
+.inspector-rolehint {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--accent-weak);
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.inspector-rolehint code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
 .modal-actions button:disabled {
   opacity: 0.45;
   cursor: default;

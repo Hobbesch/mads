@@ -309,6 +309,8 @@ export interface MadsState {
   syncBranch: (id: string) => Promise<void>;
   /** Geführte Konfliktlösung: beauftragt den Agenten, den Rebase-Konflikt im Worktree zu lösen. */
   resolveConflict: (id: string) => Promise<void>;
+  /** Uncommittete Änderungen des Main-Checkouts in einen neuen Sub-Stream auslagern. */
+  outsourceMain: (integratorId: string) => Promise<void>;
   /** Integrator-only: main per fast-forward auf origin/<default> nachziehen (kein rebase). */
   updateMain: (id: string) => Promise<void>;
   integratePr: (id: string, keep?: boolean) => Promise<void>;
@@ -989,6 +991,43 @@ export const useStore = create<MadsState>((set) => {
     syncBranch: async (id) => {
       notice(id, "accent", "▶ Sync (rebase onto origin/main)");
       await sendHost({ ...envelope(), type: "sync_branch", agentId: id });
+    },
+
+    outsourceMain: async (integratorId) => {
+      // Uncommittete main-Änderungen in einen NEUEN Sub-Stream verschieben (main bleibt sauber).
+      const newId = mkId();
+      const branch = `mads/main-changes-${newId.slice(0, 6)}`;
+      const label = "Ausgelagerte main-Änderungen";
+      set((s) => ({
+        agents: {
+          ...s.agents,
+          [newId]: {
+            id: newId,
+            label,
+            role: "sub",
+            status: "starting",
+            costUsd: 0,
+            numTurns: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            mock: false,
+            permissionMode: "auto",
+            autopilot: "assisted",
+            createdAt: Date.now(),
+            lastEventAt: Date.now(),
+            workStartedAt: Date.now(),
+            branch,
+            behind: 0,
+            ahead: 0,
+            dirty: false,
+            live: true,
+          },
+        },
+        order: [...s.order, newId],
+        selectedId: newId,
+      }));
+      notice(integratorId, "accent", `↗ Main-Änderungen → neuer Sub-Stream „${label}"`);
+      await sendHost({ ...envelope(), type: "outsource_main", integratorId, agentId: newId, label, branch });
     },
 
     resolveConflict: async (id) => {

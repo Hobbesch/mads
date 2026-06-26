@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
-import { autoCommit, createPr, discoverWorktrees, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, prStatus, pushBranch, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
+import { autoCommit, createPr, discoverWorktrees, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
 import { ensureMadsDir, loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
@@ -127,6 +127,57 @@ export class Orchestrator {
           this.autopilotSecretNotified.delete(msg.agentId);
           log(`[orchestrator] autopilot ${msg.agentId} → ${msg.level}`);
         }
+        break;
+      }
+
+      case "outsource_main": {
+        if (!this.project) break;
+        const integ = this.pool.get(msg.integratorId);
+        if (!integ || !integ.repoRoot) {
+          this.emitError(msg.integratorId, "spawn_failed", "Kein Integrator/Repo — Auslagern nicht möglich.");
+          break;
+        }
+        const worktreePath = worktreePathFor(integ.repoRoot, msg.agentId);
+        const res = await outsourceMainChanges(integ.repoRoot, this.project.defaultBranch, worktreePath, msg.branch);
+        if (!res.ok) {
+          this.emitError(msg.integratorId, "spawn_failed", res.error);
+          break;
+        }
+        // Neuen Sub-Stream im ausgelagerten Worktree starten (Autopilot committet/PRt die Änderungen).
+        const session = new AgentSession(msg.agentId, () => this.persist());
+        this.pool.set(msg.agentId, session);
+        await session.start({
+          ...envelope(),
+          type: "start_agent",
+          agentId: msg.agentId,
+          prompt:
+            "Diese Änderungen wurden aus dem Main-Checkout in diesen Sub-Stream ausgelagert. Sieh sie dir an und " +
+            "fasse kurz zusammen, was sie bewirken. Committen/Push/PR übernimmt mads — nicht selbst pushen.",
+          repoRoot: integ.repoRoot,
+          branch: msg.branch,
+          resumeWorktreePath: worktreePath,
+          label: msg.label,
+          role: "sub",
+          model: "claude-sonnet-4-6",
+          permissionMode: "auto",
+          autopilot: "assisted",
+        });
+        this.persist();
+        await this.pollAgent(session);
+        await this.pollAgent(integ); // dirty-Flag des Integrators clearen (main ist jetzt sauber)
+        if (res.conflicted) {
+          this.emitError(
+            msg.agentId,
+            "merge_conflict",
+            "Die ausgelagerten Änderungen kollidieren mit dem aktuellen main — bitte im Worktree auflösen (Knopf „Konflikt lösen“).",
+          );
+        }
+        this.emit({
+          ...envelope(),
+          type: "agent_event",
+          agentId: msg.integratorId,
+          event: { kind: "assistant_text", text: `↗ Main-Änderungen in neuen Sub-Stream „${msg.label}" ausgelagert (Branch ${msg.branch}).` },
+        });
         break;
       }
 

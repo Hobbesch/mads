@@ -43,6 +43,7 @@ export function hasGitEscalation(a: AgentVM): boolean {
  * geht beim Stop/Aufräumen verloren → auf der Kachel laut markieren und vor Stop bestätigen.
  */
 export function unsavedWork(a: AgentVM): boolean {
+  if (a.role === "integrator") return a.dirty; // dirty Main-Checkout → in Sub-Stream auslagern
   if (a.role !== "sub" || a.pr?.state === "MERGED") return false;
   return a.dirty || (a.ahead > 0 && !a.pr);
 }
@@ -62,7 +63,7 @@ export function mergeReadiness(a: AgentVM): MergeGate {
   return preMergeGate(a.pr, a.behind);
 }
 
-export type NextStepKind = "commit" | "pr" | "integrate" | "cleanup" | "none";
+export type NextStepKind = "commit" | "pr" | "integrate" | "cleanup" | "outsource" | "none";
 export interface NextStep {
   kind: NextStepKind;
   label: string;
@@ -78,7 +79,19 @@ export interface NextStep {
  */
 export function nextStep(a: AgentVM): NextStep {
   const none: NextStep = { kind: "none", label: "", disabled: true, hint: "" };
-  if (a.role !== "sub") return none; // Integrator merged nur via „Integrieren" der Subs
+  if (a.role === "integrator") {
+    // Direkte Edits in main sind nicht vorgesehen (main nur via grünen PR-Merge). Hat der
+    // Main-Checkout doch uncommittete Änderungen → in einen neuen Sub-Stream auslagern.
+    if (a.dirty)
+      return {
+        kind: "outsource",
+        label: "In Sub-Stream auslagern",
+        disabled: false,
+        hint: "Deine uncommitteten main-Änderungen in einen neuen Sub-Stream verschieben (main bleibt sauber; normaler Commit→PR→Integrate-Fluss).",
+      };
+    return none;
+  }
+  if (a.role !== "sub") return none;
   if (a.pr?.state === "MERGED")
     return { kind: "cleanup", label: "Aufräumen ✓", disabled: false, hint: "Stream beenden, Worktree/Branch entfernen (Arbeit ist bereits in main)" };
   if (a.dirty) return { kind: "commit", label: "Committen", disabled: false, hint: "Der Agent committet seine Arbeit (Projektkonvention)" };
