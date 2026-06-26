@@ -12,6 +12,7 @@
  * Reine UI: KEIN FS, KEIN Prozess. Externe Links/Wikilinks werden vom Aufrufer
  * (Callbacks) behandelt — diese Datei entscheidet nur über das Markup.
  */
+import { useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -118,6 +119,43 @@ export interface MarkdownViewProps {
  * (global importiert in `main.tsx`). Links werden NICHT direkt geöffnet — der Aufrufer
  * entscheidet (Bestätigung bei non-https, §5.4), Wikilinks routen in-App.
  */
+/** Code-Block mit Kopieren-Button (wie Claude Desktop / VS Code). Kopiert den exakten
+ *  Quelltext (textContent des <pre>) in die Zwischenablage; Fallback ohne Clipboard-API. */
+function CodeBlock(props: React.ComponentPropsWithoutRef<"pre">) {
+  const ref = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    const text = ref.current?.textContent ?? "";
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } catch {
+        /* nichts zu tun */
+      }
+      ta.remove();
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+  return (
+    <div className="code-block">
+      <button className="code-copy" onClick={copy} title="In die Zwischenablage kopieren" aria-label="Code kopieren">
+        {copied ? "✓ Kopiert" : "⧉ Kopieren"}
+      </button>
+      <pre ref={ref} {...props} />
+    </div>
+  );
+}
+
 export function MarkdownView({ source, className = "markdown-body", onLink, onWikiLink }: MarkdownViewProps) {
   return (
     <div className={className}>
@@ -125,6 +163,7 @@ export function MarkdownView({ source, className = "markdown-body", onLink, onWi
         remarkPlugins={mdRemarkPlugins}
         rehypePlugins={mdRehypePlugins}
         components={{
+          pre: CodeBlock,
           a: ({ href, children, ...props }) => {
             const wikiName = (props as Record<string, unknown>)["data-wikilink"] as
               | string

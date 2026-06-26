@@ -3252,3 +3252,34 @@ body.col-resizing .tree-resizer {
   padding: 5px 8px;
   margin-top: 4px;
 }
+
+/* ---------------- Code-Block Kopieren-Button ---------------- */
+.code-block { position: relative; }
+.code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  font-size: 11px;
+  font-weight: 550;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.code-block:hover .code-copy,
+.code-block:focus-within .code-copy {
+  opacity: 1;
+}
+.code-copy:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+@media (prefers-reduced-motion: reduce) {
+  .code-copy { transition: none; }
+}
