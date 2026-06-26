@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useStore } from "../store";
 
 /**
@@ -5,7 +6,8 @@ import { useStore } from "../store";
  * Reine Store-Ableitungen — KEIN neuer Protokoll-Typ.
  *
  *  - In-Worktree-Kontext (INFORMATIV, kein Blocker): activeRoot.kind === "worktree"
- *    → blaue Info-Leiste „Stream X · noch nicht auf main" (Normalfall beim Review, OE-35).
+ *    → einklappbare Info-Zeile „Stream X · noch nicht auf main" (Normalfall beim
+ *    Review, OE-35). Bewusst KEIN Modal: passive Dauer-Info, kein Alarm.
  *  - Live-Kollision: Pfad in collisions → rot (region) / amber (file).
  *  - External-change: Datei wurde auf Disk geändert → Banner „Neu laden".
  *
@@ -21,9 +23,15 @@ export function FileWarnings({ path }: { path: string }) {
   const reloadFile = useStore((s) => s.reloadFile);
 
   const inWorktree = activeRoot?.kind === "worktree";
+  const agentId = inWorktree ? activeRoot.agentId : "";
   const streamLabel = inWorktree ? agents[activeRoot.agentId]?.label ?? "Stream" : "";
   const hit = collisions.find((c) => c.path && path.endsWith(c.path));
   const ext = externalChanged[path];
+
+  // Der Worktree-Hinweis ist für JEDE Datei im Stream identisch → pro Stream-Kontext
+  // einmal ausblendbar (Reset beim Stream-Wechsel, damit er im neuen Kontext wieder kommt).
+  const [infoDismissed, setInfoDismissed] = useState(false);
+  useEffect(() => setInfoDismissed(false), [agentId]);
 
   if (!inWorktree && !hit && !ext) return null;
 
@@ -35,10 +43,21 @@ export function FileWarnings({ path }: { path: string }) {
           <button onClick={() => void reloadFile(path)}>Neu laden</button>
         </div>
       )}
-      {inWorktree && (
-        <div className="warn-bar info">
-          ◐ Du editierst in Stream „{streamLabel}" · diese Änderung ist noch nicht auf <code>main</code> und landet
-          erst, wenn dessen PR vom Integrator gemergt wird.
+      {inWorktree && !infoDismissed && (
+        <div className="warn-bar info" role="note">
+          <span className="warn-icon" aria-hidden="true">i</span>
+          <span className="warn-text">
+            Änderungen in Stream <strong>„{streamLabel}"</strong> sind noch nicht auf <code>main</code> — sie landen
+            dort erst, wenn der zugehörige PR vom Integrator gemergt wird.
+          </span>
+          <button
+            className="warn-dismiss"
+            onClick={() => setInfoDismissed(true)}
+            title="Hinweis ausblenden"
+            aria-label="Hinweis ausblenden"
+          >
+            ×
+          </button>
         </div>
       )}
       {hit && (

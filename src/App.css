@@ -2572,6 +2572,46 @@ button.primary:hover {
 .warn-bar.info {
   background: var(--accent-weak);
   color: var(--text);
+  align-items: flex-start; /* Icon oben bündig, falls der Text umbricht */
+  line-height: 1.45;
+}
+/* CSS-gezeichnetes „i"-Badge (keine Emoji-/Font-Abhängigkeit). */
+.warn-bar.info .warn-icon {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 13px;
+  text-align: center;
+  opacity: 0.65;
+}
+/* Der GESAMTE Satz (inkl. <code>main</code>) in EINEM Flex-Item → normaler Textfluss,
+   sonst würde flex das <code> zu einem eigenen, zentrierten Item machen. */
+.warn-bar.info .warn-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.warn-bar.info .warn-text strong {
+  font-weight: 600;
+}
+.warn-bar .warn-dismiss {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  margin-top: -1px;
+}
+.warn-bar .warn-dismiss:hover {
+  color: var(--text);
 }
 .warn-bar.external {
   background: rgba(255, 176, 32, 0.16);
