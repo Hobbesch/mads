@@ -943,7 +943,7 @@ export const useStore = create<MadsState>((set) => {
         id,
         "Committe deine bisherige Arbeit in DIESEM Worktree LOKAL: `git add -A && git commit` mit einer " +
           "aussagekräftigen Message im Commit-Format des Repos (z. B. Conventional Commits: feat/fix/docs …). " +
-          "WICHTIG: KEINE projekteigenen Commit-/Push-Skripte verwenden (z. B. scripts/paix-commit.sh) — die " +
+          "WICHTIG: KEINE projekteigenen Commit-/Push-Skripte verwenden — die " +
           "pushen direkt auf origin/main und kollidieren mit mads' Ablauf. NUR lokal committen — NICHT pushen, " +
           "keinen PR, keinen Merge. Push, PR und Integrieren übernimmt mads über seine eigenen Knöpfe.",
       );
