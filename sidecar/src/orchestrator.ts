@@ -15,6 +15,19 @@ import { autopilotDecision } from "../../shared/autopilot.js";
 import { ensureMadsDir, loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
 import { parseDiffRegions, detectCollisions, type AgentRegions } from "../../shared/collision.js";
+import { detectTrespass, pathMatches, type TrespassFinding } from "../../shared/ownership.js";
+import type { OwnershipRule, ChangedRegion } from "../../shared/protocol.js";
+
+// Geteilte „land-first"-Dateien (generisch, projekt-agnostisch): Lockfiles, die nicht parallel
+// in mehreren Feature-Branches verändert werden sollen (sonst Merge-Hölle). Erweiterbar.
+const SHARED_LANDFIRST_GLOBS = [
+  "**/package-lock.json",
+  "**/Cargo.lock",
+  "**/uv.lock",
+  "**/yarn.lock",
+  "**/pnpm-lock.yaml",
+  "**/go.sum",
+];
 import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, ResumableAgent } from "../../shared/protocol.js";
 
 const POLL_INTERVAL_MS = 25_000;
@@ -289,6 +302,18 @@ export class Orchestrator {
     const s = this.pool.get(agentId);
     if (!s || !s.repoRoot || !s.branch || !s.worktreePath || !this.project) {
       this.emitError(agentId, "spawn_failed", "Kein Worktree/Projekt für diesen Agenten — PR nicht möglich.");
+      return;
+    }
+
+    // 3.6: Ownership durchsetzen — kein PR/Push, wenn dieser Stream eine Region/geteilte Datei
+    // berührt, die ein früher gestarteter Stream besitzt. Koordiniert statt parallel kollidiert.
+    const trespass = await this.ownershipGate(agentId);
+    if (trespass.length) {
+      this.emitError(
+        agentId,
+        "ownership_trespass",
+        `PR gestoppt — Überschneidung: ${this.trespassReason(trespass)}. Warte, bis der andere Stream gemergt ist, dann „Sync" (rebase) und erneut.`,
+      );
       return;
     }
 
@@ -728,6 +753,11 @@ export class Orchestrator {
             await this.pollAgent(s, true);
           }
         } else if (action === "push") {
+          const tres = await this.ownershipGate(s.agentId);
+          if (tres.length) {
+            this.emitError(s.agentId, "ownership_trespass", `Autopilot-Push gestoppt — Überschneidung: ${this.trespassReason(tres)}.`);
+            continue;
+          }
           const r = await pushBranch(s.worktreePath, s.branch, this.project.defaultBranch);
           if (r.ok) await this.pollAgent(s, true);
           else this.emitError(s.agentId, r.kind, `Autopilot-Push gestoppt: ${r.error}`);
@@ -843,25 +873,77 @@ export class Orchestrator {
     }
   }
 
+  /** Geänderte Regionen eines Sub-Streams vs origin/<default> (für Kollision + Ownership). */
+  private async streamRegions(s: AgentSession): Promise<ChangedRegion[]> {
+    if (!this.project || s.role !== "sub" || !s.worktreePath) return [];
+    try {
+      const diff = await run(
+        "git",
+        ["-C", s.worktreePath, "diff", "--merge-base", `origin/${this.project.defaultBranch}`, "--unified=0"],
+        s.worktreePath,
+      );
+      return parseDiffRegions(diff.stdout);
+    } catch {
+      return [];
+    }
+  }
+
   /** Kollisions-Scan: paarweiser Region-Overlap der aktiven Sub-Agenten. */
   private async collisionPass(): Promise<void> {
     if (!this.project) return;
     const agentsRegions: AgentRegions[] = [];
     for (const s of this.pool.values()) {
       if (s.role !== "sub" || !s.worktreePath || s.status === "done") continue;
-      try {
-        const diff = await run(
-          "git",
-          ["-C", s.worktreePath, "diff", "--merge-base", `origin/${this.project.defaultBranch}`, "--unified=0"],
-          s.worktreePath,
-        );
-        const regions = parseDiffRegions(diff.stdout);
-        if (regions.length) agentsRegions.push({ agentId: s.agentId, label: s.label ?? s.agentId, regions });
-      } catch {
-        /* einzelner Diff-Fehler ignorieren */
-      }
+      const regions = await this.streamRegions(s);
+      if (regions.length) agentsRegions.push({ agentId: s.agentId, label: s.label ?? s.agentId, regions });
     }
     this.emit({ ...envelope(), type: "collision_warning", collisions: detectCollisions(agentsRegions) });
+  }
+
+  /**
+   * Ownership-Durchsetzung (3.6, „first-come-owns"): ein Stream darf keine Region/geteilte
+   * Datei pushen, die ein FRÜHER gestarteter Stream (Pool-Reihenfolge = deterministisch →
+   * deadlock-frei) bereits bearbeitet — symbol-genau via detectTrespass (gleiche Datei +
+   * andere Symbole = erlaubt). Plus land_first für geteilte Lockfiles. Liefert die Verstöße
+   * (leer = frei zu pushen). Whole-File-Ownership (Symbole unbekannt) wird NICHT erzwungen
+   * (vermeidet Über-Blockaden z. B. bei Doku); nur symbol-genau + land_first.
+   */
+  private async ownershipGate(agentId: string): Promise<TrespassFinding[]> {
+    if (!this.project) return [];
+    const ids = [...this.pool.keys()];
+    const idx = ids.indexOf(agentId);
+    if (idx < 0) return [];
+    const me = this.pool.get(agentId);
+    if (!me || me.role !== "sub" || !me.worktreePath) return [];
+    const myRegions = await this.streamRegions(me);
+    if (myRegions.length === 0) return [];
+    const rules: OwnershipRule[] = [];
+    for (let i = 0; i < idx; i++) {
+      // nur FRÜHERE Streams besitzen (deterministische Reihenfolge → kein Deadlock)
+      const o = this.pool.get(ids[i]);
+      if (!o || o.role !== "sub" || !o.worktreePath || o.status === "done") continue;
+      const oRegions = await this.streamRegions(o);
+      for (const r of oRegions) {
+        if (r.symbols.length) {
+          rules.push({ id: `own-${o.agentId}-${r.path}`, path: r.path, symbols: r.symbols, ownerAgentId: o.agentId, ownerBranch: o.branch, kind: "exclusive", note: o.label ?? o.agentId });
+        }
+        if (SHARED_LANDFIRST_GLOBS.some((g) => pathMatches(r.path, g))) {
+          rules.push({ id: `lf-${r.path}`, path: r.path, ownerAgentId: o.agentId, ownerBranch: o.branch, kind: "land_first", note: o.label ?? o.agentId });
+        }
+      }
+    }
+    return detectTrespass(myRegions, rules, agentId);
+  }
+
+  /** Trespass-Findings → menschenlesbare Begründung (für die Eskalation). */
+  private trespassReason(findings: TrespassFinding[]): string {
+    return findings
+      .map((f) =>
+        f.reason === "land_first"
+          ? `geteilte Datei ${f.path} (auch von „${f.rule.note}“ bearbeitet) → land-first: einer landet zuerst`
+          : `${f.path}${f.matchedSymbol ? ` (${f.matchedSymbol})` : ""} gehört Stream „${f.rule.note}“`,
+      )
+      .join("; ");
   }
 
   private emitError(agentId: string, code: EscalationKind, message: string): void {
