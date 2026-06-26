@@ -684,8 +684,8 @@ button.primary:hover {
   font-size: 12px;
   font-weight: 550;
 }
-.resume-banner button:hover {
-  background: var(--panel-2);
+.resume-banner button:hover:not(.resume-all) {
+  background: var(--panel-2); /* nicht den weiß-schriftigen Accent-Button „Alle" überschreiben */
 }
 .resume-banner button.resume-all {
   background: var(--accent);
@@ -693,6 +693,9 @@ button.primary:hover {
   border-color: transparent;
   font-weight: 600;
   margin-left: auto;
+}
+.resume-banner button.resume-all:hover {
+  filter: brightness(1.08);
 }
 /* GitHub-Abgleich-Hinweis (was beim Öffnen automatisch bereinigt wurde). */
 .reconcile-banner {
@@ -974,7 +977,10 @@ button.primary:hover {
   font-size: 12px;
   font-weight: 550;
 }
-.inspector-actions button:hover {
+/* Generischer Hover NUR für die schlichten Buttons — NICHT für die farbigen Primär-Buttons
+   (step-primary/integrate, weiße Schrift): deren Hintergrund würde sonst auf hell gesetzt,
+   während die Schrift weiß bleibt → unlesbar. Die färben ihren Hover selbst (filter brightness). */
+.inspector-actions button:hover:not(.step-primary):not(.integrate) {
   background: var(--panel-2);
 }
 .inspector-actions .danger {
