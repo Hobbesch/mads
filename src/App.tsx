@@ -5,6 +5,7 @@ import { ActivityRail } from "./components/ActivityRail";
 import { PrimaryPanel } from "./components/PrimaryPanel";
 import { ChangeOverlay } from "./components/ChangeOverlay";
 import { AgentGrid } from "./components/AgentGrid";
+import { IntegrationPanel } from "./components/IntegrationPanel";
 import { Inspector } from "./components/Inspector";
 import { PermissionDialog } from "./components/PermissionDialog";
 import { NewStreamDialog } from "./components/NewStreamDialog";
@@ -324,6 +325,7 @@ export default function App() {
 
         <div className="body">
           <div className="center">
+            <IntegrationPanel />
             <div className="center-title">Aktive Agenten</div>
             <AgentGrid />
           </div>

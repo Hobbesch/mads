@@ -1,5 +1,6 @@
 import { preMergeGate } from "../shared/merge";
 import type { MergeGate } from "../shared/merge";
+import type { Collision } from "../shared/collision";
 import type { AgentVM } from "./store";
 
 export type BadgeTone = "ok" | "warn" | "err" | "info";
@@ -106,4 +107,52 @@ export function nextStep(a: AgentVM): NextStep {
   }
   if (a.ahead > 0 && !a.pr) return { kind: "pr", label: "PR erstellen", disabled: false, hint: "Gate prüfen → auf main syncen → pushen → PR öffnen" };
   return none;
+}
+
+// ---------------------------------------------------------------- Integrations-Plan (3.5)
+export type IntegrationState = "ready" | "blocked" | "conflicting" | "unsaved" | "needs_pr" | "working";
+export interface IntegrationItem {
+  id: string;
+  label: string;
+  state: IntegrationState;
+  detail: string;
+  prNumber?: number;
+}
+export interface IntegrationPlan {
+  ready: IntegrationItem[]; // merge-bereit, in empfohlener Reihenfolge
+  waiting: IntegrationItem[]; // alles, was noch nicht integriert werden kann (mit Grund)
+  overlaps: { a: string; b: string; what: string }[]; // sich überschneidende aktive Streams (Region)
+}
+
+/**
+ * Quer-über-alle-Streams-Übersicht fürs Integrations-Panel: was ist merge-BEREIT (mit
+ * empfohlener Reihenfolge), was WARTET (mit Grund) und welche aktiven Streams ÜBERSCHNEIDEN
+ * sich (Region) — damit man sie bewusst nacheinander mergt. Reiner Spiegel der Stream-Felder.
+ */
+export function integrationPlan(agents: AgentVM[], collisions: Collision[]): IntegrationPlan {
+  const ready: IntegrationItem[] = [];
+  const waiting: IntegrationItem[] = [];
+  for (const a of agents) {
+    if (a.role !== "sub" || a.pr?.state === "MERGED" || a.live === false) continue;
+    const base = { id: a.id, label: a.label, prNumber: a.pr?.number };
+    if (a.status === "running" || a.status === "starting") {
+      waiting.push({ ...base, state: "working", detail: "arbeitet gerade" });
+    } else if (a.syncBlocked) {
+      waiting.push({ ...base, state: "conflicting", detail: "Sync-Konflikt → Konflikt lösen" });
+    } else if (a.dirty) {
+      waiting.push({ ...base, state: "unsaved", detail: "ungesicherte Arbeit → committen" });
+    } else if (a.pr && a.pr.state === "OPEN") {
+      const r = mergeReadiness(a);
+      if (r.ok) ready.push({ ...base, state: "ready", detail: "merge-bereit" });
+      else waiting.push({ ...base, state: "blocked", detail: r.reasons.join(" · ") });
+    } else if (a.ahead > 0 && !a.pr) {
+      waiting.push({ ...base, state: "needs_pr", detail: "PR erstellen" });
+    }
+    // sonst (idle, nichts ahead) → nicht gelistet
+  }
+  const active = new Set([...ready, ...waiting].map((i) => i.id));
+  const overlaps = (collisions ?? [])
+    .filter((c) => c.severity === "region" && active.has(c.agentIdA) && active.has(c.agentIdB))
+    .map((c) => ({ a: c.labelA, b: c.labelB, what: c.symbols?.join(", ") || c.path }));
+  return { ready, waiting, overlaps };
 }
