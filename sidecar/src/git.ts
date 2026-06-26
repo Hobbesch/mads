@@ -12,6 +12,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { EscalationKind, PullRequestInfo, PrChecksState } from "../../shared/protocol.js";
+import { scanSecrets } from "../../shared/secrets.js";
 
 export interface RunResult {
   code: number;
@@ -192,6 +193,34 @@ export async function gitStatus(
   };
 }
 
+/**
+ * LEAK-1: Fail-closed Secret-Scan VOR jedem Push zu origin. Verhindert, dass ein (ggf. von
+ * untrusted Repo-Inhalt geschriebenes) Secret ins — bei mads öffentliche — Remote gelangt.
+ * Scannt den Diff der Branch-Commits gegen origin/<base>. Treffer → Push wird verweigert.
+ * Einziger Egress-Gate für manuellen Sync, 25 s-Auto-Sync und createPr.
+ */
+async function secretGateBeforePush(
+  worktree: string,
+  base: string,
+): Promise<{ ok: true } | { ok: false; kind: EscalationKind; error: string }> {
+  await run("git", ["-C", worktree, "fetch", "origin", base], worktree);
+  const baseRef = `origin/${base}`;
+  const exists = await git(["-C", worktree, "rev-parse", "--verify", "--quiet", baseRef], worktree);
+  if (exists.code !== 0) return { ok: true }; // Basis remote unbekannt → Scan nicht möglich (selten)
+  const diff = await git(["-C", worktree, "diff", "--merge-base", baseRef, "HEAD"], worktree);
+  if (diff.code !== 0) return { ok: true };
+  const hits = scanSecrets(diff.stdout);
+  if (hits.length === 0) return { ok: true };
+  const kinds = [...new Set(hits.map((h) => h.kind))].join(", ");
+  return {
+    ok: false,
+    kind: "secret_detected",
+    error:
+      `🔒 Push blockiert: mögliche Secrets in den zu pushenden Änderungen (${kinds}; ${hits.length} Treffer). ` +
+      `Entferne sie aus den Commits (und rotiere den Wert), bevor erneut gepusht wird.`,
+  };
+}
+
 /** rebase onto origin/<default> + force-with-lease — der stale-base-Killer. */
 export async function syncBranch(
   worktree: string,
@@ -204,6 +233,8 @@ export async function syncBranch(
     await git(["-C", worktree, "rebase", "--abort"], worktree);
     return { ok: false, kind: "merge_conflict", error: rebase.stderr || rebase.stdout };
   }
+  const gate = await secretGateBeforePush(worktree, defaultBranch);
+  if (!gate.ok) return gate;
   const push = await git(["-C", worktree, "push", "--force-with-lease", "origin", branch], worktree);
   if (push.code !== 0) {
     return { ok: false, kind: classifyGitError(push.stderr) ?? "push_rejected", error: push.stderr };
@@ -214,7 +245,10 @@ export async function syncBranch(
 export async function pushBranch(
   worktree: string,
   branch: string,
+  base: string,
 ): Promise<{ ok: true } | { ok: false; kind: EscalationKind; error: string }> {
+  const gate = await secretGateBeforePush(worktree, base);
+  if (!gate.ok) return gate;
   let push = await git(["-C", worktree, "push", "-u", "origin", branch], worktree);
   // Wurde der Branch lokal umgeschrieben (z.B. Rebase onto origin/main), lehnt ein
   // normaler Push als „non-fast-forward" ab. mads-Branches sind single-owner → sicher
@@ -235,7 +269,7 @@ export async function createPr(
   body: string,
   draft: boolean,
 ): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
-  const pushed = await pushBranch(worktree, branch);
+  const pushed = await pushBranch(worktree, branch, base);
   if (!pushed.ok) return { ok: false, error: pushed.error };
   const args = ["pr", "create", "--head", branch, "--base", base, "--title", title, "--body", body];
   if (draft) args.push("--draft");

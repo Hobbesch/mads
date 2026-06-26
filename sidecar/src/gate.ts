@@ -48,7 +48,9 @@ export async function runGate(
     } catch {
       scripts = {};
     }
-    if (exists("package-lock.json")) await step("npm ci", "npm", ["ci"]);
+    // INJ-4: --ignore-scripts → keine Lifecycle-Skripte (postinstall …) untrusted Deps beim
+    // Installieren ausführen. Die eigentlichen Gate-Skripte (lint/typecheck/test) laufen unten.
+    if (exists("package-lock.json")) await step("npm ci", "npm", ["ci", "--ignore-scripts"]);
     for (const s of ["lint", "typecheck", "type-check", "test"]) {
       if (scripts[s]) await step(`npm:${s}`, "npm", ["run", s, "--silent"]);
     }

@@ -11,6 +11,8 @@
  * wenn die Aktion eindeutig als harmlos erkannt wurde.
  */
 
+import { findSecrets } from "./secrets.js";
+
 export type AutoDecision = { decision: "allow" | "ask"; reason?: string };
 
 const ASK = (reason: string): AutoDecision => ({ decision: "ask", reason });
@@ -77,12 +79,35 @@ const DANGER = [
   { re: /(^|[\s;&|(])(osascript|defaults|open|pbcopy|pbpaste)(\s|$)/, why: "greift auf macOS-Systemfunktionen zu" },
   { re: /(^|[\s;&|(])gh(\s|$)/, why: "GitHub-CLI (außen-sichtbar: PR/Issue/API)" },
   { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)" },
+  // Code-ausführende Umgebungsvariablen (Env-Injection: laden Bibliotheken/führen
+  // Hilfsprogramme aus). Fängt u. a. `GIT_EXTERNAL_DIFF=evil git diff` und
+  // `LD_PRELOAD=evil.so …` — die segmentCommands sonst als harmlose Zuweisung wegwirft.
+  {
+    re: /(^|[\s;&|(])(LD_PRELOAD|DYLD_INSERT_LIBRARIES|GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_EDITOR|GIT_PROXY_COMMAND|GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_ALTERNATE_OBJECT_DIRECTORIES|BASH_ENV|PERL5OPT|PYTHONSTARTUP|NODE_OPTIONS|RUBYOPT)=/,
+    why: "setzt eine Code-ausführende Umgebungsvariable",
+  },
 ];
 
-// git-Subcommands, die destruktiv/außen-sichtbar sind → fragen. Lese-Subcommands
-// (z.B. `worktree list`, `remote -v`, `submodule status`) sind NICHT riskant.
-const GIT_RISKY =
-  /\bgit\s+(?:-[^\s]+\s+)*(push|rm|reset|clean|checkout|restore|merge|rebase|cherry-pick|revert|filter-branch|update-ref|gc|fetch|pull|remote\s+(?:add|remove|rm|set-url|rename|prune)|submodule\s+(?:add|update|deinit|sync|set-url|set-branch)|worktree\s+(?:add|remove|move|prune)|tag\b(?!\s+-l)|config\s+--global)/;
+// git-Subcommands, die destruktiv/außen-sichtbar/netzwerkend sind → IMMER fragen.
+const GIT_RISKY_SUB = new Set([
+  "push", "rm", "reset", "clean", "checkout", "restore", "switch", "merge", "rebase",
+  "cherry-pick", "revert", "filter-branch", "filter-repo", "update-ref", "gc", "fetch",
+  "pull", "am", "apply", "format-patch", "send-email", "request-pull", "daemon",
+  "fast-import", "p4", "svn", "instaweb", "clone", "ls-remote", "archive",
+]);
+// Subcommands, die nur lesen bzw. lokal/harmlos sind. ALLES andere → default-deny (ASK),
+// damit ein unbekanntes/neues Subcommand nicht versehentlich auto-erlaubt wird.
+const GIT_SAFE_SUB = new Set([
+  "status", "log", "diff", "show", "add", "commit", "branch", "stash", "tag", "worktree",
+  "remote", "submodule", "config", "rev-parse", "ls-files", "ls-tree", "cat-file", "blame",
+  "describe", "shortlog", "reflog", "for-each-ref", "rev-list", "name-rev", "symbolic-ref",
+  "cherry", "grep", "merge-base", "show-ref", "show-branch", "var", "help", "version",
+  "count-objects", "fsck", "check-ignore", "check-attr", "diff-tree", "diff-index",
+  "diff-files", "whatchanged", "range-diff", "verify-commit", "verify-tag", "annotate", "init",
+]);
+// git-Config-Keys / globale Optionen, die beliebigen Code ausführen können (GIT-2).
+const GIT_CODE_EXEC_CONFIG =
+  /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass)|sequence\.editor|gpg\.program|ssh\.variant|http\.proxy|.*\.(textconv|external)|diff\.external|alias\.|filter\.)/i;
 
 function hasWriteRedirect(cmd: string): boolean {
   // Quotes zuerst maskieren — ein > in 'text' oder "code" ist KEIN Redirect.
@@ -97,13 +122,58 @@ function hasWriteRedirect(cmd: string): boolean {
   return /(^|[^\d&])>>?/.test(cleaned);
 }
 
+/**
+ * Argv-bewusste git-Einstufung (GIT-1/GIT-2): segmentiert die Zeile, überspringt globale
+ * Optionen TOKEN-WEISE (inkl. solcher mit eigenem Argument wie `-C <dir>`, `-c k=v`) und
+ * bewertet das ERSTE Nicht-Flag-Token als Subcommand. So lässt sich `git -c k=v push` oder
+ * `git -C dir push` nicht mehr an der Subcommand-Prüfung vorbeischmuggeln; Code-ausführende
+ * `-c`-Keys (diff.external, alias.*, core.pager …) und `--exec-path` werden abgefangen.
+ */
 function classifyGit(cmd: string): AutoDecision | null {
   if (!/\bgit\b/.test(cmd)) return null;
-  if (GIT_RISKY.test(cmd)) {
-    const m = cmd.match(GIT_RISKY);
-    return ASK(`git-Operation „${m?.[1] ?? "?"}“ — außen-sichtbar oder verändernd`);
+  for (const toks of segmentCommands(cmd)) {
+    const base = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
+    if (base !== "git") continue;
+    let i = 1;
+    while (i < toks.length) {
+      const t = toks[i];
+      if (t === "-c" || t === "--config-env") {
+        if (GIT_CODE_EXEC_CONFIG.test(toks[i + 1] ?? "")) return ASK("git -c mit Code-ausführendem Config-Key");
+        i += 2;
+        continue;
+      }
+      if (t === "--exec-path" || t.startsWith("--exec-path=")) return ASK("git --exec-path (Pfad-Override)");
+      if (t === "-C" || t === "--git-dir" || t === "--work-tree" || t === "--namespace") {
+        i += 2;
+        continue;
+      }
+      if (t.startsWith("-")) {
+        i += 1;
+        continue;
+      }
+      break;
+    }
+    const sub = (toks[i] ?? "").toLowerCase();
+    if (!sub) continue;
+    if (GIT_RISKY_SUB.has(sub)) return ASK(`git-Operation „${sub}“ — außen-sichtbar/verändernd`);
+    const a1 = (toks[i + 1] ?? "").toLowerCase();
+    if (sub === "remote" && /^(add|remove|rm|set-url|rename|prune)$/.test(a1)) return ASK("git remote ändern");
+    if (sub === "submodule" && /^(add|update|deinit|sync|set-url|set-branch)$/.test(a1)) return ASK("git submodule ändern");
+    if (sub === "worktree" && /^(add|remove|move|prune)$/.test(a1)) return ASK("git worktree ändern");
+    if (sub === "branch" && toks.slice(i + 1).some((x) => /^-(D|d|M|m|-delete|-move|-force)$/.test(x)))
+      return ASK("git branch löschen/umbenennen");
+    if (sub === "stash" && /^(drop|clear|pop|apply|push|store)$/.test(a1)) return ASK("git stash verändern");
+    if (sub === "tag" && toks.length > i + 1 && !toks.slice(i + 1).some((x) => x === "-l" || x === "--list" || x === "-n"))
+      return ASK("git tag erstellen/löschen");
+    if (sub === "config") {
+      if (toks.slice(i + 1).some((x) => x === "--global" || x === "--system")) return ASK("git config --global/--system");
+      const key = toks.slice(i + 1).find((x) => !x.startsWith("-"));
+      if (key && GIT_CODE_EXEC_CONFIG.test(key) && toks.indexOf(key) >= 0 && toks.length > toks.indexOf(key) + 1)
+        return ASK("git config setzt Code-ausführenden Key");
+    }
+    if (!GIT_SAFE_SUB.has(sub)) return ASK(`git-Subcommand „${sub}“ nicht als sicher eingestuft`);
   }
-  return null; // git mit harmlosem Subcommand (log/status/diff/add/commit/…) → weiter prüfen
+  return null;
 }
 
 // Führende Shell-Keywords, die KEINE Kommandos sind (das eigentliche Kommando folgt).
@@ -195,6 +265,39 @@ export function isGitCommit(command: string): boolean {
   return false;
 }
 
+// Interpreter, die Inline-Code/Module ausführen können. python/python3 sind als Dev-Tooling
+// auto-erlaubt — daher hier argv-bewusst prüfen (der DANGER-Regex übersah z. B. `python3 -W
+// ignore -c '…'`, weil `-W ignore` ein Options-Argument trägt). Die übrigen sind ohnehin
+// nicht in SAFE_CMDS und werden gefragt; der Check schadet dort nicht.
+const INTERPRETERS = new Set(["python", "python3", "ipython", "ruby", "perl", "php", "node", "deno", "bun"]);
+// Module, die `python -m X` harmlos machen (Test/Lint/Format) — alles andere (pip,
+// http.server, venv, …) ist Code-/Netz-Fläche → fragen.
+const SAFE_PY_MODULES = new Set([
+  "pytest", "unittest", "mypy", "ruff", "black", "isort", "flake8", "pylint", "coverage",
+  "json.tool", "timeit", "py_compile", "compileall", "this",
+]);
+
+function interpreterRisk(toks: string[]): string | null {
+  // Interpreter IRGENDWO im Segment suchen (nicht nur toks[0]) — sonst umgeht ein Wrapper
+  // wie `timeout 5 python3 …` die Prüfung. Ab dem Interpreter dessen Argumente token-weise
+  // scannen (so wird auch `python3 -W ignore -c '…'` erkannt, wo ein Options-Argument davor steht).
+  for (let j = 0; j < toks.length; j++) {
+    const base = (toks[j].split("/").pop() ?? toks[j]).toLowerCase();
+    if (!INTERPRETERS.has(base)) continue;
+    for (let i = j + 1; i < toks.length; i++) {
+      const t = toks[i];
+      if (/^-(c|e|E|r|x)$/.test(t)) return "Interpreter führt Inline-Code aus (-c/-e)";
+      if (/^--(eval|command)$/.test(t)) return "Interpreter führt Inline-Code aus (--eval)";
+      if (t === "-m" || /^-m[A-Za-z]/.test(t)) {
+        const mod = (t === "-m" ? toks[i + 1] ?? "" : t.slice(2)).toLowerCase();
+        if (!SAFE_PY_MODULES.has(mod)) return `Modul-Ausführung „${mod || "?"}“ (-m, Code-/Netz-Fläche)`;
+        if (t === "-m") i += 1; // sicheres Modul-Token überspringen
+      }
+    }
+  }
+  return null;
+}
+
 export function classifyBashCommand(command: string): AutoDecision {
   const cmd = command.trim();
   if (!cmd) return ASK("leerer Befehl");
@@ -209,6 +312,8 @@ export function classifyBashCommand(command: string): AutoDecision {
   if (segs.length === 0) return ASK("Befehl nicht eindeutig");
   for (const toks of segs) {
     const c = toks[0];
+    const interp = interpreterRisk(toks);
+    if (interp) return ASK(interp);
     if (SAFE_CMDS.has(c)) continue;
     if (isUvRunner(toks)) continue;
     if (/(^|\/)\.venv\/bin\//.test(c)) continue; // Projekt-venv-Tool (z.B. .venv/bin/ruff)
@@ -239,7 +344,16 @@ export function classifyToolCall(
   ctx: { cwd?: string } = {},
 ): AutoDecision {
   if (toolName === "AskUserQuestion") return ASK("Rückfrage des Agenten");
-  if (READ_TOOLS.has(toolName)) return ALLOW;
+  if (READ_TOOLS.has(toolName)) {
+    if (toolName === "TodoWrite") return ALLOW; // keine Datei
+    const p = (input?.file_path ?? input?.notebook_path ?? input?.path) as string | undefined;
+    // Glob/Grep/LS ohne expliziten Pfad → Arbeitsverzeichnis (sicher). Nur prüfen, wenn
+    // ein Pfad angegeben ist: Lesen von ~/.ssh/.aws/.env oder außerhalb des Worktrees
+    // (Exfiltrations-Primitive, INJ-3) → Rückfrage statt stiller Freigabe.
+    if (p === undefined || p === "") return ALLOW;
+    const bad = pathUnsafe(p, ctx.cwd);
+    return bad ? ASK(`Lesezugriff: ${bad}`) : ALLOW;
+  }
 
   if (EDIT_TOOLS.has(toolName)) {
     const p = (input?.file_path ?? input?.notebook_path ?? input?.path) as string | undefined;
@@ -259,11 +373,17 @@ export function classifyToolCall(
   // „eröffne Sub-Streams für die Punkte" still auf einer Permission-Rückfrage.
   if (toolName.startsWith("mcp__mads__")) return ALLOW;
 
-  // WebFetch/WebSearch: nur-lesende Web-Recherche (GET + Zusammenfassung, kein POST,
-  // kein lokaler Seiteneffekt) — wie in Claude Code ohne Rückfrage. Sonst kam pro URL
-  // eine Frage, und „Immer erlauben" merkte sich nur die EINE URL → Dauer-Nachfragen.
-  // Beliebiger Netzwerkzugriff via Bash (curl/wget/ssh/nc) fragt weiterhin (siehe DANGER).
-  if (toolName === "WebFetch" || toolName === "WebSearch") return ALLOW;
+  // WebFetch/WebSearch: nur-lesende Web-Recherche (GET + Zusammenfassung) — wie in Claude
+  // Code ohne Rückfrage (sonst kam pro URL eine Frage). ABER: die WebFetch-URL wird auf
+  // Secrets geprüft (INJ-2), damit ein injizierter Agent kein Token via URL/Query an einen
+  // Angreifer-Host exfiltriert. Beliebiger Netzzugriff via Bash (curl/wget/…) fragt ohnehin.
+  if (toolName === "WebFetch" || toolName === "WebSearch") {
+    if (toolName === "WebFetch") {
+      const hits = findSecrets(String(input?.url ?? ""));
+      if (hits.length) return ASK(`WebFetch-URL enthält ein mögliches Secret (${hits[0].kind}) — Exfiltration verhindern`);
+    }
+    return ALLOW;
+  }
 
   // Drittanbieter-MCP-Tools, Task, Unbekanntes → fragen.
   return ASK(`Tool „${toolName}“ nicht als auto-sicher eingestuft`);

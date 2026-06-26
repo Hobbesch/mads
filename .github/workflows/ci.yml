@@ -1,7 +1,15 @@
 # Deterministisches CI über alle drei Schichten (frozen installs, beide Lockfile-Achsen).
 # Läuft auf PR UND merge_group, damit eine native GitHub-Merge-Queue nicht "missing checks"
 # stallt. Siehe docs/design/01-architecture.md §8.3 und docs/research/github-multiagent.md.
+#
+# Security-Härtung (Security-Pass): least-privilege GITHUB_TOKEN (permissions),
+# SHA-gepinnte Actions (Supply-Chain — Tags/Branches sind verschiebbar; Dependabot
+# bumpt die Pins via .github/dependabot.yml), plus ein Secret-Scan-Job (gitleaks).
 name: CI
+
+# Standard: keine Schreibrechte für GITHUB_TOKEN. Jobs eskalieren bei Bedarf selbst.
+permissions:
+  contents: read
 
 on:
   pull_request:
@@ -12,10 +20,12 @@ on:
 jobs:
   quality:
     runs-on: macos-14
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: 20
           cache: npm
@@ -28,10 +38,24 @@ jobs:
       - run: npm run build
       - run: npm --prefix sidecar run typecheck
       - run: npm run sidecar:build
-      # Unit-Tests der reinen Logik (Ownership-Trespass + Vor-Merge-Gate)
+      # Unit-Tests der reinen Logik (Ownership, Gate, Secret-Scan, Classifier …)
       - run: npm test
 
       # Rust-Achse: Cargo.lock committet -> deterministisch
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - run: cargo build --locked --manifest-path src-tauri/Cargo.toml
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+  # Secret-Scan: verhindert, dass Secrets ins (öffentliche) Repo gelangen.
+  secret-scan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0 # vollständige Historie → gitleaks scannt den PR-Bereich
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

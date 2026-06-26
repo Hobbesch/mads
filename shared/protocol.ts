@@ -461,6 +461,7 @@ export type EscalationKind =
   | "spawn_failed"
   | "consume_failed"
   | "ownership_trespass" // Agent editiert eine Region, die einem anderen Stream gehört
+  | "secret_detected" // Secret im zu pushenden Diff (LEAK-1: Push fail-closed blockiert)
   | "max_budget";
 
 export interface SidecarErrorMsg extends BaseMsg {
