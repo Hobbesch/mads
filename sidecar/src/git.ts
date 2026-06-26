@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { EscalationKind, PullRequestInfo, PrChecksState } from "../../shared/protocol.js";
 import { scanSecrets, type SecretHit } from "../../shared/secrets.js";
+import { planAdrCollisionRenames } from "../../shared/adr.js";
 
 export interface RunResult {
   code: number;
@@ -301,6 +302,66 @@ export async function finalizeAdrDrafts(
 }
 
 /**
+ * Robuster Kollisions-Backstop (UNABHÄNGIG von der ADR-DRAFT-Convention). Benennt ADRs, die
+ * DIESER Branch NEU hinzugefügt hat und deren Nummer auf origin/<base> bereits für eine ANDERE
+ * Datei vergeben ist, auf die nächste freie Nummer um (Datei + Verweise + bare Eigen-Nummer im
+ * Titel). An den SERIALISIERTEN Rebase-auf-main-Stellen aufgerufen → deterministisch, kein
+ * wechselseitiges Hochzählen. Reines git+fs, KEIN Repo-Code-Exec. No-Op ohne Kollision.
+ */
+export async function reconcileAdrCollisions(
+  worktree: string,
+  base: string,
+): Promise<{ renamed: { num: string; to: string }[]; error?: string }> {
+  await git(["-C", worktree, "fetch", "origin", base], worktree);
+  const baseList = await git(["-C", worktree, "ls-tree", "-r", "--name-only", `origin/${base}`], worktree);
+  const ownList = await git(["-C", worktree, "ls-files", "*ADR-*.md"], worktree);
+  const baseFiles = baseList.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  const ownFiles = ownList.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  const plan = planAdrCollisionRenames(baseFiles, ownFiles);
+  if (plan.length === 0) return { renamed: [] };
+
+  const renamed: { num: string; to: string }[] = [];
+  for (const r of plan) {
+    const mv = await git(["-C", worktree, "mv", r.from, r.to], worktree);
+    if (mv.code !== 0) return { renamed, error: `git mv ${r.from} → ${r.to}: ${mv.stderr || mv.stdout}` };
+    // Verweise NUR slug-qualifiziert umschreiben (`ADR-0074-slug` → `ADR-0075-slug`) — eindeutig.
+    // Bare `ADR-0074` in fremden Dateien bleibt unangetastet (könnte die ANDERE gleichnummerige
+    // ADR meinen).
+    const refFiles = (await git(["-C", worktree, "grep", "-l", "-F", r.oldStem], worktree)).stdout
+      .split("\n").map((s) => s.trim()).filter(Boolean);
+    for (const rf of refFiles) {
+      try {
+        const p = join(worktree, rf);
+        const txt = readFileSync(p, "utf8");
+        if (txt.includes(r.oldStem)) writeFileSync(p, txt.split(r.oldStem).join(r.newStem));
+      } catch {
+        /* nicht lesbare/binäre Datei überspringen */
+      }
+    }
+    // In der umbenannten Datei ZUSÄTZLICH die bare Eigen-Nummer (H1/Titel) angleichen — nur
+    // `ADR-<old>` NICHT gefolgt von `-`/Ziffer (sonst würde ein slug-qualifizierter Verweis auf
+    // eine andere gleichnummerige ADR fälschlich getroffen).
+    try {
+      const p = join(worktree, r.to);
+      const txt = readFileSync(p, "utf8");
+      const bare = new RegExp(`ADR-0*${r.oldNum}(?![-\\d])`, "g");
+      const fixed = txt.replace(bare, `ADR-${r.num}`);
+      if (fixed !== txt) writeFileSync(p, fixed);
+    } catch {
+      /* überspringen */
+    }
+    renamed.push({ num: r.num, to: r.to });
+  }
+  await git(["-C", worktree, "add", "-A"], worktree);
+  const c = await git(
+    ["-C", worktree, "commit", "-m", `chore(adr): resolve number collision (${renamed.map((x) => "ADR-" + x.num).join(", ")})`],
+    worktree,
+  );
+  if (c.code !== 0) return { renamed, error: `ADR-Kollisions-Commit: ${c.stderr || c.stdout}` };
+  return { renamed };
+}
+
+/**
  * Uncommittete Änderungen im Main-Checkout in einen NEUEN Sub-Worktree auslagern (main bleibt
  * sauber, bekommt NIE einen Commit — Inv. 1/2). Verlustsicher: erst stashen (tracked+untracked),
  * dann main per FF nachziehen, frischen Worktree ab origin/<base> anlegen, den Stash dort ANWENDEN
@@ -343,20 +404,25 @@ export async function syncBranch(
   worktree: string,
   branch: string,
   defaultBranch: string,
-): Promise<{ ok: true } | { ok: false; kind: EscalationKind; error: string }> {
+): Promise<{ ok: true; renamedAdrs?: { num: string; to: string }[] } | { ok: false; kind: EscalationKind; error: string }> {
   await run("git", ["-C", worktree, "fetch", "origin"], worktree);
   const rebase = await git(["-C", worktree, "rebase", `origin/${defaultBranch}`], worktree);
   if (rebase.code !== 0) {
     await git(["-C", worktree, "rebase", "--abort"], worktree);
     return { ok: false, kind: "merge_conflict", error: rebase.stderr || rebase.stdout };
   }
+  // Robuster ADR-Kollisions-Backstop: nach dem Rebase trägt der Branch jetzt main + eigene
+  // Änderungen — eine vom Branch gewählte ADR-Nummer, die main inzwischen vergeben hat, wird
+  // hier (serialisiert sicher) auf die nächste freie Nummer umgeschrieben, BEVOR gepusht wird.
+  const adr = await reconcileAdrCollisions(worktree, defaultBranch);
+  if (adr.error) return { ok: false, kind: "push_rejected", error: `ADR-Kollisionsauflösung: ${adr.error}` };
   const gate = await secretGateBeforePush(worktree, defaultBranch);
   if (!gate.ok) return gate;
   const push = await git(["-C", worktree, "push", "--force-with-lease", "origin", branch], worktree);
   if (push.code !== 0) {
     return { ok: false, kind: classifyGitError(push.stderr) ?? "push_rejected", error: push.stderr };
   }
-  return { ok: true };
+  return { ok: true, renamedAdrs: adr.renamed.length ? adr.renamed : undefined };
 }
 
 export async function pushBranch(

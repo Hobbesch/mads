@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
-import { autoCommit, createPr, discoverWorktrees, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
+import { autoCommit, createPr, discoverWorktrees, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
 import { ensureMadsDir, loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
@@ -343,6 +343,16 @@ export class Orchestrator {
       });
     }
 
+    // Backstop (unabhängig von der DRAFT-Convention): hat der Branch eine NUMMERIERTE ADR
+    // hinzugefügt, deren Nummer auf origin/main inzwischen für eine andere Datei vergeben ist,
+    // jetzt umnummerieren — sonst ginge die Kollision in den PR.
+    const rec = await reconcileAdrCollisions(s.worktreePath, this.project.defaultBranch);
+    if (rec.error) {
+      this.emitError(agentId, "push_rejected", `ADR-Kollisionsauflösung fehlgeschlagen: ${rec.error}`);
+      return;
+    }
+    if (rec.renamed.length) this.emitAdrRenamed(agentId, rec.renamed);
+
     // Ohne Commits gegenüber dem Default-Branch scheitert `gh pr create` mit einem
     // kryptischen „No commits between …". Vorab klar prüfen und führen.
     const pre = await gitStatus(s.repoRoot, s.worktreePath, s.branch, this.project.defaultBranch);
@@ -395,6 +405,7 @@ export class Orchestrator {
       return;
     }
     this.autoSyncConflicted.delete(agentId); // manuell gelöst → Auto-Sync wieder erlauben
+    if (res.renamedAdrs?.length) this.emitAdrRenamed(agentId, res.renamedAdrs);
     log(`[orchestrator] Branch ${s.branch} rebaset onto origin/${this.project.defaultBranch}`);
     await this.pollAgent(s);
   }
@@ -518,6 +529,21 @@ export class Orchestrator {
 
   private emitMergeResult(agentId: string, ok: boolean, reasons: string[], prNumber?: number): void {
     this.emit({ ...envelope(), type: "merge_result", agentId, ok, merged: ok, reasons, prNumber });
+  }
+
+  /** Hinweis im Stream-Verlauf, dass der ADR-Kollisions-Backstop umnummeriert hat. */
+  private emitAdrRenamed(agentId: string, renamed: { num: string; to: string }[]): void {
+    this.emit({
+      ...envelope(),
+      type: "agent_event",
+      agentId,
+      event: {
+        kind: "assistant_text",
+        text: `🔢 ADR-Nummern-Kollision mit ${this.project?.defaultBranch ?? "main"} aufgelöst: ${renamed
+          .map((r) => "ADR-" + r.num)
+          .join(", ")} (Datei + Verweise umnummeriert).`,
+      },
+    });
   }
 
   // ---------------------------------------------------------------- Gate (P6)
@@ -851,6 +877,7 @@ export class Orchestrator {
           text: `↻ Auto-Sync: rebaset onto origin/${this.project.defaultBranch} (war ${st.behind} behind).`,
         },
       });
+      if (res.renamedAdrs?.length) this.emitAdrRenamed(s.agentId, res.renamedAdrs);
       await this.pollAgent(s, true);
     } else {
       this.autoSyncConflicted.add(s.agentId);
