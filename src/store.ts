@@ -293,7 +293,7 @@ export interface MadsState {
   syncBranch: (id: string) => Promise<void>;
   /** Integrator-only: main per fast-forward auf origin/<default> nachziehen (kein rebase). */
   updateMain: (id: string) => Promise<void>;
-  integratePr: (id: string) => Promise<void>;
+  integratePr: (id: string, keep?: boolean) => Promise<void>;
   runGate: (id: string) => Promise<void>;
   pollProject: () => Promise<void>;
   resumeAgent: (r: ResumableAgent) => Promise<void>;
@@ -960,9 +960,13 @@ export const useStore = create<MadsState>((set) => {
       await sendHost({ ...envelope(), type: "sync_branch", agentId: id });
     },
 
-    integratePr: async (id) => {
-      notice(id, "accent", "▶ Integrieren (gh pr merge --squash --delete-branch)");
-      await sendHost({ ...envelope(), type: "integrate_pr", agentId: id, method: "squash" });
+    integratePr: async (id, keep = false) => {
+      notice(
+        id,
+        "accent",
+        keep ? "▶ Mergen & weiterarbeiten (Branch behalten, auf main zurücksetzen)" : "▶ Integrieren (gh pr merge --squash + aufräumen)",
+      );
+      await sendHost({ ...envelope(), type: "integrate_pr", agentId: id, method: "squash", keepBranch: keep });
     },
 
     runGate: async (id) => {

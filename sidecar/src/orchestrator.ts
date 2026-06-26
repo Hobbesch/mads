@@ -27,6 +27,9 @@ export class Orchestrator {
   private readonly gitState = new Map<string, { behind: number; ahead: number; dirty: boolean }>();
   private readonly syncing = new Set<string>(); // läuft gerade ein Auto-Sync?
   private readonly autoSyncConflicted = new Set<string>(); // Auto-Sync pausiert bis manuell gelöst
+  // Nach „Mergen & weiterarbeiten": die Nummer des gemergten PRs, die der Poll ignoriert,
+  // bis ein NEUER PR aufgeht (sonst zeigt `gh pr view <branch>` weiter den Alt-PR als MERGED).
+  private readonly suppressedMergedPr = new Map<string, number>();
 
   async dispatch(msg: HostMessage): Promise<void> {
     switch (msg.type) {
@@ -112,7 +115,7 @@ export class Orchestrator {
         break;
 
       case "integrate_pr":
-        await this.handleIntegrate(msg.agentId, msg.method ?? "squash");
+        await this.handleIntegrate(msg.agentId, msg.method ?? "squash", msg.keepBranch ?? false);
         break;
 
       case "poll_project":
@@ -263,7 +266,11 @@ export class Orchestrator {
    * gegated: holt frischen git-/PR-Status, prüft das Vor-Merge-Gate, merged nur bei
    * grün, räumt danach den Worktree auf. Sub-Agents haben KEINE Merge-Op.
    */
-  private async handleIntegrate(agentId: string, method: "squash" | "merge" | "rebase"): Promise<void> {
+  private async handleIntegrate(
+    agentId: string,
+    method: "squash" | "merge" | "rebase",
+    keepBranch = false,
+  ): Promise<void> {
     const s = this.pool.get(agentId);
     if (!s || !s.repoRoot || !s.branch || !this.project) {
       this.emitMergeResult(agentId, false, ["Kein Worktree/Projekt — Integration nicht möglich."]);
@@ -292,8 +299,43 @@ export class Orchestrator {
       return;
     }
 
-    log(`[orchestrator] PR ${pr?.number ?? s.branch} gemerged (${method})`);
+    log(`[orchestrator] PR ${pr?.number ?? s.branch} gemerged (${method})${keepBranch ? " — Branch behalten" : ""}`);
     this.emitMergeResult(agentId, true, [], pr?.number);
+
+    if (keepBranch) {
+      // Langlebiger Integrations-Branch: NICHT aufräumen. Den Branch auf das frische main
+      // zurücksetzen (sauberer Weiterarbeits-Stand — die Arbeit liegt jetzt als Squash in
+      // main), Stream offen lassen. Der gemergte PR wird im Poll unterdrückt, bis ein neuer
+      // PR aufgeht; das PR-Badge wird sofort gelöscht.
+      if (pr) this.suppressedMergedPr.set(agentId, pr.number);
+      let resyncOk = true;
+      if (s.worktreePath) {
+        const base = this.project.defaultBranch;
+        await run("git", ["-C", s.worktreePath, "fetch", "origin", base], s.worktreePath);
+        const reset = await run("git", ["-C", s.worktreePath, "reset", "--hard", `origin/${base}`], s.worktreePath);
+        resyncOk = reset.code === 0;
+        const st = await gitStatus(s.repoRoot, s.worktreePath, s.branch, base);
+        this.gitState.set(agentId, st);
+        this.emit({ ...envelope(), type: "git_status", agentId, ...st });
+      }
+      this.emit({ ...envelope(), type: "pr_update", agentId, pr: undefined }); // PR-Badge löschen
+      this.emit({ ...envelope(), type: "status_update", agentId, status: "waiting_input", currentStep: undefined });
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: {
+          kind: "assistant_text",
+          text:
+            `✓ PR${pr?.number ? ` #${pr.number}` : ""} nach ${this.project.defaultBranch} gemerged & Branch „${s.branch}" ` +
+            `auf origin/${this.project.defaultBranch} zurückgesetzt${resyncOk ? "" : " (Reset fehlgeschlagen — bitte manuell Sync drücken)"}. ` +
+            `Du kannst hier weiterarbeiten; neue Änderungen ergeben einen neuen PR.`,
+        },
+      });
+      this.persist();
+      return;
+    }
+
     if (pr) this.emit({ ...envelope(), type: "pr_update", agentId, pr: { ...pr, state: "MERGED" } });
     this.emit({ ...envelope(), type: "status_update", agentId, status: "done", currentStep: "merged" });
 
@@ -515,7 +557,17 @@ export class Orchestrator {
       this.gitState.set(s.agentId, status);
       this.emit({ ...envelope(), type: "git_status", agentId: s.agentId, ...status });
       const pr = await prStatus(s.repoRoot, s.branch);
-      if (pr) this.emit({ ...envelope(), type: "pr_update", agentId: s.agentId, pr });
+      if (pr) {
+        const suppressed = this.suppressedMergedPr.get(s.agentId);
+        // Nach „Mergen & weiterarbeiten": den gemergten Alt-PR ignorieren, bis ein NEUER
+        // (offener) PR aufgeht — dann Unterdrückung aufheben und normal emittieren.
+        if (suppressed !== undefined && pr.number === suppressed && pr.state !== "OPEN") {
+          // ignorieren
+        } else {
+          if (pr.number !== suppressed) this.suppressedMergedPr.delete(s.agentId);
+          this.emit({ ...envelope(), type: "pr_update", agentId: s.agentId, pr });
+        }
+      }
     } catch (e) {
       log(`[orchestrator] poll ${s.agentId} failed:`, String(e));
     }

@@ -155,6 +155,17 @@ export function Inspector() {
               {step.label}
             </button>
           )}
+          {/* Alternative zum „Integrieren": mergen, aber Branch + Stream behalten (auf main
+              zurückgesetzt) — für langlebige Integrations-Branches, an denen man weiterarbeitet. */}
+          {live && step.kind === "integrate" && (
+            <button
+              disabled={step.disabled}
+              title="Mergt den PR nach main, behält aber Branch + Stream (auf main zurückgesetzt) — zum asynchronen Weiterarbeiten am selben Branch."
+              onClick={() => void integratePr(selectedId, true)}
+            >
+              Mergen & weiterarbeiten
+            </button>
+          )}
           {live && agent.role === "sub" && agent.worktreePath && (
             <button onClick={() => void runGate(selectedId)} title="Clean-Code-Gate: lint/type/test + Secret-Scan (läuft beim PR automatisch)">
               Gate{agent.gate ? (agent.gate.ok ? " ✓" : " ✖") : ""}

@@ -121,6 +121,10 @@ export interface IntegratePrMsg extends BaseMsg {
   type: "integrate_pr";
   agentId: string;
   method?: "squash" | "merge" | "rebase"; // default squash (lineare main)
+  /** Branch + Worktree + Stream NACH dem Merge behalten (langlebiger Integrations-Branch):
+   *  mergt nach main, setzt den Branch dann auf das frische main zurück (sauberer
+   *  Weiterarbeits-Stand) und beendet den Stream NICHT. Default false = mergen + aufräumen. */
+  keepBranch?: boolean;
 }
 
 /** P6: Clean-Code-Gate im Worktree ausführen (lint/type/test + Secret-Scan). */
@@ -359,7 +363,7 @@ export interface PullRequestInfo {
 export interface PrUpdateMsg extends BaseMsg {
   type: "pr_update";
   agentId: string;
-  pr: PullRequestInfo;
+  pr?: PullRequestInfo; // undefined = PR-Status löschen (z. B. nach „Mergen & weiterarbeiten")
 }
 
 export interface MergeResultMsg extends BaseMsg {
