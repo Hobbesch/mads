@@ -9,6 +9,7 @@
  * Siehe docs/research/github-multiagent.md und docs/design/04-sub-agents.md.
  */
 import { execFile } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { EscalationKind, PullRequestInfo, PrChecksState } from "../../shared/protocol.js";
@@ -243,6 +244,60 @@ export async function autoCommit(
   }
   const c = await git(["-C", worktree, "commit", "-m", message], worktree);
   return { ok: c.code === 0 };
+}
+
+const adrNums = (text: string): number[] =>
+  (text.match(/ADR-0*(\d+)/g) ?? []).map((m) => parseInt(m.replace(/\D/g, ""), 10));
+
+/**
+ * A (automatische ADR-Nummern): benennt alle `ADR-DRAFT-<slug>.md` im Branch auf die nächste
+ * freie `ADR-NNNN` um — Nummer = max(origin/<base>, Branch-eigene ADRs, `alreadyUsed` aus anderen
+ * Streams) + 1, fortlaufend. Schreibt Verweise (`ADR-DRAFT-<slug>` → `ADR-NNNN-<slug>`) in allen
+ * getrackten Dateien um und committet. GENERISCH & opt-in: ohne Draft-Dateien ein No-Op
+ * (Nicht-ADR-Projekte unberührt). Reines git+fs — KEIN Repo-Code-Exec.
+ */
+export async function finalizeAdrDrafts(
+  worktree: string,
+  base: string,
+  alreadyUsed: number[] = [],
+): Promise<{ renamed: { num: string; to: string }[]; error?: string }> {
+  const lsr = await git(["-C", worktree, "ls-files", "*ADR-DRAFT-*.md"], worktree);
+  const drafts = lsr.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  if (drafts.length === 0) return { renamed: [] };
+  await git(["-C", worktree, "fetch", "origin", base], worktree);
+  const baseList = await git(["-C", worktree, "ls-tree", "-r", "--name-only", `origin/${base}`], worktree);
+  const ownList = await git(["-C", worktree, "ls-files", "*ADR-*.md"], worktree);
+  let next = Math.max(0, ...adrNums(baseList.stdout), ...adrNums(ownList.stdout), ...alreadyUsed) + 1;
+  const renamed: { num: string; to: string }[] = [];
+  for (const from of drafts.sort()) {
+    const num = String(next).padStart(4, "0");
+    const slug = (from.split("/").pop() ?? "").replace(/^ADR-DRAFT-/, "").replace(/\.md$/, "");
+    const to = from.replace(/ADR-DRAFT-[^/]*\.md$/, `ADR-${num}-${slug}.md`);
+    const mv = await git(["-C", worktree, "mv", from, to], worktree);
+    if (mv.code !== 0) return { renamed, error: `git mv ${from} → ${to}: ${mv.stderr || mv.stdout}` };
+    const draftRef = `ADR-DRAFT-${slug}`;
+    const numRef = `ADR-${num}-${slug}`;
+    const refFiles = (await git(["-C", worktree, "grep", "-l", "-F", draftRef], worktree)).stdout
+      .split("\n").map((s) => s.trim()).filter(Boolean);
+    for (const rf of refFiles) {
+      try {
+        const p = join(worktree, rf);
+        const txt = readFileSync(p, "utf8");
+        if (txt.includes(draftRef)) writeFileSync(p, txt.split(draftRef).join(numRef));
+      } catch {
+        /* nicht lesbare/binäre Datei überspringen */
+      }
+    }
+    renamed.push({ num, to });
+    next++;
+  }
+  await git(["-C", worktree, "add", "-A"], worktree);
+  const c = await git(
+    ["-C", worktree, "commit", "-m", `chore(adr): assign numbers (${renamed.map((r) => "ADR-" + r.num).join(", ")})`],
+    worktree,
+  );
+  if (c.code !== 0) return { renamed, error: `ADR-Commit: ${c.stderr || c.stdout}` };
+  return { renamed };
 }
 
 /** Lokale Commits, die noch nicht auf origin/<branch> liegen (für „PR aktuell halten"). */

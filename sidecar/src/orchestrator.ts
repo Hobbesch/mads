@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
-import { autoCommit, createPr, discoverWorktrees, fastForwardMain, getRepoInfo, gitStatus, mergePr, prStatus, pushBranch, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
+import { autoCommit, createPr, discoverWorktrees, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, prStatus, pushBranch, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
 import { ensureMadsDir, loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
@@ -37,6 +37,9 @@ export class Orchestrator {
   private readonly autopilotSecretNotified = new Set<string>();
   // 3.2: Integrationen serialisieren (kein Merge-Race zweier fast gleichzeitiger Merges).
   private integrateLock: Promise<void> = Promise.resolve();
+  // A: PR-Erstellungen serialisieren, damit die ADR-Nummern-Vergabe (Scan aller Worktrees +
+  // Umbenennen) atomar ist und zwei Streams nie dieselbe Nummer ziehen.
+  private createPrLock: Promise<void> = Promise.resolve();
 
   async dispatch(msg: HostMessage): Promise<void> {
     switch (msg.type) {
@@ -216,11 +219,50 @@ export class Orchestrator {
   }
 
   // ---------------------------------------------------------------- GitHub
+  /** PR-Erstellung — SERIALISIERT (A: atomare ADR-Nummern-Vergabe). */
   private async handleCreatePr(agentId: string, title?: string, body?: string, draft?: boolean): Promise<void> {
+    const prev = this.createPrLock;
+    let release!: () => void;
+    this.createPrLock = new Promise<void>((r) => (release = r));
+    await prev.catch(() => {});
+    try {
+      await this.doCreatePr(agentId, title, body, draft);
+    } finally {
+      release();
+    }
+  }
+
+  private async doCreatePr(agentId: string, title?: string, body?: string, draft?: boolean): Promise<void> {
     const s = this.pool.get(agentId);
     if (!s || !s.repoRoot || !s.branch || !s.worktreePath || !this.project) {
       this.emitError(agentId, "spawn_failed", "Kein Worktree/Projekt für diesen Agenten — PR nicht möglich.");
       return;
+    }
+
+    // A: ADR-Entwürfe (ADR-DRAFT-*) jetzt eindeutig nummerieren — Nummer global frei über
+    // origin/main UND alle anderen aktiven Worktrees (deren bereits vergebene Nummern). Durch
+    // createPrLock atomar → zwei Streams ziehen nie dieselbe Nummer. No-Op ohne Draft-Dateien.
+    const usedByOthers: number[] = [];
+    for (const o of this.pool.values()) {
+      if (o.agentId === agentId || o.role !== "sub" || !o.worktreePath) continue;
+      const r = await run("git", ["-C", o.worktreePath, "ls-files", "*ADR-*.md"], o.worktreePath);
+      for (const m of r.stdout.match(/ADR-0*(\d+)/g) ?? []) usedByOthers.push(parseInt(m.replace(/\D/g, ""), 10));
+    }
+    const fin = await finalizeAdrDrafts(s.worktreePath, this.project.defaultBranch, usedByOthers);
+    if (fin.error) {
+      this.emitError(agentId, "push_rejected", `ADR-Nummerierung fehlgeschlagen: ${fin.error}`);
+      return;
+    }
+    if (fin.renamed.length) {
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: {
+          kind: "assistant_text",
+          text: `🔢 ${fin.renamed.length} ADR-Entwurf/Entwürfe nummeriert: ${fin.renamed.map((r) => "ADR-" + r.num).join(", ")}.`,
+        },
+      });
     }
 
     // Ohne Commits gegenüber dem Default-Branch scheitert `gh pr create` mit einem
