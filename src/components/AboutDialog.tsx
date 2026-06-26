@@ -1,11 +1,23 @@
+import { useRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { RELEASE, buildDateLocal } from "../version";
 
 const REPO = "https://github.com/Hobbesch/mads";
 
 export function AboutDialog({ onClose }: { onClose: () => void }) {
+  // Nur schließen, wenn Maus-Druck UND -Loslassen auf dem Backdrop waren (siehe NewStreamDialog) —
+  // eine Textmarkierung, die auf dem Overlay endet, soll den Dialog nicht schließen.
+  const downOnOverlay = useRef(false);
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div
+      className="modal-overlay"
+      onMouseDown={(e) => {
+        downOnOverlay.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (downOnOverlay.current && e.target === e.currentTarget) onClose();
+      }}
+    >
       <div className="about-card" onClick={(e) => e.stopPropagation()}>
         <div className="about-logo-wrap">
           <img className="about-logo" src="/mads-logo.png" alt="mads" />

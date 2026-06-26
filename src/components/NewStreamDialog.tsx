@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useStore } from "../store";
 import type { AgentRole } from "../store";
 import type { PermissionMode } from "../../shared/protocol";
@@ -27,8 +27,22 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
 
   const realSubNeedsProject = role === "sub" && !mock && !project;
 
+  // Backdrop-Klick schließt — ABER nur, wenn Maus-Druck UND -Loslassen beide auf dem Overlay
+  // waren. Sonst beendet eine Textmarkierung im Prompt (Drag, der auf dem Overlay endet) den
+  // Dialog ungewollt: das `click`-Event zielt dann auf den gemeinsamen Vorfahren (= Overlay),
+  // läuft also am `stopPropagation` des Formulars vorbei.
+  const downOnOverlay = useRef(false);
+
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div
+      className="modal-overlay"
+      onMouseDown={(e) => {
+        downOnOverlay.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (downOnOverlay.current && e.target === e.currentTarget) onClose();
+      }}
+    >
       <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <div className="modal-title">Neuer Entwicklungs-Stream</div>
 
