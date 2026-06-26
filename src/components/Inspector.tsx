@@ -49,6 +49,7 @@ export function Inspector() {
   const [confirm, setConfirm] = useState<
     null | { title: string; body: React.ReactNode; confirmLabel: string; danger?: boolean; onConfirm: () => void }
   >(null);
+  const [dragging, setDragging] = useState(false); // Bild per Drag&Drop in den Composer
 
   // Auto-wachsende Composer-Höhe (Textarea): bei jeder Entwurfs-Änderung neu messen.
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -76,20 +77,34 @@ export function Inspector() {
     setDraftImages(selectedId, []);
   };
 
+  // Bild-Dateien (aus Paste ODER Drag&Drop) als Anhänge übernehmen (base64, ImageInput).
+  const attachImageFiles = async (files: File[]) => {
+    const imgs: ImageInput[] = [];
+    for (const f of files) {
+      if (f.type.startsWith("image/")) imgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f) });
+    }
+    if (imgs.length) setDraftImages(selectedId, [...attached, ...imgs]);
+    return imgs.length;
+  };
+
   const onPaste = async (e: React.ClipboardEvent) => {
     const items = e.clipboardData?.items;
     if (!items) return;
-    const imgs: ImageInput[] = [];
-    for (const it of Array.from(items)) {
-      if (it.type.startsWith("image/")) {
-        const file = it.getAsFile();
-        if (file) imgs.push({ mediaType: file.type || "image/png", dataBase64: await blobToBase64(file) });
-      }
-    }
-    if (imgs.length) {
+    const files = Array.from(items)
+      .filter((it) => it.type.startsWith("image/"))
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => !!f);
+    if (files.length) {
       e.preventDefault();
-      setDraftImages(selectedId, [...attached, ...imgs]);
+      await attachImageFiles(files);
     }
+  };
+
+  const onDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    const files = e.dataTransfer?.files;
+    if (files && files.length) await attachImageFiles(Array.from(files));
   };
 
   const badges = agentBadges(agent);
@@ -339,7 +354,19 @@ export function Inspector() {
         <MessageTimeline agentId={selectedId} />
       </div>
 
-      <div className="composer-wrap">
+      <div
+        className={`composer-wrap${dragging ? " dragover" : ""}`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          if (!dragging) setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          // nur zurücksetzen, wenn der Cursor den Composer wirklich verlässt (nicht bei Kind-Elementen)
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+        }}
+        onDrop={(e) => void onDrop(e)}
+      >
+        {dragging && <div className="composer-drophint">Bild hier ablegen zum Anhängen</div>}
         {attached.length > 0 && (
           <div className="composer-attachments">
             {attached.map((im, i) => (
