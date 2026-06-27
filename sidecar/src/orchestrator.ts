@@ -770,11 +770,14 @@ export class Orchestrator {
           }
           this.autopilotSecretNotified.delete(s.agentId);
           if (res.ok) {
+            const skipNote = res.skipped?.length
+              ? ` (nicht versioniert, übersprungen: ${res.skipped.slice(0, 4).join(", ")}${res.skipped.length > 4 ? " …" : ""})`
+              : "";
             this.emit({
               ...envelope(),
               type: "agent_event",
               agentId: s.agentId,
-              event: { kind: "assistant_text", text: "↻ Autopilot: Arbeit lokal committet." },
+              event: { kind: "assistant_text", text: `↻ Autopilot: Arbeit lokal committet.${skipNote}` },
             });
             await this.pollAgent(s, true);
           }

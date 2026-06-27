@@ -9,12 +9,13 @@
  * Siehe docs/research/github-multiagent.md und docs/design/04-sub-agents.md.
  */
 import { execFile } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { EscalationKind, PullRequestInfo, PrChecksState } from "../../shared/protocol.js";
 import { scanSecrets, type SecretHit } from "../../shared/secrets.js";
 import { planAdrCollisionRenames } from "../../shared/adr.js";
+import { isArtifactPath } from "../../shared/commit-hygiene.js";
 
 export interface RunResult {
   code: number;
@@ -231,20 +232,55 @@ async function secretGateBeforePush(
 export async function autoCommit(
   worktree: string,
   message: string,
-): Promise<{ ok: boolean; secrets?: SecretHit[]; nothing?: boolean }> {
+): Promise<{ ok: boolean; secrets?: SecretHit[]; nothing?: boolean; skipped?: string[] }> {
   await git(["-C", worktree, "add", "-A"], worktree);
+  // Hygiene: nie-zu-committende Artefakte (.venv/node_modules/__pycache__/…) und Symlinks, die
+  // AUS dem Worktree hinauszeigen, wieder aus dem Index nehmen. Das ist der Fix gegen den
+  // eingecheckten `.venv`-Symlink, der danach jeden Rebase blockierte (.gitignore `.venv/`
+  // erfasst den Symlink nicht). Reversibel: `git reset -- <pfad>` un-staged nur, Datei bleibt.
+  const skipped = await unstageUncommittable(worktree);
   const diff = await git(["-C", worktree, "diff", "--cached"], worktree);
   if (!diff.stdout.trim()) {
     await git(["-C", worktree, "reset", "-q"], worktree);
-    return { ok: false, nothing: true };
+    return { ok: false, nothing: true, skipped: skipped.length ? skipped : undefined };
   }
   const hits = scanSecrets(diff.stdout);
   if (hits.length) {
     await git(["-C", worktree, "reset", "-q"], worktree); // nicht im Staged-Zustand hängen lassen
-    return { ok: false, secrets: hits };
+    return { ok: false, secrets: hits, skipped: skipped.length ? skipped : undefined };
   }
   const c = await git(["-C", worktree, "commit", "-m", message], worktree);
-  return { ok: c.code === 0 };
+  return { ok: c.code === 0, skipped: skipped.length ? skipped : undefined };
+}
+
+/**
+ * Nimmt nie-zu-committende Pfade wieder aus dem Index: (a) Env/Build/Cache-Artefakte
+ * (isArtifactPath — symlink-sicher per Name), (b) Symlinks, die aus dem Worktree hinauszeigen.
+ * Gibt die übersprungenen Pfade zurück (Datei bleibt liegen, nur un-staged).
+ */
+async function unstageUncommittable(worktree: string): Promise<string[]> {
+  const staged = (await git(["-C", worktree, "diff", "--cached", "--name-only"], worktree)).stdout
+    .split("\n").map((s) => s.trim()).filter(Boolean);
+  if (staged.length === 0) return [];
+  const wtRoot = resolve(worktree);
+  const skip: string[] = [];
+  for (const rel of staged) {
+    if (isArtifactPath(rel)) {
+      skip.push(rel);
+      continue;
+    }
+    try {
+      const full = join(worktree, rel);
+      if (lstatSync(full).isSymbolicLink()) {
+        const target = resolve(dirname(full), readlinkSync(full));
+        if (target !== wtRoot && !target.startsWith(wtRoot + sep)) skip.push(rel); // zeigt nach außen
+      }
+    } catch {
+      /* gelöschter/unlesbarer Pfad — ignorieren */
+    }
+  }
+  if (skip.length) await git(["-C", worktree, "reset", "-q", "--", ...skip], worktree);
+  return skip;
 }
 
 const adrNums = (text: string): number[] =>
@@ -400,6 +436,31 @@ export async function unpushedCount(worktree: string, branch: string): Promise<n
 }
 
 /** rebase onto origin/<default> + force-with-lease — der stale-base-Killer. */
+/** Steckt der Worktree mitten in einem Rebase? (rebase-merge/ oder rebase-apply/ vorhanden). */
+async function isRebaseInProgress(worktree: string): Promise<boolean> {
+  for (const which of ["rebase-merge", "rebase-apply"]) {
+    const r = await git(["-C", worktree, "rev-parse", "--git-path", which], worktree);
+    const p = r.stdout.trim();
+    if (!p) continue;
+    const abs = p.startsWith("/") ? p : join(worktree, p);
+    try {
+      if (lstatSync(abs).isDirectory()) return true;
+    } catch {
+      /* nicht vorhanden */
+    }
+  }
+  return false;
+}
+
+/** Bestmöglich die blockierenden (nicht-versionierten) Pfade aus der git-Fehlermeldung ziehen. */
+function parseUntrackedObstacles(text: string): string {
+  const cand = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^[^\s:]+$/.test(l) && !/^(error|hint|warning|aborting|use)\b/i.test(l));
+  return [...new Set(cand)].slice(0, 5).join(", ");
+}
+
 export async function syncBranch(
   worktree: string,
   branch: string,
@@ -408,8 +469,27 @@ export async function syncBranch(
   await run("git", ["-C", worktree, "fetch", "origin"], worktree);
   const rebase = await git(["-C", worktree, "rebase", `origin/${defaultBranch}`], worktree);
   if (rebase.code !== 0) {
+    const errText = rebase.stderr || rebase.stdout;
     await git(["-C", worktree, "rebase", "--abort"], worktree);
-    return { ok: false, kind: "merge_conflict", error: rebase.stderr || rebase.stdout };
+    const stuck = await isRebaseInProgress(worktree); // der Abbruch selbst gescheitert?
+    const stuckNote = stuck
+      ? " ⚠ Der Worktree steckt noch im Rebase — `git rebase --abort` gelang nicht (Reparatur nötig)."
+      : "";
+    // „would lose untracked files" / „untracked working tree files would be overwritten" ist KEIN
+    // echter Merge-Konflikt, sondern eine nicht-versionierte Datei im Weg (meist ein eingechecktes
+    // Build-Artefakt wie .venv). Klar und handlungsweisend melden statt „manuell Sync".
+    if (/would lose untracked files|untracked working tree files would be overwritten/i.test(errText)) {
+      const paths = parseUntrackedObstacles(errText);
+      return {
+        ok: false,
+        kind: "merge_conflict",
+        error:
+          `Auto-Sync blockiert durch nicht-versionierte Datei(en) im Weg${paths ? ` (${paths})` : ""} — KEIN echter ` +
+          `Merge-Konflikt. Meist ein eingechecktes Build-Artefakt (.venv/node_modules). Lösung: aus der ` +
+          `Versionierung nehmen (git rm --cached <pfad>) und in .gitignore aufnehmen.${stuckNote}`,
+      };
+    }
+    return { ok: false, kind: "merge_conflict", error: errText + stuckNote };
   }
   // Robuster ADR-Kollisions-Backstop: nach dem Rebase trägt der Branch jetzt main + eigene
   // Änderungen — eine vom Branch gewählte ADR-Nummer, die main inzwischen vergeben hat, wird
