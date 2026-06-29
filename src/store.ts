@@ -313,6 +313,8 @@ export interface MadsState {
   outsourceMain: (integratorId: string) => Promise<void>;
   /** Integrator-only: main per fast-forward auf origin/<default> nachziehen (kein rebase). */
   updateMain: (id: string) => Promise<void>;
+  /** Konsolidiert „Alle aktualisieren": main fast-forward + alle hinterherhängenden Subs rebasen. */
+  syncAllBehind: () => Promise<void>;
   integratePr: (id: string, keep?: boolean) => Promise<void>;
   runGate: (id: string) => Promise<void>;
   pollProject: () => Promise<void>;
@@ -1109,6 +1111,22 @@ export const useStore = create<MadsState>((set) => {
       // G5: Integrator zieht main per fast-forward nach (NICHT rebase/force — das ist Sub).
       notice(id, "accent", "↻ main aktualisieren (fast-forward auf origin)…");
       await sendHost({ ...envelope(), type: "update_main", agentId: id });
+    },
+
+    syncAllBehind: async () => {
+      // Konsolidierter „Alle aktualisieren": Projekt-Default-Branch per fast-forward
+      // (Integrator) + jeden hinterherhängenden, aktiven Sub-Stream rebasen onto origin.
+      const { agents, order, reconcileSummary } = useStore.getState();
+      const list = order.map((id) => agents[id]).filter(Boolean);
+      const integrator = list.find((a) => a.role === "integrator");
+      if (integrator && (reconcileSummary?.mainBehind ?? 0) > 0) {
+        await useStore.getState().updateMain(integrator.id);
+      }
+      for (const a of list) {
+        if (a.role === "sub" && a.behind > 0 && a.live !== false) {
+          await useStore.getState().syncBranch(a.id);
+        }
+      }
     },
 
     dismissReconcile: () => set({ reconcileSummary: undefined }),

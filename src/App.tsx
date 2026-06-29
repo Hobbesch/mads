@@ -12,6 +12,7 @@ import { NewStreamDialog } from "./components/NewStreamDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { ParallelDialog } from "./components/ParallelDialog";
 import { SaveToast } from "./components/SaveToast";
+import { StalenessBanner } from "./components/StalenessBanner";
 import "./App.css";
 
 export default function App() {
@@ -218,6 +219,8 @@ export default function App() {
             </button>
           </div>
         )}
+
+        <StalenessBanner />
 
         {reconcileSummary && (
           <div className={`reconcile-banner${reconcileSummary.mainBehind > 0 ? " warn" : ""}`}>

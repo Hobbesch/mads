@@ -24,12 +24,28 @@ export interface RunResult {
 }
 
 export function run(cmd: string, args: string[], cwd?: string, timeoutMs?: number): Promise<RunResult> {
+  // git/gh dürfen NIE unbegrenzt hängen. GIT_TERMINAL_PROMPT=0 lässt git bei fehlenden
+  // Credentials SOFORT scheitern statt interaktiv (ohne Terminal) auf stdin zu warten —
+  // genau dieser Credential-Prompt-Hang verkeilte den open_project/Reconcile-Fetch auf einem
+  // divergierten Repo. Der Credential-Helper (osxkeychain) liefert gespeicherte Logins
+  // weiterhin. Plus Default-Timeout für git/gh, damit auch ein Netz-Stall nie ewig blockiert.
+  const isVcs = cmd === "git" || cmd === "gh";
   return new Promise((resolve) => {
     // timeout > 0 → execFile killt den Prozess nach Ablauf (err.killed) → code != 0.
-    execFile(cmd, args, { cwd, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) => {
-      const code = err && typeof (err as { code?: number }).code === "number" ? (err as { code: number }).code : err ? 1 : 0;
-      resolve({ code, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? "" });
-    });
+    execFile(
+      cmd,
+      args,
+      {
+        cwd,
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: timeoutMs ?? (isVcs ? 60_000 : undefined),
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      },
+      (err, stdout, stderr) => {
+        const code = err && typeof (err as { code?: number }).code === "number" ? (err as { code: number }).code : err ? 1 : 0;
+        resolve({ code, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? "" });
+      },
+    );
   });
 }
 const git = (args: string[], cwd?: string) => run("git", args, cwd);
