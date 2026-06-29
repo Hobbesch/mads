@@ -75,7 +75,6 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
         disabled={!enabledFor(item)}
         onActivate={() => activate(item)}
       />
-      {item.id === "project" && <RecentProjectsPopover open={projectOpen} onClose={() => setProjectOpen(false)} />}
     </div>
   );
 
@@ -106,6 +105,10 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
 
       <div className="rail-group rail-top">{top.map(renderItem)}</div>
       <div className="rail-group rail-bottom">{bottom.map(renderItem)}</div>
+
+      {/* Popover auf nav-Ebene rendern (NICHT in .rail-top — dessen overflow-y:auto klippt
+          das absolut positionierte Popover weg → war unsichtbar). Vertikal beim Projekt-Eintrag. */}
+      <RecentProjectsPopover open={projectOpen} onClose={() => setProjectOpen(false)} />
 
       <button
         type="button"

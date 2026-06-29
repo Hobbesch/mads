@@ -277,7 +277,7 @@ button {
 .recent-popover {
   position: absolute;
   left: calc(100% + 6px);
-  top: 30px;
+  top: 70px; /* auf nav-Ebene gerendert → vertikal beim „Projekt"-Eintrag ankern */
   z-index: 50;
   width: 280px;
   max-height: 70vh;
