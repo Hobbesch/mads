@@ -22,9 +22,13 @@ use tauri::{AppHandle, Emitter, Manager};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 const MODEL_FILE: &str = "ggml-large-v3-turbo.bin";
+// Auf eine UNVERÄNDERLICHE Revision gepinnt (nicht `resolve/main`) + SHA-256 nach dem Download
+// geprüft: sonst könnte ein MITM oder eine geänderte HF-Datei ~1,6 GB angreiferkontrollierte
+// Bytes liefern, die whisper.cpp dann parst.
 const MODEL_URL: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin";
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin";
 const MODEL_TOTAL_BYTES: u64 = 1_624_555_275; // ~1,62 GB (f16)
+const MODEL_SHA256: &str = "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69";
 const TARGET_RATE: u32 = 16_000;
 
 /// Laufzeit-Zustand des Diktats. Der cpal-Stream selbst lebt NUR auf dem Aufnahme-Thread.
@@ -64,6 +68,32 @@ struct DownloadProgress {
     total: u64,
 }
 
+/// Prüft die heruntergeladene Modell-Datei gegen die erwartete Größe UND den gepinnten
+/// SHA-256 (gestreamt, kein RAM-Peak bei ~1,6 GB). Fehlschlag → Datei ist NICHT vertrauenswürdig.
+fn verify_model(path: &Path) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if len != MODEL_TOTAL_BYTES {
+        return Err(format!("Modell-Größe unerwartet ({len} statt {MODEL_TOTAL_BYTES} Bytes) — verworfen"));
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20]; // 1 MiB
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let hex = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>();
+    if hex != MODEL_SHA256 {
+        return Err(format!("Modell-Prüfsumme falsch (erwartet {MODEL_SHA256}, war {hex}) — verworfen"));
+    }
+    Ok(())
+}
+
 /// Lädt das Whisper-Modell einmalig per `curl` (folgt Redirects, streamt auf Platte) und
 /// meldet Fortschritt über das Event `whisper-download-progress`.
 #[tauri::command]
@@ -88,6 +118,12 @@ pub async fn whisper_download_model(app: AppHandle) -> Result<(), String> {
             match child.try_wait().map_err(|e| e.to_string())? {
                 Some(status) => {
                     if status.success() {
+                        // Integrität prüfen (Größe + SHA-256), BEVOR die Datei an ihren Platz
+                        // rückt und geladen wird. Bei Abweichung: verwerfen.
+                        if let Err(e) = verify_model(&tmp) {
+                            let _ = std::fs::remove_file(&tmp);
+                            return Err(e);
+                        }
                         std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
                         let _ = app.emit(
                             "whisper-download-progress",

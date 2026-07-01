@@ -147,14 +147,23 @@ fn is_denied(p: &Path) -> bool {
     for comp in p.components() {
         if let Component::Normal(os) = comp {
             let name = os.to_string_lossy();
-            if name == ".git"
-                || name == ".ssh"
-                || name == ".aws"
-                || name == "node_modules"
-                || name == "target"
-                || name == ".env"
-                || name.starts_with(".env.")
-            {
+            // geschützte Ordner
+            let dir = matches!(
+                name.as_ref(),
+                ".git" | ".ssh" | ".aws" | ".gnupg" | ".kube" | ".docker" | "node_modules" | "target"
+            );
+            // Credential-/Secret-Dateien (Name-basiert) — eine reine Ordner-Liste ließe
+            // .netrc/.npmrc/SSH-Keys/*.pem durch (INJ-3: Lese-Exfiltration von Zugangsdaten).
+            let file = matches!(
+                name.as_ref(),
+                ".env" | ".netrc" | ".npmrc" | ".pgpass" | ".gitconfig" | ".git-credentials" | ".pypirc"
+            ) || name.starts_with(".env.")
+                || name.starts_with("id_rsa")
+                || name.starts_with("id_ed25519")
+                || name.starts_with("id_ecdsa")
+                || name.starts_with("id_dsa")
+                || name.ends_with(".pem");
+            if dir || file {
                 return true;
             }
         }
@@ -416,6 +425,19 @@ pub fn mads_register_root(
     path: String,
 ) -> Result<(), String> {
     let root = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    // Validierung: ein Root gewährt Lesen+Schreiben unter sich — zu breite Roots ablehnen,
+    // damit ein Aufruf mit `/`, `$HOME` o. Ä. nicht das halbe Dateisystem freischaltet.
+    if !root.is_dir() {
+        return Err("Root muss ein existierendes Verzeichnis sein".into());
+    }
+    let comps = root.components().filter(|c| matches!(c, Component::Normal(_))).count();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let is_system = ["/etc", "/usr", "/bin", "/sbin", "/var", "/System", "/Library", "/private", "/Applications"]
+        .iter()
+        .any(|s| root.starts_with(s));
+    if root == Path::new("/") || comps < 2 || Some(&root) == home.as_ref() || is_system {
+        return Err("Root zu weit gefasst (Filesystem-Root/Home/System nicht erlaubt)".into());
+    }
     let _ = app.fs_scope().allow_directory(&root, true); // tauri-plugin-fs FsExt (für watch)
     scope.add_root(root); // mads-eigene Allow-Liste (der eigentliche Gate)
     Ok(())

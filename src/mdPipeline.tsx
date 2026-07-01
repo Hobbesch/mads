@@ -27,13 +27,17 @@ import type { Root, Text } from "mdast";
 // Label erhalten, der Slug wird 1:1 als Dateiname benutzt (keine Slugifizierung —
 // Datei-Namen mit Leerzeichen sind gültig). Markiert via `data-wikilink` für das
 // Klick-Routing in der Preview.
-const WIKILINK = /\[\[([^\]]+?)\]\]/g;
+// Label auf eine Zeile + max. 200 Zeichen BEGRENZT: die frühere unbeschränkte Lazy-Regex
+// (`[^\]]+?`) war auf bösartigem Markdown quadratisch (ReDoS → UI-Freeze). Beschränkt scannt
+// jeder Match-Versuch höchstens 200 Zeichen → linear.
+const WIKILINK = /\[\[([^\]\n]{1,200})\]\]/g;
 
 export function remarkWikilink() {
   return (tree: Root) => {
     visit(tree, "text", (node: Text, index, parent) => {
       if (!parent || index === null || index === undefined) return;
       const value = node.value;
+      if (value.length > 100_000) return; // pathologisch großer Text-Node → nicht scannen
       if (!value.includes("[[")) return;
       WIKILINK.lastIndex = 0;
       const parts: Array<Text | LinkNode> = [];
@@ -77,6 +81,13 @@ interface LinkNode {
 // rehype-sanitize schneidet pro Element auf die gelisteten Werte zu).
 export const mdSchema = {
   ...defaultSchema,
+  // Bild-Quellen NUR lokal/`data:` — KEIN Remote-http(s). Sonst ist ein `![](https://tracker/x)`
+  // in beliebigem Repo-Markdown ein Zero-Click-Tracking-Beacon (lädt beim Öffnen, verrät IP +
+  // „Dokument geöffnet"). `href` bleibt http/https/mailto (Links öffnet der Nutzer bewusst extern).
+  protocols: {
+    ...defaultSchema.protocols,
+    src: ["data"],
+  },
   attributes: {
     ...defaultSchema.attributes,
     span: [...(defaultSchema.attributes?.span ?? []), ["className", /^pl-/, /^hljs/, "line"]],

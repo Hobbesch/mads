@@ -38,7 +38,10 @@ export function run(cmd: string, args: string[], cwd?: string, timeoutMs?: numbe
       {
         cwd,
         maxBuffer: 16 * 1024 * 1024,
-        timeout: timeoutMs ?? (isVcs ? 60_000 : undefined),
+        // Immer ein Wall-Clock-Limit: git/gh 60 s; sonstige (z. B. Repo-Build/Test-Skripte im
+        // Clean-Code-Gate) 10 min — ein hängendes Skript darf den Gate/Sidecar nicht deadlocken
+        // (err.killed → code != 0 → wird als Fehlschlag behandelt).
+        timeout: timeoutMs ?? (isVcs ? 60_000 : 600_000),
         env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
       },
       (err, stdout, stderr) => {
@@ -226,7 +229,10 @@ async function secretGateBeforePush(
   const baseRef = `origin/${base}`;
   const exists = await git(["-C", worktree, "rev-parse", "--verify", "--quiet", baseRef], worktree);
   if (exists.code !== 0) return { ok: true }; // Basis remote unbekannt → Scan nicht möglich (selten)
-  const diff = await git(["-C", worktree, "diff", "--merge-base", baseRef, "HEAD"], worktree);
+  // JEDEN gepushten Commit prüfen (nicht nur den Netto-Diff): ein in Commit A eingeführtes und in
+  // Commit B wieder entferntes Secret verschwindet aus dem Netto-Diff, bleibt aber in der Historie,
+  // die gepusht wird. `git log -p <base>..HEAD` liefert die Patches ALLER dieser Commits.
+  const diff = await git(["-C", worktree, "log", "-p", "--no-color", "--no-merges", `${baseRef}..HEAD`], worktree);
   if (diff.code !== 0) return { ok: true };
   const hits = scanSecrets(diff.stdout);
   if (hits.length === 0) return { ok: true };

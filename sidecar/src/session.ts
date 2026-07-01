@@ -241,7 +241,8 @@ export class AgentSession {
                       brief: z.string().describe("vollständiger, eigenständiger Auftrag für diesen Sub-Agenten"),
                     }),
                   )
-                  .min(1),
+                  .min(1)
+                  .max(8), // Obergrenze: injizierter Inhalt soll nicht unbegrenzt Agenten/Worktrees erzeugen
               },
               async (args) => {
                 this.emit({

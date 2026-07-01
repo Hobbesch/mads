@@ -79,11 +79,16 @@ const DANGER = [
   { re: /(^|[\s;&|(])(osascript|defaults|open|pbcopy|pbpaste)(\s|$)/, why: "greift auf macOS-Systemfunktionen zu" },
   { re: /(^|[\s;&|(])gh(\s|$)/, why: "GitHub-CLI (außen-sichtbar: PR/Issue/API)" },
   { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)" },
+  // awk/gawk mit system(): der Programmkörper steht in Quotes und wird von segmentCommands
+  // ENTFERNT, bevor die Kopf-/Token-Prüfung greift — die Innen-Aktion (system("rm …")) bliebe
+  // sonst unsichtbar. Deshalb hier über die ROHZEILE.
+  { re: /(^|[\s;&|(])(?:[^\s|;&]*\/)?(awk|gawk|mawk|nawk)\b[\s\S]*?\bsystem\s*\(/, why: "awk system() führt Befehle aus" },
   // Code-ausführende Umgebungsvariablen (Env-Injection: laden Bibliotheken/führen
-  // Hilfsprogramme aus). Fängt u. a. `GIT_EXTERNAL_DIFF=evil git diff` und
-  // `LD_PRELOAD=evil.so …` — die segmentCommands sonst als harmlose Zuweisung wegwirft.
+  // Hilfsprogramme aus). Fängt u. a. `GIT_EXTERNAL_DIFF=evil git diff`, `LD_PRELOAD=evil.so …`
+  // und die macOS-dylib-Hijack-Varianten (DYLD_*) — die segmentCommands sonst als harmlose
+  // Zuweisung wegwirft.
   {
-    re: /(^|[\s;&|(])(LD_PRELOAD|DYLD_INSERT_LIBRARIES|GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_EDITOR|GIT_PROXY_COMMAND|GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_ALTERNATE_OBJECT_DIRECTORIES|BASH_ENV|PERL5OPT|PYTHONSTARTUP|NODE_OPTIONS|RUBYOPT)=/,
+    re: /(^|[\s;&|(])(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|DYLD_VERSIONED_LIBRARY_PATH|GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_EDITOR|GIT_PROXY_COMMAND|GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_ALTERNATE_OBJECT_DIRECTORIES|BASH_ENV|PERL5OPT|PYTHONSTARTUP|NODE_OPTIONS|RUBYOPT)=/,
     why: "setzt eine Code-ausführende Umgebungsvariable",
   },
 ];
@@ -278,23 +283,74 @@ const SAFE_PY_MODULES = new Set([
 ]);
 
 function interpreterRisk(toks: string[]): string | null {
-  // Interpreter IRGENDWO im Segment suchen (nicht nur toks[0]) — sonst umgeht ein Wrapper
-  // wie `timeout 5 python3 …` die Prüfung. Ab dem Interpreter dessen Argumente token-weise
-  // scannen (so wird auch `python3 -W ignore -c '…'` erkannt, wo ein Options-Argument davor steht).
-  for (let j = 0; j < toks.length; j++) {
-    const base = (toks[j].split("/").pop() ?? toks[j]).toLowerCase();
-    if (!INTERPRETERS.has(base)) continue;
-    for (let i = j + 1; i < toks.length; i++) {
-      const t = toks[i];
-      if (/^-(c|e|E|r|x)$/.test(t)) return "Interpreter führt Inline-Code aus (-c/-e)";
-      if (/^--(eval|command)$/.test(t)) return "Interpreter führt Inline-Code aus (--eval)";
-      if (t === "-m" || /^-m[A-Za-z]/.test(t)) {
-        const mod = (t === "-m" ? toks[i + 1] ?? "" : t.slice(2)).toLowerCase();
-        if (!SAFE_PY_MODULES.has(mod)) return `Modul-Ausführung „${mod || "?"}“ (-m, Code-/Netz-Fläche)`;
-        if (t === "-m") i += 1; // sicheres Modul-Token überspringen
-      }
+  // KOPF-basiert: nur wenn der Interpreter das ausgeführte Kommando IST (toks[0]) — NICHT wenn
+  // er bloß als Argument vorkommt (`ls .venv/bin/python`). Wrapper (`timeout 5 python3 …`) werden
+  // vom Aufrufer per unwrapWrappers abgeschält, sodass der Interpreter dann an toks[0] steht.
+  const base = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
+  if (!INTERPRETERS.has(base)) return null;
+  for (let i = 1; i < toks.length; i++) {
+    const t = toks[i];
+    if (/[<>&|]/.test(t)) continue; // Redirect/Operator (2>/dev/null, 2>&1, &) — kein Skript
+    if (/^-(c|e|E|r|x)$/.test(t)) return "Interpreter führt Inline-Code aus (-c/-e)";
+    if (/^--(eval|command)$/.test(t)) return "Interpreter führt Inline-Code aus (--eval)";
+    if (t === "-m" || /^-m[A-Za-z]/.test(t)) {
+      const mod = (t === "-m" ? toks[i + 1] ?? "" : t.slice(2)).toLowerCase();
+      if (!SAFE_PY_MODULES.has(mod)) return `Modul-Ausführung „${mod || "?"}“ (-m, Code-/Netz-Fläche)`;
+      return null; // sicheres Modul → alle Folge-Tokens sind Modul-Argumente, kein Skript
     }
+    if (/^-[WXQIRS]$/.test(t)) {
+      i += 1; // Option mit eigenem Wert-Argument (der Wert ist KEIN Skript)
+      continue;
+    }
+    // Erstes Nicht-Options-Token — oder `-` (= Skript von stdin) — ist ein SKRIPT/Programm →
+    // arbiträre Code-Ausführung → fragen. (Deckt `python3 x.py`, `node evil.js`, `python3 - <<PY`.)
+    if (t === "-" || !t.startsWith("-")) return "Interpreter führt ein Skript/Programm aus (arbiträrer Code)";
   }
+  return null;
+}
+
+// Transparente Wrapper: führen das NÄCHSTE (Nicht-Options-)Token als Befehl aus. Der Kopf-Token
+// ist harmlos, ABER das ausgeführte Programm muss selbst eingestuft werden — sonst ist
+// `timeout 5 /tmp/evil` / `env /tmp/evil` / `xargs /tmp/evil` auto-erlaubt. `unwrapWrappers`
+// schält die Wrapper (auch verkettet) ab und liefert das INNERSTE Kommando zurück.
+const WRAPPERS = new Set(["timeout", "nice", "nohup", "stdbuf", "env", "xargs"]);
+function unwrapWrappers(toks: string[]): string[] {
+  let cur = toks;
+  for (let depth = 0; depth < 6; depth++) {
+    const base = (cur[0].split("/").pop() ?? cur[0]).toLowerCase();
+    if (!WRAPPERS.has(base)) break;
+    let i = 1;
+    while (i < cur.length) {
+      const t = cur[i];
+      if (t.startsWith("-")) {
+        // Optionen mit eigenem Wert-Argument → das Argument mit überspringen.
+        i += /^-(n|s|k|P|I|E|u|d|L|-signal|-kill-after|-max-procs|-max-args|-replace)$/.test(t) ? 2 : 1;
+        continue;
+      }
+      if (base === "env" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) {
+        i += 1; // NAME=VAL-Zuweisung (DANGER fängt Code-ausführende Vars separat)
+        continue;
+      }
+      if ((base === "timeout" || base === "nice") && /^-?\d+(\.\d+)?[smhd]?$/.test(t)) {
+        i += 1; // Dauer (timeout) / Priorität (nice)
+        continue;
+      }
+      break;
+    }
+    if (i >= cur.length) break; // kein inneres Kommando
+    cur = cur.slice(i);
+  }
+  return cur;
+}
+
+/** Befehle, deren Programm-KÖRPER an der Token-/DANGER-Prüfung vorbeiläuft (z. B. `find -exec`
+ *  führt beliebige Kommandos aus; awk-`system()` fängt bereits DANGER über die Rohzeile). */
+function specialExecRisk(toks: string[]): string | null {
+  const base = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
+  if (base === "find" && toks.some((t) => /^-(exec|execdir|ok|okdir)$/.test(t)))
+    return "find -exec führt einen Befehl aus";
+  if (/^(awk|gawk|mawk|nawk)$/.test(base) && toks.includes("-f")) return "awk -f führt eine Programmdatei aus";
+  if (base === "sed" && toks.includes("-f")) return "sed -f führt eine Programmdatei aus";
   return null;
 }
 
@@ -310,10 +366,20 @@ export function classifyBashCommand(command: string): AutoDecision {
 
   const segs = segmentCommands(cmd);
   if (segs.length === 0) return ASK("Befehl nicht eindeutig");
-  for (const toks of segs) {
-    const c = toks[0];
+  for (const rawToks of segs) {
+    // Programm-Körper, die an Token-/DANGER-Prüfung vorbeilaufen (find -exec, awk/sed -f).
+    const special = specialExecRisk(rawToks);
+    if (special) return ASK(special);
+    // Transparente Wrapper (timeout/nice/env/xargs …) abschälen → das TATSÄCHLICH ausgeführte Kommando.
+    const toks = unwrapWrappers(rawToks);
+    const headBase = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
+    // xargs speist stdin als zusätzliche ARGV → ein Interpreter dahinter bekommt so ein Skript.
+    if (INTERPRETERS.has(headBase) && rawToks.some((t) => (t.split("/").pop() ?? t).toLowerCase() === "xargs"))
+      return ASK("xargs speist ein Skript an einen Interpreter");
+    // Interpreter (Inline-Code ODER Skript) in Kommando-Position → prüfen.
     const interp = interpreterRisk(toks);
     if (interp) return ASK(interp);
+    const c = toks[0];
     if (SAFE_CMDS.has(c)) continue;
     if (isUvRunner(toks)) continue;
     if (/(^|\/)\.venv\/bin\//.test(c)) continue; // Projekt-venv-Tool (z.B. .venv/bin/ruff)
@@ -333,6 +399,28 @@ function pathUnsafe(p: string | undefined, cwd?: string): string | null {
   }
   if (p.split("/").includes("..")) return "Pfad verlässt das Arbeitsverzeichnis (..)";
   return null;
+}
+
+// Vertrauenswürdige Doku-/Registry-/Referenz-Hosts (Suffix-Match inkl. Subdomains) — WebFetch
+// dorthin läuft still. Ein Exfiltrations-Ziel des Angreifers steht hier NICHT drauf → wird gefragt.
+const TRUSTED_FETCH_SUFFIXES = [
+  "github.com", "githubusercontent.com", "githubassets.com",
+  "npmjs.com", "npmjs.org", "pypi.org", "pythonhosted.org", "crates.io", "docs.rs", "rubygems.org", "pkg.go.dev",
+  "developer.mozilla.org", "mozilla.org", "readthedocs.io", "readthedocs.org", "rtfd.io",
+  "stackoverflow.com", "stackexchange.com", "serverfault.com", "superuser.com", "askubuntu.com",
+  "huggingface.co", "wikipedia.org", "w3.org", "json-schema.org", "tauri.app", "codemirror.net",
+  "reactjs.org", "react.dev", "nodejs.org", "typescriptlang.org", "rust-lang.org", "go.dev",
+  "developer.apple.com", "developer.android.com", "kubernetes.io", "docker.com",
+  "anthropic.com", "claude.ai",
+];
+/** Host aus einer http(s)-URL (ohne userinfo/Port, klein). */
+function fetchHost(url: string): string | null {
+  const m = /^https?:\/\/([^/?#]+)/i.exec(url.trim());
+  if (!m) return null;
+  return (m[1].split("@").pop() ?? m[1]).split(":")[0].toLowerCase();
+}
+function isTrustedFetchHost(host: string): boolean {
+  return TRUSTED_FETCH_SUFFIXES.some((s) => host === s || host.endsWith("." + s));
 }
 
 /**
@@ -366,23 +454,26 @@ export function classifyToolCall(
     return classifyBashCommand(c);
   }
 
-  // Erstanbieter-Orchestrierungs-Tools des In-Process-MCP-Servers „mads" (z. B.
-  // spawn_substreams): vom Nutzer bewusst aktiviert, NICHT außen-sichtbar oder destruktiv —
-  // sie geben nur eine UI-Absicht an mads weiter; die erzeugten Sub-Agenten haben ihre
-  // EIGENEN Permission-Gates. Im Auto-Modus daher ohne Rückfrage erlauben, sonst blockiert
-  // „eröffne Sub-Streams für die Punkte" still auf einer Permission-Rückfrage.
+  // Erstanbieter-Orchestrierungs-Tools des In-Process-MCP-Servers „mads". spawn_substreams
+  // erzeugt N Sub-Agenten mit einem vom Agenten formulierten „brief" als Prompt — injizierter
+  // Repo-/CLAUDE.md-Inhalt könnte darüber (via Autopilot der Subs) ungenehmigt pushen/PRen.
+  // Daher: EINMAL bewusst bestätigen (nicht pro URL). Übrige mads-Tools bleiben erlaubt.
+  if (toolName === "mcp__mads__spawn_substreams")
+    return ASK("startet neue Sub-Streams (eigener Worktree/Branch, Autopilot) — bewusst bestätigen");
   if (toolName.startsWith("mcp__mads__")) return ALLOW;
 
-  // WebFetch/WebSearch: nur-lesende Web-Recherche (GET + Zusammenfassung) — wie in Claude
-  // Code ohne Rückfrage (sonst kam pro URL eine Frage). ABER: die WebFetch-URL wird auf
-  // Secrets geprüft (INJ-2), damit ein injizierter Agent kein Token via URL/Query an einen
-  // Angreifer-Host exfiltriert. Beliebiger Netzzugriff via Bash (curl/wget/…) fragt ohnehin.
-  if (toolName === "WebFetch" || toolName === "WebSearch") {
-    if (toolName === "WebFetch") {
-      const hits = findSecrets(String(input?.url ?? ""));
-      if (hits.length) return ASK(`WebFetch-URL enthält ein mögliches Secret (${hits[0].kind}) — Exfiltration verhindern`);
-    }
-    return ALLOW;
+  // WebFetch: GET + Zusammenfassung. Sanktionierter Netz-Kanal (Bash-curl/wget fragt ohnehin) —
+  // damit ist er die Umgehung, über die ein injizierter Agent Repo-Daten (base64/hex in der
+  // URL) an einen ANGREIFER-Host exfiltrieren könnte. Zwei Gates: (1) Secret-Muster in der URL,
+  // (2) Host-Allowlist — bekannte Doku-/Registry-Hosts laufen still, ALLES andere fragt.
+  if (toolName === "WebSearch") return ALLOW; // Suche → fester Provider, kein wählbarer Ziel-Host
+  if (toolName === "WebFetch") {
+    const url = String(input?.url ?? "");
+    const hits = findSecrets(url);
+    if (hits.length) return ASK(`WebFetch-URL enthält ein mögliches Secret (${hits[0].kind}) — Exfiltration verhindern`);
+    const host = fetchHost(url);
+    if (host && isTrustedFetchHost(host)) return ALLOW;
+    return ASK(`WebFetch auf nicht gelistete Domain „${host || "?"}“ — mögliche Datenexfiltration bestätigen`);
   }
 
   // Drittanbieter-MCP-Tools, Task, Unbekanntes → fragen.
