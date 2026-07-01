@@ -48,6 +48,7 @@ function cmMatchIndex(v: EditorView, query: string): number {
  */
 const MODES: { id: ViewMode; label: string }[] = [
   { id: "preview", label: "Vorschau" },
+  { id: "wysiwyg", label: "WYSIWYG" },
   { id: "edit", label: "Bearbeiten" },
   { id: "split", label: "Split" },
 ];
@@ -90,9 +91,9 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
   const value = buffer ?? file.loadedText ?? "";
   const dirty = buffer !== undefined && buffer !== file.loadedText;
 
-  // Beim Umschalten in einen Schreib-Modus den Buffer materialisieren (wie 07 enterEditMode).
+  // Beim Umschalten in einen Schreib-Modus (edit/split/wysiwyg) den Buffer materialisieren.
   useEffect(() => {
-    if ((viewMode === "edit" || viewMode === "split") && !readOnly && buffer === undefined) {
+    if (viewMode !== "preview" && !readOnly && buffer === undefined) {
       enterEditMode(path);
     }
   }, [viewMode, readOnly, buffer, path, enterEditMode]);
@@ -133,8 +134,9 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
     setSearchQueryStr(""); // löscht CM-Dekorationen UND Preview-Highlights (über die Effects)
     view?.focus();
   }, [view]);
-  // Preview-Navigation (↑/↓): den „aktuellen" Treffer weiterschalten + hervorheben + hinscrollen.
-  const stepPreview = useCallback((dir: 1 | -1) => {
+  // Preview-„aktueller Treffer" weiterschalten (nur Hervorheben + Hinscrollen, ohne Zähler —
+  // den setzt der Aufrufer, da er je Modus aus CM oder Preview kommt).
+  const advancePreviewCurrent = useCallback((dir: 1 | -1) => {
     const ranges = previewMatchesRef.current;
     const reg = highlightRegistry();
     const HL = highlightCtor();
@@ -144,26 +146,29 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
     previewIdxRef.current = idx;
     reg.set("md-find-current", new HL(ranges[idx]));
     ranges[idx].startContainer.parentElement?.scrollIntoView({ block: "nearest" });
-    setSearchCurrent(idx + 1);
   }, []);
   const onSearchNext = useCallback(() => {
     if (!searchQuery) return;
-    if (viewMode !== "preview" && view) {
+    if (viewMode === "preview") {
+      advancePreviewCurrent(1);
+      setSearchCurrent(previewIdxRef.current + 1);
+    } else if (view) {
       findNext(view);
       setSearchCurrent(cmMatchIndex(view, searchQuery));
-    } else {
-      stepPreview(1);
+      if (viewMode === "split") advancePreviewCurrent(1); // Preview-Highlight mitziehen
     }
-  }, [searchQuery, viewMode, view, stepPreview]);
+  }, [searchQuery, viewMode, view, advancePreviewCurrent]);
   const onSearchPrev = useCallback(() => {
     if (!searchQuery) return;
-    if (viewMode !== "preview" && view) {
+    if (viewMode === "preview") {
+      advancePreviewCurrent(-1);
+      setSearchCurrent(previewIdxRef.current + 1);
+    } else if (view) {
       findPrevious(view);
       setSearchCurrent(cmMatchIndex(view, searchQuery));
-    } else {
-      stepPreview(-1);
+      if (viewMode === "split") advancePreviewCurrent(-1);
     }
-  }, [searchQuery, viewMode, view, stepPreview]);
+  }, [searchQuery, viewMode, view, advancePreviewCurrent]);
 
   // ⌘⏎: Edit ⇄ Preview umschalten (§8). Auf Container-Ebene, damit es auch außerhalb
   // der EditorView greift (Preview-Modus).
@@ -231,9 +236,16 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
   // DOM-/HTML-Eingriff. In Split zählt CodeMirror oben; hier wird nur markiert. Im reinen
   // Preview liefert dieser Effect die Trefferzahl.
   useEffect(() => {
-    if (viewMode === "edit") return;
-    const root = previewRef.current;
     const reg = highlightRegistry();
+    // Modi ohne Preview-Pane (edit + wysiwyg): Preview-Highlights entfernen (sonst bleiben tote
+    // Ranges auf inzwischen ausgehängten Textknoten in der Registry).
+    if (viewMode === "edit" || viewMode === "wysiwyg") {
+      reg?.delete("md-find");
+      reg?.delete("md-find-current");
+      previewMatchesRef.current = [];
+      return;
+    }
+    const root = previewRef.current;
     const HL = highlightCtor();
     if (!root || !reg || !HL) {
       previewMatchesRef.current = [];
@@ -388,9 +400,7 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
           Datei zu groß zum Editieren — schreibgeschützt.
         </div>
       )}
-      {(viewMode === "edit" || viewMode === "split") && !readOnly && (
-        <MarkdownToolbar view={view} />
-      )}
+      {viewMode !== "preview" && !readOnly && <MarkdownToolbar view={view} />}
 
       <div className={`md-body mode-${viewMode}`}>
         {viewMode !== "preview" && !readOnly && (
@@ -402,11 +412,12 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
               onPasteImage={onPasteImage}
               onSave={onSave}
               onOpenSearch={openSearch}
+              livePreview={viewMode === "wysiwyg"}
               onScrollRatio={viewMode === "split" ? onEditorScroll : undefined}
             />
           </div>
         )}
-        {viewMode !== "edit" && (
+        {(viewMode === "preview" || viewMode === "split") && (
           <div className="md-pane md-pane-preview">
             <MarkdownPreview ref={previewRef} source={previewSource} onWikiLink={onWikiLink} onLink={onLink} />
           </div>

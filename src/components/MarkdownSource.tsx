@@ -23,6 +23,8 @@ export interface MarkdownSourceProps {
   onSave(): void;
   /** ⌘/Ctrl+F: mads-Suchleiste im Header öffnen (UI-Sache, nicht CodeMirrors eigenes Panel). */
   onOpenSearch?(): void;
+  /** WYSIWYG-Modus: Formatierung inline rendern (Marker verbergen). */
+  livePreview?: boolean;
   /** Scroll-Verhältnis 0..1 für den Split-Sync (§6). */
   onScrollRatio?(ratio: number): void;
 }
@@ -34,6 +36,7 @@ export function MarkdownSource({
   onPasteImage,
   onSave,
   onOpenSearch,
+  livePreview = false,
   onScrollRatio,
 }: MarkdownSourceProps) {
   const viewRef = useRef<EditorView | null>(null);
@@ -73,8 +76,8 @@ export function MarkdownSource({
     [onPasteImage, value.length],
   );
 
-  // Extensions einmal je onOpenSearch memoisieren (sonst baut CodeMirror sie pro Render neu).
-  const extensions = useMemo(() => markdownExtensions(onOpenSearch), [onOpenSearch]);
+  // Extensions memoisieren (sonst baut CodeMirror sie pro Render neu); Live-Preview je Modus.
+  const extensions = useMemo(() => markdownExtensions(onOpenSearch, livePreview), [onOpenSearch, livePreview]);
 
   // ⌘S (Save) und ⌘F (Suchleiste) abfangen, BEVOR CodeMirror sie konsumiert — beides
   // ist UI/Store-Sache, nicht CodeMirrors eigener Handler.
@@ -117,7 +120,9 @@ export function MarkdownSource({
         extensions={extensions}
         onChange={onChange}
         onCreateEditor={onCreateEditor}
-        basicSetup={{ lineNumbers: true, foldGutter: false, highlightActiveLine: true }}
+        // searchKeymap: false → CodeMirrors eigenes ⌘F-Panel abschalten; die mads-Suchleiste
+        // (via searchOpenKeymap + Wrapper-onKeyDown) ist die einzige Such-UI.
+        basicSetup={{ lineNumbers: true, foldGutter: false, highlightActiveLine: true, searchKeymap: false }}
       />
     </div>
   );

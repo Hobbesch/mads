@@ -2905,6 +2905,14 @@ button.primary:hover {
 .md-body.mode-split .md-pane-source {
   border-right: 1px solid var(--border);
 }
+/* WYSIWYG-Modus (Live-Preview): nur die Source-Pane (volle Breite) + dokumentnahe
+   Proportionalschrift statt Monospace. Inline-Code/Überschriften überschreiben das via
+   die cm-md-*-Klassen (cmTheme). */
+.md-body.mode-wysiwyg .cm-content {
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif;
+  line-height: 1.55;
+  padding: 6px 14px;
+}
 .md-source {
   flex: 1;
   min-height: 0;

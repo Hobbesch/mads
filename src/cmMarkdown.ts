@@ -13,6 +13,7 @@ import type { Extension } from "@codemirror/state";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { search } from "@codemirror/search";
+import { mdLivePreview } from "./cmLivePreview";
 
 /**
  * Theme an die `:root`-Variablen gebunden (folgt OS-Light/Dark automatisch, §1.4) —
@@ -42,6 +43,23 @@ export const cmTheme: Extension = EditorView.theme({
   // Such-Treffer (Feature: Suchleiste) — `search()` malt diese Klassen für die aktive Query.
   ".cm-searchMatch": { backgroundColor: "var(--accent-weak)", borderRadius: "2px" },
   ".cm-searchMatch-selected": { backgroundColor: "var(--accent)", color: "#fff" },
+  // Live-Preview (WYSIWYG-Modus) — nur aktiv, wenn `mdLivePreview()` die Klassen setzt.
+  ".cm-md-strong": { fontWeight: "700" },
+  ".cm-md-em": { fontStyle: "italic" },
+  ".cm-md-strike": { textDecoration: "line-through", opacity: "0.7" },
+  ".cm-md-code": {
+    fontFamily: "var(--mono)",
+    backgroundColor: "var(--accent-weak)",
+    borderRadius: "3px",
+    padding: "0 3px",
+  },
+  ".cm-md-link": { color: "var(--accent)", textDecoration: "underline", cursor: "text" },
+  ".cm-md-h1": { fontSize: "1.65em", fontWeight: "700", lineHeight: "1.3" },
+  ".cm-md-h2": { fontSize: "1.4em", fontWeight: "700", lineHeight: "1.3" },
+  ".cm-md-h3": { fontSize: "1.2em", fontWeight: "700" },
+  ".cm-md-h4": { fontSize: "1.08em", fontWeight: "700" },
+  ".cm-md-h5": { fontWeight: "700" },
+  ".cm-md-h6": { fontWeight: "700", opacity: "0.75" },
 });
 
 /**
@@ -49,7 +67,7 @@ export const cmTheme: Extension = EditorView.theme({
  * aktiviert GFM-Syntax; `codeLanguages` lazy via `@codemirror/language-data` für
  * Fenced-Code-Highlight (kein Crash bei unbekannter Sprache).
  */
-export function markdownExtensions(onOpenSearch?: () => void): Extension[] {
+export function markdownExtensions(onOpenSearch?: () => void, livePreview = false): Extension[] {
   return [
     markdown({ base: markdownLanguage, codeLanguages: languages }),
     cmTheme,
@@ -57,6 +75,8 @@ export function markdownExtensions(onOpenSearch?: () => void): Extension[] {
     // Dekorationen, zeigen aber NIE CodeMirrors eigenes Panel (unsere Leiste steuert alles).
     search({ top: true }),
     searchOpenKeymap(onOpenSearch),
+    // WYSIWYG-Modus: Formatierung inline rendern (Marker verbergen); nur wenn angefordert.
+    ...(livePreview ? [mdLivePreview()] : []),
     formatKeymap,
   ];
 }

@@ -173,7 +173,7 @@ export type FileKind = "markdown" | "code" | "image" | "binary";
 
 /** Markdown-Editor-View-Modus (docs/design/08-markdown-editor.md §1.1, OE-36).
  *  Global (eine .md zugleich offen), session-only (nicht persistiert). */
-export type ViewMode = "preview" | "edit" | "split";
+export type ViewMode = "preview" | "edit" | "split" | "wysiwyg";
 
 /** Core-Lese-Resultat (FileRead, doc 07 §4.2) — DER CORE entscheidet text/binary. */
 type CoreFileRead =
