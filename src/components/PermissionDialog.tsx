@@ -14,13 +14,15 @@ function ToolApproval({ req }: { req: PermissionRequestMsg }) {
 
   return (
     <div className="perm-body">
-      <div className="perm-tool">
-        Tool: <code>{req.toolName}</code>
+      <div className="perm-scroll">
+        <div className="perm-tool">
+          Tool: <code>{req.toolName}</code>
+        </div>
+        <div className="perm-desc">{description}</div>
+        {command && <pre className="perm-cmd">{command}</pre>}
+        {req.decisionReason && <div className="perm-reason">{req.decisionReason}</div>}
+        {req.blockedPath && <div className="perm-reason">Pfad: {req.blockedPath}</div>}
       </div>
-      <div className="perm-desc">{description}</div>
-      {command && <pre className="perm-cmd">{command}</pre>}
-      {req.decisionReason && <div className="perm-reason">{req.decisionReason}</div>}
-      {req.blockedPath && <div className="perm-reason">Pfad: {req.blockedPath}</div>}
       <div className="perm-actions">
         <button className="deny" onClick={() => void answer(req, { behavior: "deny", message: "Vom Nutzer abgelehnt" })}>
           Ablehnen
@@ -69,7 +71,8 @@ function QuestionForm({ req }: { req: PermissionRequestMsg }) {
 
   return (
     <div className="perm-body">
-      {questions.map((q, i) => (
+      <div className="perm-scroll">
+        {questions.map((q, i) => (
         <div key={i} className="perm-question">
           <div className="perm-q">{q.question}</div>
           <div className="perm-options">
@@ -106,7 +109,8 @@ function QuestionForm({ req }: { req: PermissionRequestMsg }) {
             )}
           </div>
         </div>
-      ))}
+        ))}
+      </div>
       <div className="perm-actions">
         {canParallel && (
           <button
