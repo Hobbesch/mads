@@ -2818,6 +2818,49 @@ button.primary:hover {
   background: rgba(255, 176, 32, 0.16);
   border-bottom: 1px solid var(--border);
 }
+
+/* Such-Leiste (Text im Dokument finden). Spannt die Editorbreite, liegt unter dem Header,
+   funktioniert in Preview/Edit/Split. */
+.md-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex-shrink: 0;
+}
+.md-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.md-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.md-search-count {
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 44px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Preview-Treffer via CSS Custom Highlight API (kein DOM-/HTML-Eingriff → XSS-Invariante bleibt).
+   Die CodeMirror-Treffer (.cm-searchMatch*) sind im cmTheme gefärbt, nicht hier. */
+::highlight(md-find) {
+  background-color: var(--accent-weak);
+}
+::highlight(md-find-current) {
+  background-color: var(--accent);
+  color: #fff;
+}
+
 /* Formatierungs-Toolbar (§1.4 — nur Edit/Split) */
 .md-toolbar {
   display: flex;

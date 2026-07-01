@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EditorView } from "@codemirror/view";
+import { SearchQuery, SearchCursor, setSearchQuery, findNext, findPrevious } from "@codemirror/search";
 import { useStore } from "../store";
 import type { OpenFile, ViewMode } from "../store";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { MarkdownSource } from "./MarkdownSource";
+import { MarkdownSearchBar } from "./MarkdownSearchBar";
 import { MarkdownToolbar } from "./MarkdownToolbar";
 import { openMarkdownWindow } from "../detachWindow";
 import { openExternalLink } from "../openExternal";
@@ -11,6 +13,30 @@ import { loadUiPrefs, saveUiPrefs, clampMdZoom } from "../uiPrefs";
 
 /** Hat der Link ein URI-Schema (http:, https:, mailto:, …)? Dann extern; sonst interner Pfad. */
 const isExternalHref = (href: string) => /^[a-z][a-z0-9+.-]*:/i.test(href);
+
+// ── Suche (Feature: Text im Dokument finden) ──
+// Preview-Treffer werden über die CSS Custom Highlight API markiert — KEIN DOM-/HTML-Eingriff,
+// die Sanitize-/XSS-Invariante von mdPipeline bleibt unangetastet. Die API ist nicht in jeder
+// TS-lib-/Engine-Version vorhanden → defensiv zugreifen (fällt sonst sauber auf No-Op zurück).
+type HighlightRegistry = Map<string, unknown>;
+type HighlightCtor = new (...ranges: Range[]) => unknown;
+const highlightRegistry = (): HighlightRegistry | null =>
+  (CSS as unknown as { highlights?: HighlightRegistry }).highlights ?? null;
+const highlightCtor = (): HighlightCtor | null =>
+  (globalThis as unknown as { Highlight?: HighlightCtor }).Highlight ?? null;
+
+/** 1-basierter Index des aktuell selektierten Treffers (CM hat keine Count-/Index-API). */
+function cmMatchIndex(v: EditorView, query: string): number {
+  if (!query) return 0;
+  const selFrom = v.state.selection.main.from;
+  let idx = 0;
+  const cur = new SearchCursor(v.state.doc, query, 0, v.state.doc.length, (s) => s.toLowerCase());
+  while (!cur.next().done) {
+    idx++;
+    if (cur.value.from >= selFrom) break;
+  }
+  return idx;
+}
 
 /**
  * Markdown-Editor-Orchestrator (docs/design/08-markdown-editor.md §2.1) — der `.md`-
@@ -50,6 +76,15 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
   const [view, setView] = useState<EditorView | null>(null);
   const previewRef = useRef<HTMLDivElement>(null);
 
+  // Suche: rein ephemerer UI-State pro Editor (wie view/fullscreen/zoom — NICHT im Store).
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQueryStr] = useState("");
+  const [searchTotal, setSearchTotal] = useState(0);
+  const [searchCurrent, setSearchCurrent] = useState(0); // 1-basiert, 0 = kein Treffer
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const previewMatchesRef = useRef<Range[]>([]); // Preview-Treffer (für ↑/↓)
+  const previewIdxRef = useRef(0);
+
   // Über Cap → schreibgeschützt: kein Edit/Split (§6/§7).
   const readOnly = file.truncated;
   const value = buffer ?? file.loadedText ?? "";
@@ -85,17 +120,69 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
     if (!ok) setFullscreen(true);
   }, [path]);
 
+  // ── Suche ──
+  const openSearch = useCallback(() => {
+    setSearchOpen(true);
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }, []);
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setSearchQueryStr(""); // löscht CM-Dekorationen UND Preview-Highlights (über die Effects)
+    view?.focus();
+  }, [view]);
+  // Preview-Navigation (↑/↓): den „aktuellen" Treffer weiterschalten + hervorheben + hinscrollen.
+  const stepPreview = useCallback((dir: 1 | -1) => {
+    const ranges = previewMatchesRef.current;
+    const reg = highlightRegistry();
+    const HL = highlightCtor();
+    if (!ranges.length || !reg || !HL) return;
+    const n = ranges.length;
+    const idx = (previewIdxRef.current + dir + n) % n;
+    previewIdxRef.current = idx;
+    reg.set("md-find-current", new HL(ranges[idx]));
+    ranges[idx].startContainer.parentElement?.scrollIntoView({ block: "nearest" });
+    setSearchCurrent(idx + 1);
+  }, []);
+  const onSearchNext = useCallback(() => {
+    if (!searchQuery) return;
+    if (viewMode !== "preview" && view) {
+      findNext(view);
+      setSearchCurrent(cmMatchIndex(view, searchQuery));
+    } else {
+      stepPreview(1);
+    }
+  }, [searchQuery, viewMode, view, stepPreview]);
+  const onSearchPrev = useCallback(() => {
+    if (!searchQuery) return;
+    if (viewMode !== "preview" && view) {
+      findPrevious(view);
+      setSearchCurrent(cmMatchIndex(view, searchQuery));
+    } else {
+      stepPreview(-1);
+    }
+  }, [searchQuery, viewMode, view, stepPreview]);
+
   // ⌘⏎: Edit ⇄ Preview umschalten (§8). Auf Container-Ebene, damit es auch außerhalb
   // der EditorView greift (Preview-Modus).
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // ⌘/Ctrl+F: Suchleiste öffnen — hier auf Section-Ebene, damit es auch im Preview-Modus
+      // greift (dort existiert keine EditorView, die den Hotkey abfangen könnte).
+      if ((e.metaKey || e.ctrlKey) && (e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        openSearch();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
         if (readOnly) return;
         setEditorViewMode(viewMode === "preview" ? "edit" : "preview");
       }
     },
-    [viewMode, readOnly, setEditorViewMode],
+    [viewMode, readOnly, setEditorViewMode, openSearch],
   );
 
   // Split-Preview debounced (§6): nicht pro Keystroke den AST neu bauen.
@@ -117,6 +204,88 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
     const max = el.scrollHeight - el.clientHeight;
     el.scrollTop = ratio * max;
   }, []);
+
+  // Treffer in CodeMirror (Edit/Split): Query setzen (malt `.cm-searchMatch`), zählen, ersten
+  // Treffer anspringen. Im reinen Preview übernimmt das der DOM-Effect darunter.
+  useEffect(() => {
+    if (viewMode === "preview" || !view) return;
+    view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: searchQuery, caseSensitive: false })) });
+    if (!searchQuery) {
+      setSearchTotal(0);
+      setSearchCurrent(0);
+      return;
+    }
+    let n = 0;
+    const cur = new SearchCursor(view.state.doc, searchQuery, 0, view.state.doc.length, (s) => s.toLowerCase());
+    while (!cur.next().done) n++;
+    setSearchTotal(n);
+    if (n) {
+      findNext(view);
+      setSearchCurrent(cmMatchIndex(view, searchQuery));
+    } else {
+      setSearchCurrent(0);
+    }
+  }, [searchQuery, view, viewMode]);
+
+  // Treffer in der gerenderten Vorschau (Preview/Split) via CSS Custom Highlight API — KEIN
+  // DOM-/HTML-Eingriff. In Split zählt CodeMirror oben; hier wird nur markiert. Im reinen
+  // Preview liefert dieser Effect die Trefferzahl.
+  useEffect(() => {
+    if (viewMode === "edit") return;
+    const root = previewRef.current;
+    const reg = highlightRegistry();
+    const HL = highlightCtor();
+    if (!root || !reg || !HL) {
+      previewMatchesRef.current = [];
+      return;
+    }
+    reg.delete("md-find");
+    reg.delete("md-find-current");
+    if (!searchQuery) {
+      previewMatchesRef.current = [];
+      if (viewMode === "preview") {
+        setSearchTotal(0);
+        setSearchCurrent(0);
+      }
+      return;
+    }
+    const needle = searchQuery.toLowerCase();
+    const ranges: Range[] = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = (node.nodeValue ?? "").toLowerCase();
+      let i = text.indexOf(needle);
+      while (i !== -1) {
+        const r = document.createRange();
+        r.setStart(node, i);
+        r.setEnd(node, i + needle.length);
+        ranges.push(r);
+        i = text.indexOf(needle, i + needle.length);
+      }
+    }
+    previewMatchesRef.current = ranges;
+    previewIdxRef.current = 0;
+    if (ranges.length) {
+      reg.set("md-find", new HL(...ranges));
+      reg.set("md-find-current", new HL(ranges[0]));
+      ranges[0].startContainer.parentElement?.scrollIntoView({ block: "nearest" });
+    }
+    if (viewMode === "preview") {
+      setSearchTotal(ranges.length);
+      setSearchCurrent(ranges.length ? 1 : 0);
+    }
+  }, [searchQuery, previewSource, viewMode]);
+
+  // Dateiwechsel: Suche schließen/leeren + Highlights entfernen (kein Lecken über Dateien).
+  useEffect(() => {
+    setSearchOpen(false);
+    setSearchQueryStr("");
+    return () => {
+      const reg = highlightRegistry();
+      reg?.delete("md-find");
+      reg?.delete("md-find-current");
+    };
+  }, [path]);
 
   const header = useMemo(
     () => (
@@ -202,6 +371,18 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
       onKeyDown={onKeyDown}
     >
       {header}
+      {searchOpen && (
+        <MarkdownSearchBar
+          query={searchQuery}
+          onQueryChange={setSearchQueryStr}
+          current={searchCurrent}
+          total={searchTotal}
+          onNext={onSearchNext}
+          onPrev={onSearchPrev}
+          onClose={closeSearch}
+          inputRef={searchInputRef}
+        />
+      )}
       {readOnly && (
         <div className="md-readonly-banner">
           Datei zu groß zum Editieren — schreibgeschützt.
@@ -220,6 +401,7 @@ export function MarkdownEditor({ file, detached = false }: { file: OpenFile; det
               onView={setView}
               onPasteImage={onPasteImage}
               onSave={onSave}
+              onOpenSearch={openSearch}
               onScrollRatio={viewMode === "split" ? onEditorScroll : undefined}
             />
           </div>

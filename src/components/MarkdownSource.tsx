@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import type { EditorView } from "@codemirror/view";
 import { markdownExtensions } from "../cmMarkdown";
@@ -21,6 +21,8 @@ export interface MarkdownSourceProps {
   onPasteImage(blob: Blob, cursor: number): Promise<number>;
   /** Save-Intent (⌘S) — der Wrapper kennt den Store nicht, der Aufrufer speichert. */
   onSave(): void;
+  /** ⌘/Ctrl+F: mads-Suchleiste im Header öffnen (UI-Sache, nicht CodeMirrors eigenes Panel). */
+  onOpenSearch?(): void;
   /** Scroll-Verhältnis 0..1 für den Split-Sync (§6). */
   onScrollRatio?(ratio: number): void;
 }
@@ -31,6 +33,7 @@ export function MarkdownSource({
   onView,
   onPasteImage,
   onSave,
+  onOpenSearch,
   onScrollRatio,
 }: MarkdownSourceProps) {
   const viewRef = useRef<EditorView | null>(null);
@@ -70,16 +73,26 @@ export function MarkdownSource({
     [onPasteImage, value.length],
   );
 
-  // ⌘S abfangen, BEVOR CodeMirror es konsumiert (Save ist Store-Sache).
+  // Extensions einmal je onOpenSearch memoisieren (sonst baut CodeMirror sie pro Render neu).
+  const extensions = useMemo(() => markdownExtensions(onOpenSearch), [onOpenSearch]);
+
+  // ⌘S (Save) und ⌘F (Suchleiste) abfangen, BEVOR CodeMirror sie konsumiert — beides
+  // ist UI/Store-Sache, nicht CodeMirrors eigener Handler.
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
         e.preventDefault();
         e.stopPropagation();
         onSave();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        e.stopPropagation();
+        onOpenSearch?.();
       }
     },
-    [onSave],
+    [onSave, onOpenSearch],
   );
 
   // Scroll-Sync-Emitter (§6): über requestAnimationFrame coalesct.
@@ -101,7 +114,7 @@ export function MarkdownSource({
     <div className="md-source" onPaste={onPaste} onKeyDown={onKeyDown} onScroll={onScroll}>
       <CodeMirror
         value={value}
-        extensions={markdownExtensions()}
+        extensions={extensions}
         onChange={onChange}
         onCreateEditor={onCreateEditor}
         basicSetup={{ lineNumbers: true, foldGutter: false, highlightActiveLine: true }}

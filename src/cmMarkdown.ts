@@ -12,6 +12,7 @@ import { EditorView, keymap } from "@codemirror/view";
 import type { Extension } from "@codemirror/state";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
+import { search } from "@codemirror/search";
 
 /**
  * Theme an die `:root`-Variablen gebunden (folgt OS-Light/Dark automatisch, §1.4) —
@@ -38,6 +39,9 @@ export const cmTheme: Extension = EditorView.theme({
   ".cm-activeLineGutter": { backgroundColor: "transparent" },
   "&.cm-focused": { outline: "none" },
   ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
+  // Such-Treffer (Feature: Suchleiste) — `search()` malt diese Klassen für die aktive Query.
+  ".cm-searchMatch": { backgroundColor: "var(--accent-weak)", borderRadius: "2px" },
+  ".cm-searchMatch-selected": { backgroundColor: "var(--accent)", color: "#fff" },
 });
 
 /**
@@ -45,8 +49,32 @@ export const cmTheme: Extension = EditorView.theme({
  * aktiviert GFM-Syntax; `codeLanguages` lazy via `@codemirror/language-data` für
  * Fenced-Code-Highlight (kein Crash bei unbekannter Sprache).
  */
-export function markdownExtensions(): Extension[] {
-  return [markdown({ base: markdownLanguage, codeLanguages: languages }), cmTheme, formatKeymap];
+export function markdownExtensions(onOpenSearch?: () => void): Extension[] {
+  return [
+    markdown({ base: markdownLanguage, codeLanguages: languages }),
+    cmTheme,
+    // `search()` verwaltet den Query-State + malt `.cm-searchMatch*` — wir nutzen die
+    // Dekorationen, zeigen aber NIE CodeMirrors eigenes Panel (unsere Leiste steuert alles).
+    search({ top: true }),
+    searchOpenKeymap(onOpenSearch),
+    formatKeymap,
+  ];
+}
+
+/** Cmd/Ctrl+F: NICHT CodeMirrors eigenes Panel öffnen, sondern die mads-Suchleiste im
+ *  Header fokussieren (die dann per setSearchQuery die Treffer steuert). Kommt vor der
+ *  basicSetup-Keymap (User-Extensions haben Vorrang), schattet also deren Mod-f. */
+function searchOpenKeymap(onOpenSearch?: () => void): Extension {
+  return keymap.of([
+    {
+      key: "Mod-f",
+      preventDefault: true,
+      run: () => {
+        onOpenSearch?.();
+        return true;
+      },
+    },
+  ]);
 }
 
 // ── Formatierungs-Commands (§1.4/§8) ──
