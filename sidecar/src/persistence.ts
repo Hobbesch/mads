@@ -47,3 +47,31 @@ export function saveRegistry(repoRoot: string, agents: RegistryEntry[]): void {
   writeFileSync(tmp, JSON.stringify({ v: 1, agents }, null, 2), "utf8");
   renameSync(tmp, p); // atomar (write-temp + rename)
 }
+
+/**
+ * REIN: Registry-Merge fürs Persistieren. `persist()` darf die Registry NICHT mit dem
+ * Live-Pool überschreiben — passiv wiederhergestellte Kacheln (v.a. der **Integrator**, der
+ * beim Reopen `live:false` ist und damit NICHT im Sidecar-Pool sitzt) würden sonst beim
+ * nächsten Speichern rausfliegen. Subs überleben das über Worktree-Discovery, der Integrator
+ * (ohne Worktree) NICHT → „main verschwindet". Daher: bestehende Einträge bewahren, den Pool
+ * drüberlegen (frischer Stand gewinnt), nur explizit entfernte (`removed`) oder mit
+ * verschwundenem Worktree verwerfen.
+ */
+export function mergeRegistry(
+  existing: RegistryEntry[],
+  poolEntries: RegistryEntry[],
+  removed: ReadonlySet<string>,
+  worktreeExists: (path: string) => boolean,
+): RegistryEntry[] {
+  const byId = new Map<string, RegistryEntry>();
+  for (const e of existing) {
+    if (removed.has(e.agentId)) continue; // gestoppt/aufgeräumt → nicht wiederbeleben
+    if (e.worktreePath && !worktreeExists(e.worktreePath)) continue; // verwaister Sub → raus
+    byId.set(e.agentId, e); // Integrator (kein worktreePath) bleibt IMMER erhalten
+  }
+  for (const e of poolEntries) {
+    if (removed.has(e.agentId)) continue;
+    byId.set(e.agentId, e); // Live-Stand gewinnt
+  }
+  return [...byId.values()];
+}

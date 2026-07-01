@@ -12,7 +12,7 @@ import { send, log, envelope } from "./io.js";
 import { autoCommit, createPr, discoverWorktrees, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
-import { ensureMadsDir, loadRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
+import { ensureMadsDir, loadRegistry, mergeRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
 import { parseDiffRegions, detectCollisions, type AgentRegions } from "../../shared/collision.js";
 import { detectTrespass, pathMatches, type TrespassFinding } from "../../shared/ownership.js";
@@ -50,6 +50,9 @@ export class Orchestrator {
   private readonly autopilotSecretNotified = new Set<string>();
   // Proaktiver Hinweis „main direkt geändert" pro Integrator nur einmal je dirty-Episode.
   private readonly mainDirtyNotified = new Set<string>();
+  // Explizit entfernte Agenten (gestoppt/aufgeräumt/gemergt) — mergeRegistry darf sie NICHT
+  // aus der Registry wiederbeleben (sonst hebt merge-persist ein bewusstes Entfernen auf).
+  private readonly removed = new Set<string>();
   // 3.2: Integrationen serialisieren (kein Merge-Race zweier fast gleichzeitiger Merges).
   private integrateLock: Promise<void> = Promise.resolve();
   // A: PR-Erstellungen serialisieren, damit die ADR-Nummern-Vergabe (Scan aller Worktrees +
@@ -118,6 +121,7 @@ export class Orchestrator {
         const s = this.pool.get(msg.agentId);
         await s?.stop(msg.removeWorktree ?? false);
         this.pool.delete(msg.agentId);
+        this.removed.add(msg.agentId); // bewusst entfernt → merge-persist nicht wiederbeleben
         this.persist();
         break;
       }
@@ -230,6 +234,7 @@ export class Orchestrator {
             }
           }
           await removeWorktree(root, path, msg.branch);
+          this.removed.add(msg.agentId); // aufgeräumt → merge-persist nicht wiederbeleben
           saveRegistry(root, loadRegistry(root).filter((e) => e.agentId !== msg.agentId));
           log(`[orchestrator] aufgeräumt: ${msg.branch ?? msg.agentId} (${path})`);
         } catch (e) {
@@ -523,6 +528,7 @@ export class Orchestrator {
     await run("git", ["-C", s.repoRoot, "push", "origin", "--delete", s.branch], s.repoRoot);
     s.status = "done";
     await s.stop(false); // Query schließen; Karte bleibt als "merged" sichtbar
+    this.removed.add(agentId); // gemergt+aufgeräumt → nicht mehr in die Resume-Registry
     this.persist(); // gemergten Agenten aus der Resume-Registry entfernen
     await this.rebaseOthersOnMain(agentId); // 3.1: origin/main bewegte sich → andere nachziehen
   }
@@ -567,10 +573,10 @@ export class Orchestrator {
   // ---------------------------------------------------------- Persistenz/Resume (P7)
   private persist(): void {
     if (!this.project) return;
-    const agents: RegistryEntry[] = [];
+    const poolEntries: RegistryEntry[] = [];
     for (const s of this.pool.values()) {
       if (s.mock || !s.sessionId) continue; // echte Agenten mit Session sind resumebar (auch fertige/Integrator)
-      agents.push({
+      poolEntries.push({
         agentId: s.agentId,
         label: s.label ?? s.agentId,
         role: s.role ?? "sub",
@@ -585,7 +591,11 @@ export class Orchestrator {
       });
     }
     try {
-      saveRegistry(this.project.repoRoot, agents);
+      // NICHT den Pool über die Registry drüberbügeln: passiv wiederhergestellte Kacheln
+      // (v.a. der Integrator, der beim Reopen live:false ist → NICHT im Pool) blieben sonst
+      // nicht erhalten und „main" verschwindet. mergeRegistry bewahrt sie (siehe persistence.ts).
+      const merged = mergeRegistry(loadRegistry(this.project.repoRoot), poolEntries, this.removed, existsSync);
+      saveRegistry(this.project.repoRoot, merged);
     } catch (e) {
       log(`[orchestrator] persist failed: ${String(e)}`);
     }
