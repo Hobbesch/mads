@@ -70,6 +70,9 @@ export const cmTheme: Extension = EditorView.theme({
 export function markdownExtensions(onOpenSearch?: () => void, livePreview = false): Extension[] {
   return [
     markdown({ base: markdownLanguage, codeLanguages: languages }),
+    // Soft-Wrap: lange Zeilen brechen NUR optisch um (kein horizontales Scrollen) — der Datei-
+    // Inhalt bleibt unverändert. Prosa-Markdown will das immer.
+    EditorView.lineWrapping,
     cmTheme,
     // `search()` verwaltet den Query-State + malt `.cm-searchMatch*` — wir nutzen die
     // Dekorationen, zeigen aber NIE CodeMirrors eigenes Panel (unsere Leiste steuert alles).
