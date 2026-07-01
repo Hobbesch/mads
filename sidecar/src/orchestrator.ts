@@ -153,13 +153,19 @@ export class Orchestrator {
         if (!this.project) break;
         const integ = this.pool.get(msg.integratorId);
         if (!integ || !integ.repoRoot) {
-          this.emitError(msg.integratorId, "spawn_failed", "Kein Integrator/Repo — Auslagern nicht möglich.");
+          // Fehler AUCH an die (optimistisch erzeugte) neue Kachel — sonst bleibt sie ewig „startet".
+          this.emitError(msg.agentId, "spawn_failed", "Kein Integrator/Repo — Auslagern nicht möglich.");
+          this.emitError(msg.integratorId, "main_edited", "Auslagern nicht möglich (kein Integrator/Repo).");
           break;
         }
         const worktreePath = worktreePathFor(integ.repoRoot, msg.agentId);
         const res = await outsourceMainChanges(integ.repoRoot, this.project.defaultBranch, worktreePath, msg.branch);
         if (!res.ok) {
-          this.emitError(msg.integratorId, "spawn_failed", res.error);
+          // Auslagern scheiterte (z.B. nichts zu verschieben, main sauber) → die neue Kachel als
+          // fehlgeschlagen melden (das Frontend entfernt eine noch startende Kachel), und dem
+          // Integrator den Grund status-neutral zeigen.
+          this.emitError(msg.agentId, "spawn_failed", `Auslagern fehlgeschlagen: ${res.error}`);
+          this.emitError(msg.integratorId, "main_edited", `Auslagern fehlgeschlagen: ${res.error}`);
           break;
         }
         // Neuen Sub-Stream im ausgelagerten Worktree starten (Autopilot committet/PRt die Änderungen).

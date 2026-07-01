@@ -264,10 +264,43 @@ export function Inspector() {
               <option value="autopilot">🤖 Autopilot</option>
             </select>
           )}
-          {/* Passiv wiederhergestellt → erst reaktivieren, bevor Git-Aktionen möglich sind. */}
+          {/* Passiv wiederhergestellt → erst reaktivieren, bevor Git-Aktionen möglich sind.
+              Beim INTEGRATOR (Leitstelle) erst rückfragen: reaktivieren kann sofort Aktionen
+              auslösen (versehentliches „Fortsetzen" hat genau das getan). */}
           {!live && (
-            <button className="step-primary" title="Stream fortsetzen (Session reaktivieren, dann weiterarbeiten)" onClick={() => void continueStream(selectedId)}>
+            <button
+              className="step-primary"
+              title="Stream fortsetzen (Session reaktivieren, dann weiterarbeiten)"
+              onClick={() => {
+                if (agent.role === "integrator") {
+                  setConfirm({
+                    title: "Main-Stream fortsetzen?",
+                    body: (
+                      <p>
+                        Der <strong>Main-Stream</strong> ist die Leitstelle und ändert main nicht direkt.
+                        „Fortsetzen" reaktiviert seine Session — er kann dann sofort weiter-agieren.
+                      </p>
+                    ),
+                    confirmLabel: "Fortsetzen",
+                    onConfirm: () => void continueStream(selectedId),
+                  });
+                } else {
+                  void continueStream(selectedId);
+                }
+              }}
+            >
               ▶ Fortsetzen
+            </button>
+          )}
+          {/* Hängende „startet"-Kachel (Session nie hochgekommen, z.B. fehlgeschlagene Auslagerung)
+              soll immer entfernbar sein — entfernt den Stream lokal, auch ohne Backing-Session. */}
+          {agent.status === "starting" && agent.numTurns === 0 && (
+            <button
+              className="step-primary cleanup"
+              title="Diesen (hängenden) Stream entfernen"
+              onClick={() => void stopAgent(selectedId, agent.role === "sub")}
+            >
+              ✕ Abbrechen
             </button>
           )}
           {/* Geführter „nächster Schritt": Committen → PR erstellen → Integrieren */}

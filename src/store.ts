@@ -696,22 +696,41 @@ export const useStore = create<MadsState>((set) => {
         );
         break;
 
-      case "error":
+      case "error": {
+        let removedGhost = false;
         if (msg.agentId && msg.code === "main_edited") {
           // Proaktiver Hinweis (kein Fehler-Status): main-Edits → auslagern. Status bleibt unberührt.
-          notice(msg.agentId, "accent", "↗ main direkt geändert — in Sub-Stream auslagern empfohlen");
+          notice(msg.agentId, "accent", `↗ ${msg.message}`);
         } else if (msg.agentId) {
-          patchAgent(msg.agentId, { status: msg.recoverable ? "escalation" : "error" });
-          notice(msg.agentId, "err", `✖ ${msg.code}: ${msg.message}`);
+          const a = useStore.getState().agents[msg.agentId];
+          // Ein Stream, der beim START scheitert (z.B. fehlgeschlagene Auslagerung), hinterlässt
+          // sonst eine ewig hängende „startet"-Kachel ohne Backing — entfernen statt Fehler-Status.
+          if (a && a.status === "starting" && a.numTurns === 0) {
+            removedGhost = true;
+            set((s) => {
+              const agents = { ...s.agents };
+              delete agents[msg.agentId!];
+              const events = { ...s.events };
+              delete events[msg.agentId!];
+              const order = s.order.filter((x) => x !== msg.agentId);
+              return { agents, events, order, selectedId: s.selectedId === msg.agentId ? order[0] : s.selectedId };
+            });
+          } else {
+            patchAgent(msg.agentId, { status: msg.recoverable ? "escalation" : "error" });
+            notice(msg.agentId, "err", `✖ ${msg.code}: ${msg.message}`);
+          }
         } else if (useStore.getState().projectStatus === "opening") {
           // Projekt-Öffnung fehlgeschlagen (z.B. zuletzt geöffneter Ordner existiert nicht
           // mehr) — Status zurücksetzen, sonst hängt die UI auf "öffne…".
           set({ projectStatus: "error" });
         }
-        set((s) => ({
-          escalations: [...s.escalations.filter((e) => !(e.agentId === msg.agentId && e.code === msg.code)), msg],
-        }));
+        if (!removedGhost) {
+          set((s) => ({
+            escalations: [...s.escalations.filter((e) => !(e.agentId === msg.agentId && e.code === msg.code)), msg],
+          }));
+        }
         break;
+      }
     }
   }
 
