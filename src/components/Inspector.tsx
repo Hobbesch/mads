@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Mic } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
+import type { AttachedFile } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { agentBadges, nextStep, unsavedWork, gateDisabledReason, syncDisabledReason } from "../derive";
@@ -16,6 +17,7 @@ import type { PermissionMode, ImageInput, AutopilotLevel } from "../../shared/pr
 // Stabile Leer-Referenz: ein zustand-Selektor darf NICHT bei jedem Render ein neues []
 // zurückgeben (sonst Endlos-Render-Schleife → App-Crash / graues Fenster).
 const NO_IMAGES: ImageInput[] = [];
+const NO_FILES: AttachedFile[] = [];
 
 export function Inspector() {
   const selectedId = useStore((s) => s.selectedId);
@@ -37,8 +39,11 @@ export function Inspector() {
   // Composer-Entwürfe je Agent (im Store) — beim Umschalten bleibt jeder Entwurf erhalten.
   const draft = useStore((s) => (s.selectedId ? s.drafts[s.selectedId] ?? "" : ""));
   const attached = useStore((s) => (s.selectedId ? s.draftImages[s.selectedId] ?? NO_IMAGES : NO_IMAGES));
+  const attachedFiles = useStore((s) => (s.selectedId ? s.draftFiles[s.selectedId] ?? NO_FILES : NO_FILES));
   const setDraft = useStore((s) => s.setDraft);
   const setDraftImages = useStore((s) => s.setDraftImages);
+  const setDraftFiles = useStore((s) => s.setDraftFiles);
+  const attachToDraft = useStore((s) => s.attachToDraft);
   // Spracheingabe (lokales Whisper)
   const whisper = useStore((s) => s.whisper);
   const dictation = useStore((s) => s.dictation);
@@ -53,6 +58,7 @@ export function Inspector() {
 
   // Auto-wachsende Composer-Höhe (Textarea): bei jeder Entwurfs-Änderung neu messen.
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null); // verstecktes Input für den „+"-Button
   useLayoutEffect(() => {
     const el = composerRef.current;
     if (!el) return;
@@ -70,11 +76,18 @@ export function Inspector() {
 
   const submit = (e?: { preventDefault: () => void }) => {
     e?.preventDefault();
-    const text = draft.trim();
-    if (!text && attached.length === 0) return;
-    void sendInput(selectedId, text || "(siehe Screenshot)", attached.length ? attached : undefined);
+    let text = draft.trim();
+    if (!text && attached.length === 0 && attachedFiles.length === 0) return;
+    // Datei-Anhänge (Nicht-Bilder) als lesbare Referenzen in den Prompt hängen — der Agent
+    // liest sie über den Pfad (liegen in `.mads/attachments/`, im cwd → keine Rückfrage).
+    if (attachedFiles.length) {
+      const list = attachedFiles.map((f) => `- ${f.relPath}`).join("\n");
+      text = `${text ? text + "\n\n" : ""}📎 Angehängte Dateien (bitte lesen):\n${list}`;
+    }
+    void sendInput(selectedId, text || "(siehe Anhang)", attached.length ? attached : undefined);
     setDraft(selectedId, "");
     setDraftImages(selectedId, []);
+    setDraftFiles(selectedId, []);
   };
 
   // Bild-Dateien (aus Paste ODER Drag&Drop) als Anhänge übernehmen (base64, ImageInput).
@@ -104,7 +117,14 @@ export function Inspector() {
     e.preventDefault();
     setDragging(false);
     const files = e.dataTransfer?.files;
-    if (files && files.length) await attachImageFiles(Array.from(files));
+    if (files && files.length) await attachToDraft(selectedId, Array.from(files));
+  };
+
+  // „+"-Button → Datei-Auswahl (Bilder + beliebige Dateien).
+  const onPickFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files.length) await attachToDraft(selectedId, Array.from(files));
+    e.target.value = ""; // dieselbe Datei später erneut wählbar
   };
 
   const badges = agentBadges(agent);
@@ -366,13 +386,25 @@ export function Inspector() {
         }}
         onDrop={(e) => void onDrop(e)}
       >
-        {dragging && <div className="composer-drophint">Bild hier ablegen zum Anhängen</div>}
-        {attached.length > 0 && (
+        {dragging && <div className="composer-drophint">Dateien &amp; Bilder hier ablegen zum Anhängen</div>}
+        {(attached.length > 0 || attachedFiles.length > 0) && (
           <div className="composer-attachments">
             {attached.map((im, i) => (
-              <div key={i} className="thumb">
+              <div key={`img-${i}`} className="thumb">
                 <img src={`data:${im.mediaType};base64,${im.dataBase64}`} alt="Anhang" />
                 <button type="button" onClick={() => setDraftImages(selectedId, attached.filter((_, j) => j !== i))}>
+                  ×
+                </button>
+              </div>
+            ))}
+            {attachedFiles.map((f, i) => (
+              <div key={`file-${i}`} className="file-chip" title={f.relPath}>
+                <span className="file-chip-name">📄 {f.name}</span>
+                <button
+                  type="button"
+                  aria-label={`Anhang ${f.name} entfernen`}
+                  onClick={() => setDraftFiles(selectedId, attachedFiles.filter((_, j) => j !== i))}
+                >
                   ×
                 </button>
               </div>
@@ -408,9 +440,27 @@ export function Inspector() {
             placeholder={
               dictation.transcribing
                 ? "⌛ Transkribiere… der erkannte Text erscheint gleich hier"
-                : `Nachricht an ${agent.label}…  (Enter senden · ⇧↵ Zeilenumbruch · ⌘V Screenshot)`
+                : `Nachricht an ${agent.label}…  (Enter senden · ⇧↵ Zeilenumbruch · + oder Drag&Drop für Dateien)`
             }
           />
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="composer-file-input"
+            onChange={(e) => void onPickFiles(e)}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+          <button
+            type="button"
+            className="composer-btn attach"
+            title="Dateien & Bilder anhängen"
+            aria-label="Dateien anhängen"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            +
+          </button>
           {whisper.downloading ? (
             <button type="button" className="composer-btn mic" disabled title={`Sprachmodell lädt… ${Math.round(whisper.progress * 100)}%`}>
               <span className="mic-pct">{Math.round(whisper.progress * 100)}%</span>
@@ -475,7 +525,7 @@ export function Inspector() {
             <button
               type="submit"
               className="composer-btn send"
-              disabled={!draft.trim() && attached.length === 0}
+              disabled={!draft.trim() && attached.length === 0 && attachedFiles.length === 0}
               title="Senden"
               aria-label="Senden"
             >

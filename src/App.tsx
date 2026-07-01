@@ -37,6 +37,19 @@ export default function App() {
     void init();
   }, [init]);
 
+  // Globaler Drag&Drop-Schutz: bei `dragDropEnabled:false` würde der Browser eine ausserhalb des
+  // Composers fallengelassene Datei ÖFFNEN (Webview navigiert weg → App weg). Fenster-weit
+  // preventDefault; der Composer-Drop fängt seinen Drop vorher selbst (Element vor Window im Bubble).
+  useEffect(() => {
+    const stop = (e: DragEvent) => e.preventDefault();
+    window.addEventListener("dragover", stop);
+    window.addEventListener("drop", stop);
+    return () => {
+      window.removeEventListener("dragover", stop);
+      window.removeEventListener("drop", stop);
+    };
+  }, []);
+
   useEffect(() => {
     const unlisten = listen("show-about", () => setShowAbout(true));
     return () => {

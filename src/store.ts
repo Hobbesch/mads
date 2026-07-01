@@ -175,6 +175,14 @@ export type FileKind = "markdown" | "code" | "image" | "binary";
  *  Global (eine .md zugleich offen), session-only (nicht persistiert). */
 export type ViewMode = "preview" | "edit" | "split" | "wysiwyg";
 
+/** Nicht-Bild-Anhang im Composer: nach `<cwd>/.mads/attachments/` geschrieben (gitignored),
+ *  im Prompt per `relPath` referenziert. Bilder laufen dagegen als base64-`ImageInput`. */
+export interface AttachedFile {
+  name: string; // Anzeigename
+  relPath: string; // relativ zum Stream-cwd, z.B. .mads/attachments/1699…-report.pdf
+  size: number; // Bytes
+}
+
 /** Core-Lese-Resultat (FileRead, doc 07 §4.2) — DER CORE entscheidet text/binary. */
 type CoreFileRead =
   | { kind: "text"; text: string; mtimeMs: number; size: number; hash: string; truncated: boolean }
@@ -248,6 +256,9 @@ export interface MadsState {
   /** Composer-Entwürfe je Agent (Text + Anhänge) — bleiben beim Umschalten erhalten. */
   drafts: Record<string, string>;
   draftImages: Record<string, ImageInput[]>;
+  /** Nicht-Bild-Anhänge je Agent: liegen in `<cwd>/.mads/attachments/` (gitignored) und werden
+   *  beim Senden per relativem Pfad im Prompt referenziert (der Agent liest sie). */
+  draftFiles: Record<string, AttachedFile[]>;
 
   // ── Activity-Rail / Primary-Panel (docs/design/10-navigation-toolbar.md §3.1) ──
   /** Welcher Rail-View aktiv ist (persistiert). "streams" (Default) ⇒ KEIN Primary-Panel
@@ -295,6 +306,10 @@ export interface MadsState {
   dismissEscalations: () => void;
   setDraft: (agentId: string, text: string) => void;
   setDraftImages: (agentId: string, images: ImageInput[]) => void;
+  setDraftFiles: (agentId: string, files: AttachedFile[]) => void;
+  /** Dateien aus „+"-Auswahl oder Drag&Drop anhängen: Bilder → base64-Anhang (multimodal),
+   *  sonstige → nach `.mads/attachments/` schreiben + als Datei-Anhang referenzieren. */
+  attachToDraft: (agentId: string, files: File[]) => Promise<void>;
   answerPermission: (req: PermissionRequestMsg, decision: PermissionDecision) => Promise<void>;
   requestParallelAssessment: (req: PermissionRequestMsg) => Promise<void>;
   spawnParallelStreams: (picks: { label: string; brief: string }[]) => Promise<void>;
@@ -738,6 +753,7 @@ export const useStore = create<MadsState>((set) => {
     parallelPicker: undefined,
     drafts: {},
     draftImages: {},
+    draftFiles: {},
 
     activeView: loadUiPrefs().activeView,
     railCollapsed: loadUiPrefs().railCollapsed,
@@ -879,6 +895,51 @@ export const useStore = create<MadsState>((set) => {
 
     setDraft: (agentId, text) => set((s) => ({ drafts: { ...s.drafts, [agentId]: text } })),
     setDraftImages: (agentId, images) => set((s) => ({ draftImages: { ...s.draftImages, [agentId]: images } })),
+    setDraftFiles: (agentId, files) => set((s) => ({ draftFiles: { ...s.draftFiles, [agentId]: files } })),
+    attachToDraft: async (agentId, files) => {
+      const st = useStore.getState();
+      const cwd = st.agents[agentId]?.worktreePath ?? st.project?.repoRoot;
+      if (!cwd) {
+        set({ saveNotice: { tone: "err", text: "Kein Projekt/Worktree — Anhang nicht möglich" } });
+        return;
+      }
+      const base = cwd.replace(/\/$/, "");
+      const newImgs: ImageInput[] = [];
+      const newFiles: AttachedFile[] = [];
+      const MAX_ATTACH_BYTES = 20 * 1024 * 1024; // 20 MB — größere Dateien blähen das IPC-JSON auf
+      for (const f of files) {
+        if (f.size > MAX_ATTACH_BYTES) {
+          set({ saveNotice: { tone: "err", text: `„${f.name}“ ist zu groß (max. 20 MB) — nicht angehängt` } });
+          continue;
+        }
+        if (f.type.startsWith("image/")) {
+          newImgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f) });
+          continue;
+        }
+        try {
+          const bytes = new Uint8Array(await f.arrayBuffer());
+          // Dateinamen säubern (kein Pfad-Traversal) + eindeutig machen.
+          const safe =
+            ((f.name || "datei").split(/[\\/]/).pop() ?? "datei").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || "datei";
+          const rel = `.mads/attachments/${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${safe}`;
+          const res = (await invoke("mads_write_file_bytes", {
+            path: `${base}/${rel}`,
+            bytes: Array.from(bytes),
+            baseMtimeMs: 0,
+            baseSize: 0,
+            baseHash: "",
+          })) as CoreWriteResult;
+          if (res.kind === "conflict") continue;
+          newFiles.push({ name: safe, relPath: rel, size: f.size });
+        } catch (e) {
+          set({ saveNotice: { tone: "err", text: `Anhang „${f.name}“ fehlgeschlagen: ${String(e)}` } });
+        }
+      }
+      if (newImgs.length)
+        set((s) => ({ draftImages: { ...s.draftImages, [agentId]: [...(s.draftImages[agentId] ?? []), ...newImgs] } }));
+      if (newFiles.length)
+        set((s) => ({ draftFiles: { ...s.draftFiles, [agentId]: [...(s.draftFiles[agentId] ?? []), ...newFiles] } }));
+    },
 
     answerPermission: async (req, decision) => {
       set((s) => ({ permissions: s.permissions.filter((p) => p.requestId !== req.requestId) }));
