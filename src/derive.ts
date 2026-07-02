@@ -98,11 +98,17 @@ export function nextStep(a: AgentVM): NextStep {
   if (a.dirty) return { kind: "commit", label: "Committen", disabled: false, hint: "Der Agent committet seine Arbeit (Projektkonvention)" };
   if (a.pr && a.pr.state === "OPEN") {
     const r = mergeReadiness(a);
+    // Default = der NICHT-destruktive Merge: nach main mergen, aber Branch + Stream behalten
+    // (auf frisches main zurückgesetzt) → man arbeitet direkt weiter. Das endgültige
+    // „Integrieren & beenden" (Stream/Worktree/Branch aufräumen) ist die sekundäre Aktion
+    // im Inspector — so löscht ein versehentlicher Default-Klick nie einen Stream.
     return {
       kind: "integrate",
-      label: "Integrieren",
+      label: "Mergen & weiterarbeiten",
       disabled: !r.ok,
-      hint: r.ok ? "PR nach main mergen und Branch/Worktree aufräumen" : `Noch nicht bereit: ${r.reasons.join(" · ")}`,
+      hint: r.ok
+        ? "PR nach main mergen — Branch + Stream bleiben erhalten (auf main zurückgesetzt), du arbeitest direkt weiter"
+        : `Noch nicht bereit: ${r.reasons.join(" · ")}`,
     };
   }
   if (a.ahead > 0 && !a.pr) return { kind: "pr", label: "PR erstellen", disabled: false, hint: "Gate prüfen → auf main syncen → pushen → PR öffnen" };

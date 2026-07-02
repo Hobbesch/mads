@@ -137,7 +137,8 @@ export function Inspector() {
   // Merge ist irreversibel & außen-wirksam (landet auf dem geteilten main) → bestätigen.
   const askMerge = (keep: boolean) =>
     setConfirm({
-      title: keep ? "Mergen & weiterarbeiten?" : "PR nach main mergen?",
+      title: keep ? "Mergen & weiterarbeiten?" : "Integrieren & Stream beenden?",
+      danger: !keep, // das endgültige Integrieren räumt den Stream ab → als riskant markieren
       body: (
         <>
           <p>
@@ -147,11 +148,11 @@ export function Inspector() {
           <p>
             {keep
               ? "Branch + Stream bleiben erhalten (auf main zurückgesetzt) — du arbeitest direkt weiter."
-              : "Danach werden Worktree + Branch aufgeräumt und der Stream beendet."}
+              : "Danach werden Worktree + Branch aufgeräumt und der Stream beendet — für diesen Stream ist dann Schluss."}
           </p>
         </>
       ),
-      confirmLabel: keep ? "Mergen & weiterarbeiten" : "Nach main mergen",
+      confirmLabel: keep ? "Mergen & weiterarbeiten" : "Integrieren & beenden",
       onConfirm: () => void integratePr(selectedId, keep),
     });
 
@@ -206,7 +207,7 @@ export function Inspector() {
   const runStep = () => {
     if (step.kind === "commit") void commitAgent(selectedId);
     else if (step.kind === "pr") void createPr(selectedId);
-    else if (step.kind === "integrate") askMerge(false);
+    else if (step.kind === "integrate") askMerge(true); // Default = mergen + Stream BEHALTEN
     else if (step.kind === "outsource") askOutsource();
     else if (step.kind === "cleanup") void stopAgent(selectedId, true); // bereits gemergt → sicher
   };
@@ -314,15 +315,18 @@ export function Inspector() {
               {step.label}
             </button>
           )}
-          {/* Alternative zum „Integrieren": mergen, aber Branch + Stream behalten (auf main
-              zurückgesetzt) — für langlebige Integrations-Branches, an denen man weiterarbeitet. */}
+          {/* Sekundär (bewusst nicht der Default): endgültiges Integrieren — mergt nach main
+              UND räumt danach Worktree + Branch auf und beendet den Stream. Nur wählen, wenn an
+              diesem Stream nicht mehr weitergearbeitet wird. Der Default-Button oben („Mergen &
+              weiterarbeiten") behält den Stream. */}
           {live && step.kind === "integrate" && (
             <button
+              className="danger"
               disabled={step.disabled}
-              title="Mergt den PR nach main, behält aber Branch + Stream (auf main zurückgesetzt) — zum asynchronen Weiterarbeiten am selben Branch."
-              onClick={() => askMerge(true)}
+              title="Mergt den PR nach main und beendet danach den Stream (Worktree + Branch werden aufgeräumt). Nur wählen, wenn du an diesem Stream nicht mehr weiterarbeitest."
+              onClick={() => askMerge(false)}
             >
-              Mergen & weiterarbeiten
+              Integrieren &amp; beenden
             </button>
           )}
           {live && agent.role === "sub" && agent.worktreePath && (
