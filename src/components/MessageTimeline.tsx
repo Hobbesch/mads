@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import { Elapsed } from "./Elapsed";
 import { MarkdownView } from "../mdPipeline";
@@ -122,7 +122,11 @@ function renderEvent(ev: TimelineEvent) {
   }
 }
 
-export function MessageTimeline({ agentId }: { agentId: string }) {
+// memo: das Timeline-Rendering (Markdown pro Nachricht) ist die teuerste Stelle im Inspector.
+// Ohne memo rendert es bei JEDEM Tastendruck im Composer neu (der Inspector re-rendert, weil er
+// den Draft liest) → spürbarer Tipp-Lag. Einzige Prop ist die stabile `agentId`; eigene Daten
+// (events/status) liest die Komponente selbst aus dem Store → memo blockt NUR fremde Re-Renders.
+export const MessageTimeline = memo(function MessageTimeline({ agentId }: { agentId: string }) {
   const events = useStore((s) => s.events[agentId] ?? NO_EVENTS);
   const status = useStore((s) => s.agents[agentId]?.status);
   const currentStep = useStore((s) => s.agents[agentId]?.currentStep);
@@ -184,4 +188,4 @@ export function MessageTimeline({ agentId }: { agentId: string }) {
       )}
     </div>
   );
-}
+});
