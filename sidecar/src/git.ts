@@ -492,6 +492,10 @@ export async function syncBranch(
   const rebase = await git(["-C", worktree, "rebase", `origin/${defaultBranch}`], worktree);
   if (rebase.code !== 0) {
     const errText = rebase.stderr || rebase.stdout;
+    // Konfliktdateien ERFASSEN, bevor `rebase --abort` sie wegräumt → klare, handlungsweisende
+    // Meldung statt git-Rohtext („Failed to merge … git am --show-current-patch").
+    const confl = await git(["-C", worktree, "diff", "--name-only", "--diff-filter=U"], worktree);
+    const conflictFiles = confl.code === 0 ? confl.stdout.split("\n").map((l) => l.trim()).filter(Boolean) : [];
     await git(["-C", worktree, "rebase", "--abort"], worktree);
     const stuck = await isRebaseInProgress(worktree); // der Abbruch selbst gescheitert?
     const stuckNote = stuck
@@ -509,6 +513,19 @@ export async function syncBranch(
           `Auto-Sync blockiert durch nicht-versionierte Datei(en) im Weg${paths ? ` (${paths})` : ""} — KEIN echter ` +
           `Merge-Konflikt. Meist ein eingechecktes Build-Artefakt (.venv/node_modules). Lösung: aus der ` +
           `Versionierung nehmen (git rm --cached <pfad>) und in .gitignore aufnehmen.${stuckNote}`,
+      };
+    }
+    // Echter Rebase-Konflikt: die betroffenen Dateien nennen + auf „Konflikt lösen" verweisen
+    // (statt git-Rohtext). mads rebaset/pusht nach der Auflösung selbst.
+    if (conflictFiles.length > 0) {
+      const shown = conflictFiles.slice(0, 8).join(", ");
+      const more = conflictFiles.length > 8 ? ` … (+${conflictFiles.length - 8})` : "";
+      return {
+        ok: false,
+        kind: "merge_conflict",
+        error:
+          `Rebase-Konflikt mit origin/${defaultBranch} in ${conflictFiles.length} Datei(en): ${shown}${more}. ` +
+          `Über „Konflikt lösen" im Worktree beheben — mads rebaset/pusht danach.${stuckNote}`,
       };
     }
     return { ok: false, kind: "merge_conflict", error: errText + stuckNote };

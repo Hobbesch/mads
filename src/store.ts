@@ -1183,9 +1183,16 @@ export const useStore = create<MadsState>((set) => {
       notice(id, "accent", "▶ Konflikt lösen (Agent rebaset im Worktree)");
       await useStore.getState().sendInput(
         id,
-        `Dein Branch hat einen Rebase-Konflikt mit origin/${db}. Bitte löse ihn IN DIESEM Worktree: ` +
-          `führe \`git rebase origin/${db}\` aus, behebe die Konfliktmarkierungen in den betroffenen Dateien, ` +
-          `dann \`git add -A && git rebase --continue\` (ggf. mehrfach, bis der Rebase durch ist). ` +
+        `Dein Branch hat einen Rebase-Konflikt mit origin/${db}. Löse ihn IN DIESEM Worktree:\n` +
+          `1. \`git rebase origin/${db}\` ausführen.\n` +
+          `2. Konfliktmarkierungen beheben. Ergänzen BEIDE Seiten unabhängig etwas (neue Routes, ` +
+          `Nav-Links, Dependencies, i18n-Keys), dann BEIDE behalten (nicht eine Seite verwerfen).\n` +
+          `3. GENERIERTE Sperrdateien NICHT von Hand mergen — neu erzeugen, nachdem die Quelldatei ` +
+          `konfliktfrei ist: \`uv.lock\` → \`uv lock\`; \`package-lock.json\` → \`npm install\`. ` +
+          `(Handgemergte Lockfiles sind kaputt und lassen das Gate „Lockfile up-to-date" scheitern.)\n` +
+          `4. \`git add -A && git rebase --continue\` (ggf. mehrfach, bis der Rebase durch ist).\n` +
+          `5. Verifizieren: die Projekt-Checks lokal grün laufen lassen (z. B. \`uv run ruff check .\`, ` +
+          `\`uv run mypy\`, \`uv run pytest -q\` bzw. \`npm run lint/typecheck/test\`).\n` +
           `NICHT pushen, keinen PR, keinen Merge — Push/PR/Integration übernimmt mads. ` +
           `Fasse am Ende kurz zusammen, welche Dateien du angepasst hast.`,
       );
