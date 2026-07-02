@@ -21,9 +21,29 @@ function safeRead(path: string): string {
     return "";
   }
 }
-function lastLine(text: string): string {
+/** Aussagekräftige Fehlerzeile fürs Gate-Summary: die ERSTE konkrete Fehlerzeile bevorzugen
+ *  (mypy „…: error: …", ruff „file:z:s: CODE", pytest „FAILED"/„E   …") statt der letzten Zeile
+ *  (die bei mypy nur „Found N errors" ist und die eigentliche Ursache verschluckt). */
+function failSummary(text: string): string {
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  return lines.length ? lines[lines.length - 1].slice(0, 160) : "";
+  const err = lines.find((l) => /: error:|: error\[|\bFAILED\b|^E {2,}|^\S+:\d+:\d+:/.test(l));
+  return (err ?? lines[lines.length - 1] ?? "").slice(0, 200);
+}
+
+/** mypy-Ziele: die Projekt-Konfiguration bestimmt den Prüf-Umfang. Definiert `[tool.mypy]`
+ *  `files`/`packages`/`modules`, dann mypy OHNE Pfad-Argument aufrufen — ein explizites „."
+ *  ÜBERSCHREIBT die `files`-Auswahl und zieht Dateien außerhalb (z. B. `scripts/`) herein, die
+ *  das Projekt/CI bewusst NICHT typprüft → falsch-rote Gates (der Agent prüft `mypy src tests`,
+ *  das Gate prüfte `mypy .`). Ohne solche Config: Fallback auf „." (mypy braucht ein Ziel). */
+function mypyTargets(pyproject: string): string[] {
+  const start = pyproject.search(/^\[tool\.mypy\]\s*$/m);
+  if (start >= 0) {
+    const afterHeader = pyproject.slice(start + 1); // führendes „[" der Section-Kopfzeile überspringen
+    const rel = afterHeader.search(/^\[/m); // nächste Section (z. B. [[tool.mypy.overrides]])
+    const body = rel < 0 ? pyproject.slice(start) : pyproject.slice(start, start + 1 + rel);
+    if (/^\s*(files|packages|modules)\s*=/m.test(body)) return []; // Config bestimmt den Umfang
+  }
+  return ["."];
 }
 
 export async function runGate(
@@ -37,7 +57,7 @@ export async function runGate(
   async function step(name: string, cmd: string, args: string[]): Promise<void> {
     const r = await run(cmd, args, worktree);
     if (r.code === 0) add(name, "pass", `${cmd} ${args.join(" ")}`);
-    else add(name, "fail", lastLine(r.stderr || r.stdout) || `${cmd} exited ${r.code}`);
+    else add(name, "fail", failSummary(r.stdout || r.stderr) || `${cmd} exited ${r.code}`);
   }
 
   // ---- JS / TS ----
@@ -61,7 +81,8 @@ export async function runGate(
     const py = safeRead(join(worktree, "pyproject.toml"));
     if (exists("uv.lock") && (await hasCmd("uv"))) {
       if (/ruff/.test(py)) await step("ruff", "uv", ["run", "ruff", "check", "."]);
-      if (/mypy/.test(py)) await step("mypy", "uv", ["run", "mypy", "."]);
+      // mypy: Umfang aus der Projekt-Config (matcht CI: `mypy src tests`), nicht das breitere „.".
+      if (/mypy/.test(py)) await step("mypy", "uv", ["run", "mypy", ...mypyTargets(py)]);
       if (/pytest/.test(py)) await step("pytest", "uv", ["run", "pytest", "-q"]);
     } else {
       add("python", "skip", "kein uv.lock / uv nicht gefunden");
