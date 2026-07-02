@@ -700,12 +700,25 @@ export class Orchestrator {
       const doneWord = pr?.state === "MERGED" ? "gemergt" : "geschlossen";
       // PR erledigt → Sicherheits-Check vor dem Löschen.
       const res = await worktreeResidue(c.worktreePath, c.branch);
-      if (!res.dirty && res.unpushed === 0) {
+      // Commits über main (NEUE, noch nicht gemergte Arbeit): entscheidend, denn ein
+      // „Mergen & weiterarbeiten"-Branch wird nach dem Merge auf main zurückgesetzt und läuft
+      // dann WEITER — der alte PR ist gemergt, die neuen Commits aber nicht. Solche Streams
+      // dürfen NICHT als „erledigt" verbucht werden (sonst Aufräum-Falle für echte Arbeit).
+      const db = this.project?.defaultBranch ?? "main";
+      const aheadR = await run("git", ["-C", c.worktreePath, "rev-list", "--count", `origin/${db}..HEAD`], c.worktreePath);
+      const aheadOfMain = aheadR.code === 0 ? parseInt(aheadR.stdout.trim() || "0", 10) : 0;
+      if (aheadOfMain > 0) {
+        // Gemergter PR, aber der Branch ist seither weitergelaufen → AKTIVER Stream mit
+        // ungemergter Arbeit (normal fortsetzbar), NICHT „erledigt". Kein merged-Flag.
+        offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url });
+        log(`[orchestrator] reconcile: ${c.branch} ${doneWord}, aber ${aheadOfMain} neue Commit(s) über ${db} → aktiver Stream (ungemergte Arbeit)`);
+      } else if (!res.dirty && res.unpushed === 0) {
         await removeWorktree(repoRoot, c.worktreePath, c.branch);
         dropped.add(c.agentId);
         cleaned.push(c.label);
         log(`[orchestrator] reconcile: ${c.branch} ${doneWord} + sauber → aufgeräumt`);
       } else {
+        // gemergt + nur ungespeicherte/untracked Reste (keine neuen Commits) → Aufräum-Kandidat mit Warnung.
         offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url, merged: true, localChanges: true });
         residue.push(c.label);
         log(`[orchestrator] reconcile: ${c.branch} ${doneWord}, aber lokale Reste (dirty=${res.dirty} unpushed=${res.unpushed}) → zur Prüfung`);
