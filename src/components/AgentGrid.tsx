@@ -4,7 +4,7 @@ import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
-import { agentBadges, hasGitEscalation, unsavedWork } from "../derive";
+import { agentBadges, hasGitEscalation, unsavedWork, isMergedDone } from "../derive";
 import { agentColor } from "../agentColor";
 import type { AgentVM } from "../store";
 
@@ -78,10 +78,12 @@ export function AgentGrid() {
   const [showDone, setShowDone] = useState(false);
 
   const all = order.map((id) => agents[id]).filter(Boolean);
-  // Gemergte Sub-Streams sind „erledigt" → eigene kollabierte Sektion (zuvor in der Sidebar
-  // unter „Erledigt"; die Sidebar ist aufgelöst, doc 10 §2.1). Aktives Grid = nicht-gemergt.
-  const list = all.filter((a) => a.pr?.state !== "MERGED");
-  const doneSubs = all.filter((a) => a.role === "sub" && a.pr?.state === "MERGED");
+  // „Erledigt" (kollabierte Sektion) NUR für wirklich fertige Streams: PR gemergt UND keine
+  // ungemergte Arbeit mehr (isMergedDone). Sonst würde ein „Mergen & weiterarbeiten"-Stream mit
+  // neuen Commits (alter PR bleibt MERGED) beim nächsten PR-Poll aus dem aktiven Grid
+  // verschwinden — genau der Bug, dass die Kachel „manchmal weg" ist. Aktives Grid = alles andere.
+  const list = all.filter((a) => !isMergedDone(a));
+  const doneSubs = all.filter((a) => a.role === "sub" && isMergedDone(a));
 
   if (list.length === 0 && doneSubs.length === 0) {
     return (

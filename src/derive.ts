@@ -35,7 +35,7 @@ export function agentBadges(a: AgentVM): Badge[] {
 }
 
 export function hasGitEscalation(a: AgentVM): boolean {
-  if (a.pr?.state === "MERGED") return false;
+  if (isMergedDone(a)) return false; // wirklich fertig → keine Eskalation; merged-und-weitergelaufen aber schon
   return a.behind > 0 || a.pr?.checksState === "FAILURE" || a.pr?.mergeable === "CONFLICTING";
 }
 
@@ -45,8 +45,11 @@ export function hasGitEscalation(a: AgentVM): boolean {
  */
 export function unsavedWork(a: AgentVM): boolean {
   if (a.role === "integrator") return a.dirty; // dirty Main-Checkout → in Sub-Stream auslagern
-  if (a.role !== "sub" || a.pr?.state === "MERGED") return false;
-  return a.dirty || (a.ahead > 0 && !a.pr);
+  if (a.role !== "sub") return false;
+  // Ungesichert = uncommittet/untracked ODER neue Commits über main, die (noch) KEIN offener PR
+  // abdeckt. Ein bereits gemergter ALTER PR (A2: „Mergen & weiterarbeiten" + weitergelaufen)
+  // rettet die neuen Commits NICHT — sonst würde Stop/Aufräumen sie ohne Warnung verwerfen.
+  return a.dirty || (a.ahead > 0 && a.pr?.state !== "OPEN");
 }
 
 /** Grund, warum „Gate" gerade nicht sinnvoll ist (sonst null = erlaubt). */
@@ -78,6 +81,16 @@ export interface NextStep {
  * uncommitted → Committen, Commits aber kein PR → PR erstellen, PR offen → Integrieren.
  * Sync läuft automatisch im Hintergrund und ist hier bewusst kein eigener Schritt.
  */
+/** Wirklich „erledigt/gemergt": PR ist MERGED UND es gibt keine ungemergte Arbeit mehr —
+ *  keine Commits über main (`ahead === 0`) und nichts Uncommittetes. Ein „Mergen &
+ *  weiterarbeiten"-Stream läuft nach dem Merge weiter (Branch auf main zurückgesetzt, dann neue
+ *  Commits → ahead>0); der alte PR bleibt zwar MERGED, die Kachel MUSS aber aktiv bleiben, sonst
+ *  verschwindet sie beim nächsten PR-Poll (der den alten MERGED-Zustand refresht), obwohl es
+ *  ungemergte Arbeit gibt. Genutzt vom aktiven Grid (AgentGrid) UND vom geführten nextStep. */
+export function isMergedDone(a: AgentVM): boolean {
+  return a.pr?.state === "MERGED" && a.ahead === 0 && !a.dirty;
+}
+
 export function nextStep(a: AgentVM): NextStep {
   const none: NextStep = { kind: "none", label: "", disabled: true, hint: "" };
   if (a.role === "integrator") {
@@ -93,7 +106,10 @@ export function nextStep(a: AgentVM): NextStep {
     return none;
   }
   if (a.role !== "sub") return none;
-  if (a.pr?.state === "MERGED")
+  // NUR wirklich fertige (gemergt + nichts Ungemergtes) → aufräumen. Ein gemergter Stream mit
+  // neuen Commits (A2: „Mergen & weiterarbeiten" + weitergelaufen) fällt hier durch und bekommt
+  // unten „PR erstellen" für die neue Arbeit — statt fälschlich „Aufräumen".
+  if (isMergedDone(a))
     return { kind: "cleanup", label: "Aufräumen ✓", disabled: false, hint: "Stream beenden, Worktree/Branch entfernen (Arbeit ist bereits in main)" };
   if (a.dirty) return { kind: "commit", label: "Committen", disabled: false, hint: "Der Agent committet seine Arbeit (Projektkonvention)" };
   if (a.pr && a.pr.state === "OPEN") {
@@ -111,7 +127,9 @@ export function nextStep(a: AgentVM): NextStep {
         : `Noch nicht bereit: ${r.reasons.join(" · ")}`,
     };
   }
-  if (a.ahead > 0 && !a.pr) return { kind: "pr", label: "PR erstellen", disabled: false, hint: "Gate prüfen → auf main syncen → pushen → PR öffnen" };
+  // ahead>0 nach der OPEN-Prüfung: kein OFFENER PR (mehr) für diese Commits → (neuen) PR öffnen.
+  // Deckt auch „alter PR gemergt + neue Commits" ab (A2): mads erstellt einen frischen PR.
+  if (a.ahead > 0) return { kind: "pr", label: "PR erstellen", disabled: false, hint: "Gate prüfen → auf main syncen → pushen → PR öffnen" };
   return none;
 }
 
@@ -139,7 +157,7 @@ export function integrationPlan(agents: AgentVM[], collisions: Collision[]): Int
   const ready: IntegrationItem[] = [];
   const waiting: IntegrationItem[] = [];
   for (const a of agents) {
-    if (a.role !== "sub" || a.pr?.state === "MERGED" || a.live === false) continue;
+    if (a.role !== "sub" || isMergedDone(a) || a.live === false) continue; // merged-und-weitergelaufen bleibt im Plan (kein PR → PR erstellen)
     const base = { id: a.id, label: a.label, prNumber: a.pr?.number };
     if (a.status === "running" || a.status === "starting") {
       waiting.push({ ...base, state: "working", detail: "arbeitet gerade" });
@@ -151,7 +169,8 @@ export function integrationPlan(agents: AgentVM[], collisions: Collision[]): Int
       const r = mergeReadiness(a);
       if (r.ok) ready.push({ ...base, state: "ready", detail: "merge-bereit" });
       else waiting.push({ ...base, state: "blocked", detail: r.reasons.join(" · ") });
-    } else if (a.ahead > 0 && !a.pr) {
+    } else if (a.ahead > 0) {
+      // Kein OFFENER PR (kein PR, oder alter PR gemergt/geschlossen) + neue Commits → (neuen) PR.
       waiting.push({ ...base, state: "needs_pr", detail: "PR erstellen" });
     }
     // sonst (idle, nichts ahead) → nicht gelistet
