@@ -1,18 +1,24 @@
 import { useRef, useState } from "react";
 import { useStore } from "../store";
 import type { AgentRole } from "../store";
-import type { PermissionMode } from "../../shared/protocol";
+import type { PermissionMode, EffortMode } from "../../shared/protocol";
+import { ModelEffortPicker } from "./ModelEffortPicker";
+import { clampEffort } from "../modelCatalog";
 
 export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const createAgent = useStore((s) => s.createAgent);
   const sdkAvailable = useStore((s) => s.sidecar.sdkAvailable);
   const project = useStore((s) => s.project);
   const hasIntegrator = useStore((s) => Object.values(s.agents).some((a) => a.role === "integrator"));
+  const defaultModel = useStore((s) => s.defaultModel);
+  const defaultEffort = useStore((s) => s.defaultEffort);
 
   const [label, setLabel] = useState("");
   const [prompt, setPrompt] = useState("");
   const [role, setRole] = useState<AgentRole>(hasIntegrator ? "sub" : "integrator");
-  const [model, setModel] = useState(role === "integrator" ? "claude-opus-4-8" : "claude-sonnet-4-6");
+  // Modell + Effort werden aus dem globalen Default (linke Navigation) vorbelegt, hier überschreibbar.
+  const [model, setModel] = useState(defaultModel);
+  const [effort, setEffort] = useState<EffortMode | undefined>(clampEffort(defaultModel, defaultEffort));
   const [branch, setBranch] = useState("");
   const [mode, setMode] = useState<PermissionMode>("auto");
   const [mock, setMock] = useState(!sdkAvailable || !project);
@@ -21,7 +27,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
     e.preventDefault();
     const l = label.trim() || (role === "integrator" ? "Main-Agent" : "Sub-Agent");
     const p = prompt.trim() || "Beschreibe deine Aufgabe…";
-    void createAgent({ label: l, prompt: p, role, mock, model, branch: branch.trim() || undefined, permissionMode: mode });
+    void createAgent({ label: l, prompt: p, role, mock, model, effort, branch: branch.trim() || undefined, permissionMode: mode });
     onClose();
   };
 
@@ -67,33 +73,29 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
           />
         </label>
 
-        <div className="field-row">
-          <label className="field">
-            <span>Rolle</span>
-            <select
-              value={role}
-              onChange={(e) => {
-                const r = e.target.value as AgentRole;
-                setRole(r);
-                setModel(r === "integrator" ? "claude-opus-4-8" : "claude-sonnet-4-6");
-              }}
-            >
-              <option value="integrator" disabled={hasIntegrator}>
-                Integrator (Main){hasIntegrator ? " — existiert" : ""}
-              </option>
-              <option value="sub">Sub-Agent</option>
-            </select>
-          </label>
+        <label className="field">
+          <span>Rolle</span>
+          <select value={role} onChange={(e) => setRole(e.target.value as AgentRole)}>
+            <option value="integrator" disabled={hasIntegrator}>
+              Integrator (Main){hasIntegrator ? " — existiert" : ""}
+            </option>
+            <option value="sub">Sub-Agent</option>
+          </select>
+        </label>
 
-          <label className="field">
-            <span>Modell</span>
-            <select value={model} onChange={(e) => setModel(e.target.value)}>
-              <option value="claude-opus-4-8">Opus 4.8</option>
-              <option value="claude-sonnet-4-6">Sonnet 4.6</option>
-              <option value="claude-haiku-4-5">Haiku 4.5</option>
-            </select>
-          </label>
-        </div>
+        <label className="field">
+          <span>Modell &amp; Effort</span>
+          <ModelEffortPicker
+            model={model}
+            effort={effort}
+            onModel={(m) => {
+              setModel(m);
+              setEffort(clampEffort(m, effort));
+            }}
+            onEffort={setEffort}
+            className="dialog"
+          />
+        </label>
 
         <label className="field">
           <span>Permission-Modus</span>

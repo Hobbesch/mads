@@ -26,8 +26,10 @@ import type {
   AutonomyConfig,
   PermissionMode,
   AutopilotLevel,
+  EffortMode,
   ImageInput,
 } from "../shared/protocol";
+import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
@@ -104,6 +106,8 @@ export interface AgentVM {
   mock: boolean;
   permissionMode: PermissionMode;
   autopilot: AutopilotLevel; // Autopilot-Stufe dieses Streams (Default „assisted")
+  model?: string; // aktuelles Modell dieses Streams (für Anzeige + pro-Stream-Umschaltung)
+  effort?: EffortMode; // Reasoning-Effort dieses Streams (undefined = Modell ohne Effort, z. B. Haiku)
   createdAt: number;
   lastEventAt: number;
   /** Zeitpunkt, ab dem der aktuelle aktive Lauf zählt (für die Laufzeit-Anzeige). */
@@ -267,6 +271,10 @@ export interface MadsState {
   activeView: ViewId;
   /** Rail nur-Icon (true) vs. Icon+Text (false) (persistiert). */
   railCollapsed: boolean;
+  /** Globaler Default fürs Modell neuer Streams (linke Navigation, persistiert). */
+  defaultModel: string;
+  /** Globaler Default für den Effort neuer Streams (persistiert). */
+  defaultEffort: EffortMode;
   /** Change-Overview-Overlay an/aus (Owner: doc 09). Der Rail-„Änderungen"-Eintrag toggelt es (§2.3). */
   changeOverviewOn: boolean;
   /** Live-Diff-Quelle: Datei-Edits je Stream×Datei (doc 09 §3.2). Key: `${agentId}::${path}`. */
@@ -299,6 +307,7 @@ export interface MadsState {
     role: AgentRole;
     mock: boolean;
     model?: string;
+    effort?: EffortMode;
     branch?: string;
     permissionMode?: PermissionMode;
   }) => Promise<void>;
@@ -317,6 +326,12 @@ export interface MadsState {
   sendInput: (id: string, text: string, images?: ImageInput[]) => Promise<void>;
   setPermissionMode: (id: string, mode: PermissionMode) => Promise<void>;
   setAutopilot: (id: string, level: AutopilotLevel) => Promise<void>;
+  /** Globalen Default (linke Navigation) setzen — gilt für NEU eröffnete Streams. */
+  setDefaultModel: (model: string) => void;
+  setDefaultEffort: (effort: EffortMode) => void;
+  /** Modell/Effort eines bestehenden Streams LIVE umstellen (Inspector). */
+  setStreamModel: (id: string, model: string) => Promise<void>;
+  setStreamEffort: (id: string, effort: EffortMode) => Promise<void>;
   interruptAgent: (id: string) => Promise<void>;
   stopAgent: (id: string, removeWorktree: boolean) => Promise<void>;
   commitAgent: (id: string) => Promise<void>;
@@ -776,6 +791,8 @@ export const useStore = create<MadsState>((set) => {
 
     activeView: loadUiPrefs().activeView,
     railCollapsed: loadUiPrefs().railCollapsed,
+    defaultModel: loadUiPrefs().defaultModel,
+    defaultEffort: loadUiPrefs().defaultEffort,
     changeOverviewOn: false,
     editsByFile: {},
 
@@ -843,13 +860,14 @@ export const useStore = create<MadsState>((set) => {
       set((s) => ({ recentProjects: forgetProject(s.recentProjects, repoRoot) }));
     },
 
-    createAgent: async ({ label, prompt, role, mock, model, branch, permissionMode }) => {
+    createAgent: async ({ label, prompt, role, mock, model, effort, branch, permissionMode }) => {
       const id = crypto.randomUUID();
       const mode: PermissionMode = permissionMode ?? "auto";
-      // Modell-Default nach CLAUDE.md: Integrator Opus, Subs Sonnet (schont Rate-Limit/Kosten,
-      // wichtig bei mehreren parallelen Subs).
-      const finalModel = model ?? (role === "integrator" ? "claude-opus-4-8" : "claude-sonnet-4-6");
-      const project = useStore.getState().project;
+      const st0 = useStore.getState();
+      // Modell/Effort: explizit (New-Stream-Dialog) sonst globaler Default (linke Navigation).
+      const finalModel = model ?? st0.defaultModel;
+      const finalEffort = clampEffort(finalModel, effort ?? st0.defaultEffort);
+      const project = st0.project;
       const agent: AgentVM = {
         id,
         label,
@@ -862,6 +880,8 @@ export const useStore = create<MadsState>((set) => {
         mock,
         permissionMode: mode,
         autopilot: "assisted",
+        model: finalModel,
+        effort: finalEffort,
         createdAt: Date.now(),
         lastEventAt: Date.now(),
         workStartedAt: Date.now(),
@@ -883,6 +903,7 @@ export const useStore = create<MadsState>((set) => {
         label,
         role,
         model: finalModel,
+        effort: finalEffort,
         mock,
         permissionMode: mode,
         autopilot: "assisted",
@@ -1046,6 +1067,31 @@ export const useStore = create<MadsState>((set) => {
         level === "manual" ? "Manuell" : level === "autopilot" ? "Autopilot" : "Assisted (auto commit/push/PR)";
       notice(id, "accent", `🤖 Autopilot: ${label}`);
       await sendHost({ ...envelope(), type: "set_autopilot", agentId: id, level });
+    },
+
+    // ── Modell/Effort: globaler Default (linke Navigation) + pro-Stream-Umschaltung ──
+    setDefaultModel: (model) => {
+      const effort = clampEffort(model, useStore.getState().defaultEffort) ?? DEFAULT_EFFORT;
+      set({ defaultModel: model, defaultEffort: effort });
+      saveUiPrefs({ defaultModel: model, defaultEffort: effort });
+    },
+    setDefaultEffort: (effort) => {
+      const e = clampEffort(useStore.getState().defaultModel, effort) ?? effort;
+      set({ defaultEffort: e });
+      saveUiPrefs({ defaultEffort: e });
+    },
+    setStreamModel: async (id, model) => {
+      // Modellwechsel → Effort auf das neue Modell begrenzen (z. B. Haiku hat keinen Effort).
+      const effort = clampEffort(model, useStore.getState().agents[id]?.effort);
+      patchAgent(id, { model, effort });
+      notice(id, "accent", `⚙ Modell: ${modelLabel(model)}`);
+      await sendHost({ ...envelope(), type: "set_model_effort", agentId: id, model, effort });
+    },
+    setStreamEffort: async (id, effort) => {
+      const e = clampEffort(useStore.getState().agents[id]?.model, effort) ?? effort;
+      patchAgent(id, { effort: e });
+      notice(id, "accent", `⚙ Effort: ${EFFORT_LABEL[e]}`);
+      await sendHost({ ...envelope(), type: "set_model_effort", agentId: id, effort: e });
     },
 
     interruptAgent: async (id) => {
@@ -1247,6 +1293,8 @@ export const useStore = create<MadsState>((set) => {
             mock: false,
             permissionMode: "auto",
             autopilot: "assisted",
+            model: r.model,
+            effort: clampEffort(r.model, r.effort),
             createdAt: Date.now(),
             lastEventAt: Date.now(),
             branch: r.branch,
@@ -1414,6 +1462,7 @@ export const useStore = create<MadsState>((set) => {
         label: r.label,
         role: r.role,
         model: r.model,
+        effort: clampEffort(r.model, r.effort),
         mock: false,
         permissionMode: "auto",
         autopilot: "assisted",

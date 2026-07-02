@@ -9,6 +9,7 @@ import { agentBadges, nextStep, unsavedWork, gateDisabledReason, syncDisabledRea
 import { ConfirmDialog } from "./ConfirmDialog";
 import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
+import { ModelEffortPicker } from "./ModelEffortPicker";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
 import { blobToBase64 } from "../blob";
@@ -36,6 +37,9 @@ export function Inspector() {
   const runGate = useStore((s) => s.runGate);
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   const setAutopilot = useStore((s) => s.setAutopilot);
+  const setStreamModel = useStore((s) => s.setStreamModel);
+  const setStreamEffort = useStore((s) => s.setStreamEffort);
+  const defaultModel = useStore((s) => s.defaultModel);
   // Composer-Entwürfe je Agent (im Store) — beim Umschalten bleibt jeder Entwurf erhalten.
   const draft = useStore((s) => (s.selectedId ? s.drafts[s.selectedId] ?? "" : ""));
   const attached = useStore((s) => (s.selectedId ? s.draftImages[s.selectedId] ?? NO_IMAGES : NO_IMAGES));
@@ -264,6 +268,17 @@ export function Inspector() {
               <option value="assisted">🤖 Assisted — auto commit/push/PR</option>
               <option value="autopilot">🤖 Autopilot</option>
             </select>
+          )}
+          {/* Modell + Effort dieses Streams live umstellen (Modell via setModel, Effort/Ultracode
+              via applyFlagSettings — ohne Neustart). Nur für aktive, echte Streams. */}
+          {live && !agent.mock && (
+            <ModelEffortPicker
+              model={agent.model ?? defaultModel}
+              effort={agent.effort}
+              onModel={(m) => void setStreamModel(selectedId, m)}
+              onEffort={(e) => void setStreamEffort(selectedId, e)}
+              className="inspector"
+            />
           )}
           {/* Passiv wiederhergestellt → erst reaktivieren, bevor Git-Aktionen möglich sind.
               Beim INTEGRATOR (Leitstelle) erst rückfragen: reaktivieren kann sofort Aktionen

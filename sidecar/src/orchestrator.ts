@@ -117,6 +117,11 @@ export class Orchestrator {
         await this.pool.get(msg.agentId)?.setMode(msg.mode);
         break;
 
+      case "set_model_effort":
+        await this.pool.get(msg.agentId)?.setModelEffort(msg.model, msg.effort);
+        this.persist(); // Modell/Effort in agents.json festhalten (Resume-fest)
+        break;
+
       case "stop_agent": {
         const s = this.pool.get(msg.agentId);
         await s?.stop(msg.removeWorktree ?? false);
@@ -592,6 +597,7 @@ export class Orchestrator {
         lastPrompt: s.lastPrompt,
         status: s.status,
         model: s.model,
+        effort: s.effort as ResumableAgent["effort"],
         mock: false,
         updatedAt: Date.now(),
       });
@@ -661,6 +667,7 @@ export class Orchestrator {
           lastPrompt: known?.lastPrompt,
           status: "queued",
           model: known?.model,
+          effort: known?.effort,
           mock: false,
           updatedAt: Date.now(),
         });

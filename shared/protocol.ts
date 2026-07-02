@@ -26,6 +26,11 @@ export type AgentStatus =
 
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk";
 
+/** Reasoning-Effort eines Streams. "ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung
+ *  (SDK-Session-Flag `ultracode`; oberstes Ende der Skala wie in Claude Code). Sidecar mappt:
+ *  low/medium/high/xhigh → options.effort; ultracode → effort "xhigh" + settings.ultracode. */
+export type EffortMode = "low" | "medium" | "high" | "xhigh" | "ultracode";
+
 /** Bild-Eingabe (z.B. eingefügter Screenshot) für einen Agenten. */
 export interface ImageInput {
   mediaType: string; // z.B. "image/png"
@@ -56,6 +61,7 @@ export type HostMessage =
   | IntegratePrMsg
   | SetAutonomyMsg
   | SetAutopilotMsg
+  | SetModelEffortMsg
   | OutsourceMainMsg
   | PollProjectMsg
   | CleanupWorktreeMsg
@@ -91,6 +97,7 @@ export interface StartAgentMsg extends BaseMsg {
   branch?: string; // P3: feat/<task> für den Worktree
   baseRef?: string; // P3: i.d.R. "origin/<defaultBranch>"
   model?: string;
+  effort?: EffortMode;
   permissionMode?: PermissionMode;
   allowedTools?: string[];
   disallowedTools?: string[];
@@ -160,6 +167,14 @@ export interface SetAutopilotMsg extends BaseMsg {
   type: "set_autopilot";
   agentId: string;
   level: AutopilotLevel;
+}
+/** Modell und/oder Effort eines laufenden Streams LIVE umstellen. Sidecar wendet es ohne Neustart
+ *  an: Modell via query.setModel(), Effort/Ultracode via query.applyFlagSettings(). */
+export interface SetModelEffortMsg extends BaseMsg {
+  type: "set_model_effort";
+  agentId: string;
+  model?: string;
+  effort?: EffortMode;
 }
 /** Uncommittete Änderungen im Main-Checkout (Integrator) in einen NEUEN Sub-Stream auslagern
  *  (main bleibt sauber; die Änderungen gehen über den normalen PR-Fluss). */
@@ -430,6 +445,7 @@ export interface ResumableAgent {
   lastPrompt?: string;
   status: AgentStatus;
   model?: string;
+  effort?: EffortMode;
   mock: boolean;
   /**
    * GitHub-PR-Zustand des Branches beim Öffnen abgeglichen. Verlässliche „fertig"-

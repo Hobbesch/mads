@@ -1564,6 +1564,68 @@ button.primary:hover {
   font-family: var(--font);
 }
 
+/* ---------------- Modell-/Effort-Wähler (linke Nav = global; Inspector = pro Stream) ---------------- */
+.model-effort {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.model-effort select {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 550;
+  font-family: var(--font);
+}
+.model-effort .me-model {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.model-effort .me-effort {
+  flex: 0 0 auto;
+}
+.model-effort .me-effort-na {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+/* Rail-Variante: schmale linke Leiste → Modell + Effort voll gestapelt. */
+.rail-modeleffort {
+  padding: 8px 8px 4px;
+  border-top: 1px solid var(--border);
+}
+.rail-me-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  margin-bottom: 5px;
+}
+.model-effort.rail {
+  flex-wrap: wrap;
+}
+.model-effort.rail select {
+  font-size: 11px;
+  padding: 4px 6px;
+}
+.model-effort.rail .me-model,
+.model-effort.rail .me-effort {
+  flex: 1 1 100%;
+}
+/* Dialog-Variante: volle Breite im Formularfeld, Modell breiter als Effort. */
+.model-effort.dialog {
+  width: 100%;
+}
+.model-effort.dialog .me-model {
+  flex: 2 1 0;
+}
+.model-effort.dialog .me-effort {
+  flex: 1 1 0;
+}
+
 /* ---------------- Permission overlay ---------------- */
 .perm-overlay {
   position: fixed;

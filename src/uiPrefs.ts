@@ -13,6 +13,9 @@
  *  (`changeOverviewOn`, docs/design/09-change-overview.md / §2.3 von Doc 10). */
 export type ViewId = "streams" | "files" | "settings";
 
+import type { EffortMode } from "../shared/protocol";
+import { DEFAULT_MODEL, DEFAULT_EFFORT, MODELS, clampEffort } from "./modelCatalog";
+
 export interface UiPrefs {
   activeView: ViewId;
   railCollapsed: boolean;
@@ -22,6 +25,10 @@ export interface UiPrefs {
   mdZoom: number;
   /** Breite der Ordner-Spalte im Datei-Explorer in px — vom Nutzer ziehbar. */
   treePaneWidth: number;
+  /** Globaler Default fürs Modell neuer Streams (linke Navigation). */
+  defaultModel: string;
+  /** Globaler Default für den Effort neuer Streams. */
+  defaultEffort: EffortMode;
 }
 
 const KEY = "mads.uiPrefs";
@@ -32,7 +39,15 @@ export const MD_ZOOM_MIN = 0.5;
 export const MD_ZOOM_MAX = 2;
 export const TREE_MIN = 140;
 export const TREE_MAX = 700;
-const DEFAULTS: UiPrefs = { activeView: "streams", railCollapsed: false, primaryPanelWidth: 320, mdZoom: 1, treePaneWidth: 200 };
+const DEFAULTS: UiPrefs = {
+  activeView: "streams",
+  railCollapsed: false,
+  primaryPanelWidth: 320,
+  mdZoom: 1,
+  treePaneWidth: 200,
+  defaultModel: DEFAULT_MODEL,
+  defaultEffort: DEFAULT_EFFORT,
+};
 
 const VALID_VIEWS: ViewId[] = ["streams", "files", "settings"];
 
@@ -63,12 +78,17 @@ export function loadUiPrefs(): UiPrefs {
     if (!obj || typeof obj !== "object") return { ...DEFAULTS };
     const activeView: ViewId = VALID_VIEWS.includes(obj.activeView) ? obj.activeView : DEFAULTS.activeView;
     const railCollapsed = typeof obj.railCollapsed === "boolean" ? obj.railCollapsed : DEFAULTS.railCollapsed;
+    // Nur bekannte Modelle akzeptieren; Effort auf das Modell begrenzen.
+    const defaultModel = MODELS.some((m) => m.id === obj.defaultModel) ? (obj.defaultModel as string) : DEFAULTS.defaultModel;
+    const defaultEffort = clampEffort(defaultModel, obj.defaultEffort as EffortMode) ?? DEFAULTS.defaultEffort;
     return {
       activeView,
       railCollapsed,
       primaryPanelWidth: clampPanelWidth(obj.primaryPanelWidth),
       mdZoom: clampMdZoom(obj.mdZoom),
       treePaneWidth: clampTreePaneWidth(obj.treePaneWidth),
+      defaultModel,
+      defaultEffort,
     };
   } catch {
     return { ...DEFAULTS };

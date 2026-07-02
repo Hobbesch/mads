@@ -4,6 +4,7 @@ import { useStore } from "../store";
 import { TOOLBAR_ITEMS, type ToolbarItem } from "../toolbarItems";
 import { ActivityRailItem } from "./ActivityRailItem";
 import { RecentProjectsPopover } from "./RecentProjectsPopover";
+import { ModelEffortPicker } from "./ModelEffortPicker";
 
 /**
  * Activity-Rail (Navigations-Toolbar) — die äußerste Leiste links
@@ -20,6 +21,10 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
   const setActiveView = useStore((s) => s.setActiveView);
   const toggleRailCollapsed = useStore((s) => s.toggleRailCollapsed);
   const toggleChangeOverview = useStore((s) => s.toggleChangeOverview);
+  const defaultModel = useStore((s) => s.defaultModel);
+  const defaultEffort = useStore((s) => s.defaultEffort);
+  const setDefaultModel = useStore((s) => s.setDefaultModel);
+  const setDefaultEffort = useStore((s) => s.setDefaultEffort);
   const [projectOpen, setProjectOpen] = useState(false);
 
   // Badges/Enabled lesen denselben Store-State über memoisierte Selektoren (§3.3).
@@ -104,6 +109,22 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
       </div>
 
       <div className="rail-group rail-top">{top.map(renderItem)}</div>
+
+      {/* Globaler Modell-/Effort-Default (gilt für NEU eröffnete Streams). Nur im
+          ausgeklappten Zustand — im Icon-Modus fehlt die Breite für Dropdowns. */}
+      {!railCollapsed && (
+        <div className="rail-modeleffort">
+          <div className="rail-me-label">Modell &amp; Effort · Default</div>
+          <ModelEffortPicker
+            model={defaultModel}
+            effort={defaultEffort}
+            onModel={setDefaultModel}
+            onEffort={setDefaultEffort}
+            className="rail"
+          />
+        </div>
+      )}
+
       <div className="rail-group rail-bottom">{bottom.map(renderItem)}</div>
 
       {/* Popover auf nav-Ebene rendern (NICHT in .rail-top — dessen overflow-y:auto klippt

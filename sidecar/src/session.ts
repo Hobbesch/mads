@@ -68,7 +68,24 @@ interface SdkUserMessage {
 interface QueryHandle extends AsyncIterable<unknown> {
   interrupt?: () => Promise<void>;
   setPermissionMode?: (mode: string) => Promise<void>;
+  // Live-Steuerung (nur im Streaming-Input-Modus): Modell wechseln bzw. Flag-Settings
+  // (Effort/Ultracode) mitten in der Session mergen — ohne die query neu zu starten.
+  setModel?: (model?: string) => Promise<void>;
+  applyFlagSettings?: (settings: Record<string, unknown>) => Promise<void>;
   close?: () => void;
+}
+
+/** mads-Effort ("low".."xhigh"|"ultracode") → SDK-Query-Optionen. Ultracode = xhigh + stehende
+ *  Workflow-Orchestrierung (Settings-Flag `ultracode`). Ohne Effort (undefined) → SDK-Default. */
+function effortOptions(effort?: string): Record<string, unknown> {
+  if (!effort) return {};
+  if (effort === "ultracode") return { effort: "xhigh", settings: { ultracode: true } };
+  return { effort };
+}
+/** Live-Variante fürs applyFlagSettings (Flag-Layer). */
+function effortFlagSettings(effort: string): Record<string, unknown> {
+  if (effort === "ultracode") return { effortLevel: "xhigh", ultracode: true };
+  return { effortLevel: effort, ultracode: false };
 }
 
 function toolResultText(content: unknown): string {
@@ -139,6 +156,7 @@ export class AgentSession {
   label?: string;
   role?: "integrator" | "sub";
   model?: string;
+  effort?: string;
   lastPrompt?: string;
   mock = false;
   // Autopilot (Phase 2): vom Orchestrator gesetzt/gelesen (treibt autopilotPass). Default
@@ -173,6 +191,7 @@ export class AgentSession {
     this.label = msg.label;
     this.role = msg.role;
     this.model = msg.model;
+    this.effort = msg.effort;
     this.lastPrompt = msg.prompt;
     this.permissionMode = msg.permissionMode;
     this.inbox.push(userMsg(msg.prompt));
@@ -273,6 +292,9 @@ export class AgentSession {
         options: {
           cwd,
           model: msg.model,
+          // Effort/Ultracode (SDK-nativ): low/medium/high/xhigh → options.effort;
+          // ultracode → effort xhigh + settings.ultracode. Ohne Effort → SDK-Default (high).
+          ...effortOptions(msg.effort),
           mcpServers,
           // SICHERHEIT (INJ-1): NUR die globalen Nutzer-Settings laden (~/.claude/settings.json).
           // NICHT "project"/"local" — die läsen die `.claude/settings.json` des (ggf. untrusted)
@@ -467,6 +489,19 @@ export class AgentSession {
     this.permissionMode = mode;
     // "auto" handhabt mads selbst → dem SDK "default" geben (siehe start()).
     await this.q?.setPermissionMode?.(mode === "auto" ? "default" : mode);
+  }
+
+  /** Modell und/oder Effort LIVE umstellen (ohne query-Neustart): Modell via setModel(),
+   *  Effort/Ultracode via applyFlagSettings() (Flag-Layer, sofort für den nächsten Turn). */
+  async setModelEffort(model?: string, effort?: string): Promise<void> {
+    if (model !== undefined && model !== "") {
+      this.model = model;
+      await this.q?.setModel?.(model);
+    }
+    if (effort !== undefined && effort !== "") {
+      this.effort = effort;
+      await this.q?.applyFlagSettings?.(effortFlagSettings(effort));
+    }
   }
 
   async stop(removeWt = false): Promise<void> {
