@@ -245,6 +245,8 @@ export function Inspector() {
           </span>
         </div>
         <div className="inspector-actions">
+          {/* Cluster 1 — Einstellungen (Dropdowns): Permission · Autopilot · Modell/Effort. */}
+          <div className="insp-config">
           <select
             className="mode-select"
             value={agent.permissionMode}
@@ -280,6 +282,9 @@ export function Inspector() {
               className="inspector"
             />
           )}
+          </div>
+          {/* Cluster 2 — Aktions-Buttons (kontextabhängig). Bricht als eigene Einheit um. */}
+          <div className="insp-ops">
           {/* Passiv wiederhergestellt → erst reaktivieren, bevor Git-Aktionen möglich sind.
               Beim INTEGRATOR (Leitstelle) erst rückfragen: reaktivieren kann sofort Aktionen
               auslösen (versehentliches „Fortsetzen" hat genau das getan). */}
@@ -400,6 +405,7 @@ export function Inspector() {
           >
             Stop
           </button>
+          </div>
         </div>
       </header>
 

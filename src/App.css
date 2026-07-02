@@ -994,8 +994,46 @@ button.primary:hover {
 .inspector-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  /* Zeilen-Abstand klein, Spalten-Abstand größer → sichtbare Trennung der beiden Cluster. */
+  gap: 7px 16px;
+  margin-left: auto;
+}
+/* Zwei aufgeräumte Cluster: links die Einstell-Dropdowns (insp-config), rechts die
+   Aktions-Buttons (insp-ops). JEDER Cluster bricht als EINHEIT um → nie überlappende oder
+   wild verteilte Kontrollen; bei schmalem Fenster stapeln sich die Cluster sauber. */
+.insp-config,
+.insp-ops {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+/* Einheitliche Höhe/Optik aller Steuerelemente (Selects wie Buttons). */
+.inspector-actions .mode-select,
+.inspector-actions .model-effort select,
+.inspector-actions button {
+  height: 30px;
+  box-sizing: border-box;
+}
+/* Modell/Effort im Inspector: kompakt, feste Eigenbreite — KEIN Wachsen (das verursachte die
+   Überlappung mit den Buttons). */
+.model-effort.inspector {
+  gap: 6px;
+}
+.model-effort.inspector select {
+  font-size: 12px;
+  padding: 5px 8px;
+  font-weight: 550;
+}
+.model-effort.inspector .me-model {
+  flex: 0 0 auto;
+  min-width: 84px;
+}
+.model-effort.inspector .me-effort {
+  flex: 0 0 auto;
+  min-width: 78px;
 }
 .inspector-actions button {
   border: 1px solid var(--border-strong);
