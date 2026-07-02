@@ -1,14 +1,20 @@
 /**
- * Auto-Freigabe-Klassifizierer für den "Auto"-Permission-Modus (Policy: "Lesen +
- * Datei-Änderungen"). Entscheidet im mads-`canUseTool`, ob ein Tool-Aufruf ohne
- * Rückfrage erlaubt wird oder dem Nutzer vorgelegt werden muss.
+ * Auto-Freigabe-Klassifizierer für den "Auto"-Permission-Modus (Policy: „Trusted-Local-Dev").
+ * Entscheidet im mads-`canUseTool`, ob ein Tool-Aufruf ohne Rückfrage erlaubt wird oder dem
+ * Nutzer vorgelegt werden muss.
  *
- * Leitlinie (mads-Invariante 4): nur-lesende UND datei-ändernde Aktionen im Arbeits-
- * baum laufen ohne Nachfrage; alles **außen-sichtbare oder destruktive** (push, PR,
- * löschen, installieren, Netzwerk, sudo, …) wird IMMER gefragt. Im Zweifel: fragen.
+ * Leitlinie: LOKALE Ausführung ist erlaubt und läuft still — Skripte, Interpreter (`python
+ * -c`, `-m`, node …), Dev-Server, Build/Test, unbekannte lokale Tools, Lesen (auch ausserhalb
+ * des Projekts) und Datei-Änderungen im Arbeitsbaum. Gefragt wird NUR bei echtem Risiko:
+ *   • Netz nach AUSSEN (curl/wget zu Nicht-Loopback, ssh/scp/nc/rsync/ftp),
+ *   • git push/pull/fetch/clone + gh/PR (außen-sichtbar), Config-Exec-Keys,
+ *   • sudo, Paketmanager/Installer (npm install, pip, brew, docker …),
+ *   • destruktiv/System (rm/dd/mkfs/chmod/kill), macOS-Systemfunktionen,
+ *   • Zugriff auf Secrets (.ssh/.env/.aws/…) und Schreiben AUSSERHALB von Projekt/Temp.
+ * Im Zweifel: fragen.
  *
- * Sicherheitskritisch — siehe safe-command.test.ts. Default ist "ask"; "allow" nur,
- * wenn die Aktion eindeutig als harmlos erkannt wurde.
+ * Sicherheitskritisch — siehe safe-command.test.ts. Der DANGER-Scan läuft QUOTE-NEUTRALISIERT,
+ * sodass in Code-Strings versteckte riskante Tokens (rm/sudo/ssh/git push) trotzdem greifen.
  */
 
 import { findSecrets } from "./secrets.js";
@@ -23,75 +29,42 @@ const READ_TOOLS = new Set(["Read", "Glob", "Grep", "LS", "NotebookRead", "TodoW
 // Tools, die Dateien (im Worktree) ändern → auto-erlaubt, sofern Pfad sicher.
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
-// Befehle in Kommando-Position, die als harmlos gelten (lesen ODER lokale Datei-Op).
-const SAFE_CMDS = new Set([
-  // lesen / inspizieren
-  "ls", "cat", "bat", "head", "tail", "grep", "egrep", "fgrep", "rg", "find", "fd",
-  "wc", "echo", "printf", "pwd", "cd", "which", "type", "file", "tree", "sort", "uniq",
-  "cut", "tr", "column", "awk", "sed", "jq", "yq", "diff", "comm", "stat", "du", "df",
-  "date", "env", "printenv", "basename", "dirname", "realpath", "readlink", "hostname",
-  "whoami", "uname", "true", "false", "test", "[", "[[", "tldr", "man",
-  // weitere nur-lesende / harmlose Textwerkzeuge (Ausgabe nur auf stdout)
-  "xargs", "seq", "yes", "nl", "tac", "rev", "paste", "fold", "join", "look", "strings",
-  "cmp", "xxd", "od", "hexdump", "base64", "zcat", "less", "more", "expand", "unexpand",
-  "bc", "dc", // Rechner (lesen stdin, schreiben nur stdout)
-  // Transparente Wrapper: führen das NÄCHSTE Token als Befehl aus. Sicher NUR, weil DANGER
-  // (rm/sudo/curl/Shell/Interpreter-Inline …) ZUERST über die Rohzeile läuft — also vor der
-  // Kopfprüfung greift und die gefährliche Innen-Aktion fängt. Reihenfolge nicht umstellen!
-  "timeout", "nice", "stdbuf", "nohup",
-  // Hashing/Checksums (lesen, schreiben nichts)
-  "shasum", "md5", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
-  // Shell-Builtins in Kommando-Position (harmlos; gefährliche Args fängt DANGER)
-  ":", "read", "continue", "break", "shift", "return", "let", "select", "getopts",
-  "function", "pushd", "popd", "dirs", "trap", "wait", "alias", "unalias", "shopt",
-  // Shell-Builtins zur Variablen-/Existenz-Prüfung (harmlos; gefährliche Args fängt DANGER)
-  "command", "export", "local", "declare", "readonly", "typeset", "unset",
-  // Projekt-Python-Dev/Test-Tooling (vom Nutzer als vertrauenswürdig gewählt; rm/Netz/
-  // sudo im selben Befehl fängt weiterhin DANGER). Siehe auch isUvRunner + .venv/bin.
-  "python", "python3", "pytest", "ruff", "mypy", "pyright", "black", "isort", "flake8", "pylint", "coverage",
-  // lokale Datei-Op (Policy erlaubt Datei-Änderungen)
-  "mkdir", "touch", "mv", "cp",
-  // git: nur erlaubt zusammen mit erlaubtem Subcommand (siehe classifyGit)
-  "git",
-  // Shell-Konstrukte (Kommando-Position, harmlos)
-  "for", "do", "done", "in", "if", "then", "else", "elif", "fi", "while", "until",
-  "case", "esac", "time", "set",
-]);
-
-// Eindeutig riskante Tokens irgendwo im Befehl → immer fragen.
+// „Trusted-Local-Dev": LOKALE Ausführung ist im Auto-Modus erlaubt (Skripte, Interpreter,
+// `python -c`, `-m`, unbekannte lokale Tools). DANGER listet nur DIREKT riskante Aktionen —
+// auswärts/destruktiv/System/Secrets — die IMMER fragen. Der Scan läuft QUOTE-NEUTRALISIERT
+// (Anführungszeichen → Leerzeichen), damit z. B. `python -c 'os.system("rm -rf x")'` das `rm`
+// trotzdem fängt. curl/wget (loopback-bewusst) und Paketmanager werden separat behandelt.
 const DANGER = [
   { re: /(^|[\s;&|(])sudo(\s|$)/, why: "läuft mit sudo" },
   { re: /(^|[\s;&|(])(rm|rmdir|shred|unlink)(\s|$)/, why: "löscht Dateien (rm)" },
   { re: /(^|[\s;&|(])(chmod|chown|chgrp)(\s|$)/, why: "ändert Dateirechte" },
   { re: /(^|[\s;&|(])(kill|killall|pkill|shutdown|reboot|halt)(\s|$)/, why: "beendet Prozesse / fährt herunter" },
   { re: /(^|[\s;&|(])(dd|mkfs|diskutil|fdisk)(\s|$)/, why: "Datenträger-/Low-Level-Operation" },
-  { re: /(^|[\s;&|(])(curl|wget|nc|ncat|telnet|ssh|scp|sftp|rsync|ftp)(\s|$)/, why: "Netzwerkzugriff" },
+  // Auswärts-Netz (Shell-Zugänge/Transfers). curl/wget sind NICHT hier — die sind loopback-bewusst.
+  { re: /(^|[\s;&|(])(nc|ncat|telnet|ssh|scp|sftp|rsync|ftp)(\s|$)/, why: "Netzwerkzugriff nach aussen" },
   { re: /(^|[\s;&|(])(brew|apt|apt-get|yum|dnf|port|docker|podman|launchctl|crontab|systemctl)(\s|$)/, why: "System-/Paket-/Dienst-Verwaltung" },
-  { re: /(^|[\s;&|(])(npm|pnpm|yarn|bun|npx|pip|pip3|gem|cargo|go)(\s|$)/, why: "Paketmanager/Build (kann Skripte ausführen oder ins Netz gehen)" },
-  { re: /(^|[\s;&|(])(eval|exec)(\s|$)/, why: "führt dynamisch Code aus (eval/exec)" },
-  // Shell starten (auch mit Pfad: /bin/sh) — `sh -c '…'` ist arbiträrer Code.
-  { re: /(^|[\s;&|(])(?:[^\s|;&]*\/)?(sh|bash|zsh|ksh|dash|fish)(\s|$)/, why: "startet eine Shell (arbiträrer Code, z. B. sh -c)" },
-  // Interpreter mit Inline-Code (-c/-e/-r): führt beliebigen Code aus, dessen Inhalt der
-  // Token-Scan NICHT sieht (z. B. python3 -c 'import os; os.system("rm -rf …")'). python &
-  // Co. sind sonst auto-erlaubt (vom Nutzer als Dev-Tooling freigegeben) — aber NICHT als
-  // Inline-Code-Runner. Greift VOR der SAFE_CMDS-Kopfprüfung (DANGER läuft zuerst).
-  { re: /(^|[\s;&|(])(?:[^\s|;&]*\/)?(python3?|ipython|ruby|perl|php|node|deno)\s+(?:-[A-Za-z]\S*\s+)*-(c|e|E|r|x)\b/, why: "führt Inline-Code aus (-c/-e)" },
-  { re: /(^|[\s;&|(])(osascript|defaults|open|pbcopy|pbpaste)(\s|$)/, why: "greift auf macOS-Systemfunktionen zu" },
+  { re: /(^|[\s;&|(])(osascript|defaults|pbcopy|pbpaste)(\s|$)/, why: "macOS-Systemfunktionen/Zwischenablage" },
   { re: /(^|[\s;&|(])gh(\s|$)/, why: "GitHub-CLI (außen-sichtbar: PR/Issue/API)" },
+  // git außen-sichtbar/destruktiv — auch code-versteckt (Scan ist quote-neutralisiert). Den
+  // nuancierten Top-Level-Fall (`git remote -v` ok, `git remote add` fragt; Config-Exec-Keys)
+  // deckt zusätzlich classifyGit ab; hier nur die eindeutig riskanten Subcommands.
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*(push|pull|fetch|clone|reset|clean)(\s|$)/, why: "git außen-sichtbar/verändernd" },
   { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)" },
-  // awk/gawk mit system(): der Programmkörper steht in Quotes und wird von segmentCommands
-  // ENTFERNT, bevor die Kopf-/Token-Prüfung greift — die Innen-Aktion (system("rm …")) bliebe
-  // sonst unsichtbar. Deshalb hier über die ROHZEILE.
-  { re: /(^|[\s;&|(])(?:[^\s|;&]*\/)?(awk|gawk|mawk|nawk)\b[\s\S]*?\bsystem\s*\(/, why: "awk system() führt Befehle aus" },
-  // Code-ausführende Umgebungsvariablen (Env-Injection: laden Bibliotheken/führen
-  // Hilfsprogramme aus). Fängt u. a. `GIT_EXTERNAL_DIFF=evil git diff`, `LD_PRELOAD=evil.so …`
-  // und die macOS-dylib-Hijack-Varianten (DYLD_*) — die segmentCommands sonst als harmlose
-  // Zuweisung wegwirft.
+  // Hijack-/Egress-Umgebungsvariablen: laden fremde Libs bzw. übernehmen git/ssh nach aussen.
   {
-    re: /(^|[\s;&|(])(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|DYLD_VERSIONED_LIBRARY_PATH|GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_EDITOR|GIT_PROXY_COMMAND|GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_ALTERNATE_OBJECT_DIRECTORIES|BASH_ENV|PERL5OPT|PYTHONSTARTUP|NODE_OPTIONS|RUBYOPT)=/,
-    why: "setzt eine Code-ausführende Umgebungsvariable",
+    re: /(^|[\s;&|(])(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|DYLD_VERSIONED_LIBRARY_PATH|GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_PROXY_COMMAND|GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_ALTERNATE_OBJECT_DIRECTORIES)=/,
+    why: "setzt eine Hijack-/Egress-Umgebungsvariable",
   },
 ];
+
+// Loopback-Hosts: curl/wget dorthin ist ein lokaler Healthcheck, keine Exfiltration.
+const LOOPBACK = /^(localhost|127(\.\d{1,3}){3}|0\.0\.0\.0|\[?::1\]?)(:\d+)?$/i;
+// Temp-Ziele für Schreib-Umleitungen (so unkritisch wie /dev/null).
+const TEMP_REDIRECT = /^(\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/private\/var\/folders\/)/;
+// Paketmanager-Subcommands, die installieren/veröffentlichen/aus dem Netz ziehen → fragen.
+// Alles andere (run/build/test/exec/<script>) ist lokale Ausführung → erlaubt.
+const PKG_INSTALL_SUB =
+  /^(install|i|ci|add|update|up|upgrade|uninstall|remove|create|init|publish|link|unlink|dlx|audit|dedupe|prune|get|sync|fetch|import|yank)$/i;
 
 // git-Subcommands, die destruktiv/außen-sichtbar/netzwerkend sind → IMMER fragen.
 const GIT_RISKY_SUB = new Set([
@@ -114,17 +87,97 @@ const GIT_SAFE_SUB = new Set([
 const GIT_CODE_EXEC_CONFIG =
   /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass)|sequence\.editor|gpg\.program|ssh\.variant|http\.proxy|.*\.(textconv|external)|diff\.external|alias\.|filter\.)/i;
 
-function hasWriteRedirect(cmd: string): boolean {
-  // Quotes zuerst maskieren — ein > in 'text' oder "code" ist KEIN Redirect.
-  // erlaubt: >/dev/null, 2>/dev/null, 2>&1, >&2 — alles andere ist ein Schreib-Redirect.
+/** curl/wget: Loopback-Ziele (localhost/127.x/::1/0.0.0.0) sind lokale Healthchecks → erlaubt;
+ *  jedes andere (oder kein erkennbares) http(s)-Ziel geht nach AUSSEN → fragen. Läuft auf der
+ *  quote-neutralisierten Zeile, damit auch eingebettete URLs (python -c '…urlopen("http://x")')
+ *  erfasst werden. ssh/scp/nc/rsync/ftp fängt bereits DANGER (immer fragen). */
+function outwardNetworkRisk(neutralized: string): string | null {
+  if (!/(^|[\s;&|(])(curl|wget)(\s|$)/.test(neutralized)) return null;
+  const urls = neutralized.match(/\bhttps?:\/\/[^\s;&|()<>]+/gi) ?? [];
+  if (urls.length === 0) return "Netzwerkzugriff (curl/wget) — Ziel nicht als lokal erkennbar";
+  for (const u of urls) {
+    const host = (u.replace(/^https?:\/\//i, "").split(/[/?#]/)[0].split("@").pop() ?? "").toLowerCase();
+    if (!LOOPBACK.test(host)) return "Netzwerkzugriff nach aussen (curl/wget)";
+  }
+  return null; // alle Ziele Loopback → lokal
+}
+
+/** Paketmanager: lokal bauen/testen/ausführen (run/build/test/exec/<script>) ist erlaubt; alles,
+ *  was installiert/veröffentlicht/aus dem Netz zieht → fragen. pip/pip3/gem/npx/pipx sind
+ *  install-/fetch-zentriert → immer fragen. `uv run`/`uvx`/`uv tool run` (Projekt-Env) laufen still. */
+function pkgManagerRisk(cmd: string): string | null {
+  for (const toks of segmentCommands(cmd)) {
+    const base = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
+    if (base === "npx" || base === "pip" || base === "pip3" || base === "pipx" || base === "gem")
+      return `${base} — installiert/lädt Pakete (Netz/Supply-Chain)`;
+    // `python -m pip …` ist ein Installer (Dev-Server wie `-m http.server` bleibt aber erlaubt).
+    if (base === "python" || base === "python3") {
+      let mod = "";
+      const mi = toks.indexOf("-m");
+      if (mi > 0) mod = toks[mi + 1] ?? "";
+      else {
+        const glued = toks.find((t) => /^-m[A-Za-z]/.test(t));
+        if (glued) mod = glued.slice(2);
+      }
+      if (/^pip3?$/i.test(mod)) return "python -m pip — installiert Pakete (Netz/Supply-Chain)";
+      continue;
+    }
+    if (base === "uvx") continue; // uv tool run (lokal ausführen)
+    if (base === "uv") {
+      const s1 = (toks[1] ?? "").toLowerCase();
+      if (s1 === "run" || s1 === "version" || s1 === "--version" || (s1 === "tool" && (toks[2] ?? "").toLowerCase() === "run"))
+        continue;
+      return `uv ${s1} — Abhängigkeiten/Netz`;
+    }
+    if (base === "npm" || base === "pnpm" || base === "yarn" || base === "bun" || base === "cargo" || base === "go") {
+      const sub = (toks[1] ?? "").toLowerCase();
+      if (base === "yarn" && !sub) return "yarn (ohne Subcommand = install) — Netz/Supply-Chain";
+      if (PKG_INSTALL_SUB.test(sub)) return `${base} ${sub} — installiert/veröffentlicht (Netz/Supply-Chain)`;
+    }
+  }
+  return null;
+}
+
+/** Schreib-Umleitung (>, >>) NUR fragen, wenn das Ziel absolut & AUSSERHALB von Projekt/Temp
+ *  liegt (z. B. >/etc/hosts, >>~/.zshrc). Relative Ziele (im cwd), /dev/*, fd-Dups (2>&1) und
+ *  Temp (/tmp, /var/folders …) sind erlaubt. */
+function unsafeWriteRedirect(cmd: string): string | null {
   const cleaned = cmd
-    .replace(/\\./g, " ") // maskierte Zeichen (z.B. \> ) sind kein Redirect
+    .replace(/\\./g, " ") // maskierte Zeichen (\>) sind kein Redirect
     .replace(/'[^']*'/g, " ")
-    .replace(/"[^"]*"/g, " ")
-    .replace(/\d?>>?\s*\/dev\/null/g, " ")
-    .replace(/\d?>&\d/g, " ")
-    .replace(/&>\s*\/dev\/null/g, " ");
-  return /(^|[^\d&])>>?/.test(cleaned);
+    .replace(/"(?:[^"\\]|\\.)*"/g, " ")
+    .replace(/\d?>&\d/g, " ") // fd-Dup: 2>&1, >&2
+    .replace(/\d?>>?\s*\/dev\/\w+/g, " "); // >/dev/null, 2>/dev/null, >/dev/stdout
+  const re = /\d?>>?\s*([^\s;&|()<>]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(cleaned)) !== null) {
+    const target = m[1];
+    if (!/^[/~]/.test(target)) continue; // relativ → im Projekt (cwd) → ok
+    if (TEMP_REDIRECT.test(target)) continue; // Temp → ok
+    return "schreibt per Umleitung (>) ausserhalb von Projekt/Temp";
+  }
+  return null;
+}
+
+// Datei-Schreib-/Kopier-Tools OHNE > -Redirect: tee schreibt in alle Argumente, cp/mv/ln ins
+// letzte (Ziel). Schreiben nach absolut & AUSSERHALB von Projekt/Temp (z. B. `tee /etc/hosts`,
+// `cp x /usr/local/bin/y`) → fragen. Ziele im cwd (relativ) oder in Temp bleiben still.
+const WRITE_DEST_CMDS = new Set(["cp", "mv", "ln"]);
+function writesOutsideProject(cmd: string): string | null {
+  for (const toks of segmentCommands(cmd)) {
+    const base = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
+    const args = toks.slice(1).filter((t) => !t.startsWith("-"));
+    let targets: string[] = [];
+    if (base === "tee") targets = args;
+    else if (WRITE_DEST_CMDS.has(base) && args.length >= 1) targets = [args[args.length - 1]];
+    else continue;
+    for (const t of targets) {
+      if (!/^[/~]/.test(t)) continue; // relativ → im Projekt → ok
+      if (TEMP_REDIRECT.test(t)) continue; // Temp → ok
+      return `${base} schreibt ausserhalb von Projekt/Temp`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -231,15 +284,6 @@ function segmentCommands(cmd: string): string[][] {
   return out;
 }
 
-/** uv-Runner gilt als sicher (vom Nutzer freigegeben): `uv run …`, `uv tool run …`, `uvx …`
- * — auch mit vollem Pfad (`~/.local/bin/uv run …`). `uv add/sync/pip …` (Netz/Deps) NICHT. */
-function isUvRunner(toks: string[]): boolean {
-  const base = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
-  if (base === "uvx") return true;
-  if (base === "uv") return toks[1] === "run" || (toks[1] === "tool" && toks[2] === "run");
-  return false;
-}
-
 /**
  * Erkennt einen echten `git commit`-Aufruf in einer (ggf. zusammengesetzten) Bash-Zeile.
  * Robust via segmentCommands (Quotes/Heredocs/Compound entfernt) und gegen Fehltreffer wie
@@ -270,125 +314,50 @@ export function isGitCommit(command: string): boolean {
   return false;
 }
 
-// Interpreter, die Inline-Code/Module ausführen können. python/python3 sind als Dev-Tooling
-// auto-erlaubt — daher hier argv-bewusst prüfen (der DANGER-Regex übersah z. B. `python3 -W
-// ignore -c '…'`, weil `-W ignore` ein Options-Argument trägt). Die übrigen sind ohnehin
-// nicht in SAFE_CMDS und werden gefragt; der Check schadet dort nicht.
-const INTERPRETERS = new Set(["python", "python3", "ipython", "ruby", "perl", "php", "node", "deno", "bun"]);
-// Module, die `python -m X` harmlos machen (Test/Lint/Format) — alles andere (pip,
-// http.server, venv, …) ist Code-/Netz-Fläche → fragen.
-const SAFE_PY_MODULES = new Set([
-  "pytest", "unittest", "mypy", "ruff", "black", "isort", "flake8", "pylint", "coverage",
-  "json.tool", "timeit", "py_compile", "compileall", "this",
-]);
-
-function interpreterRisk(toks: string[]): string | null {
-  // KOPF-basiert: nur wenn der Interpreter das ausgeführte Kommando IST (toks[0]) — NICHT wenn
-  // er bloß als Argument vorkommt (`ls .venv/bin/python`). Wrapper (`timeout 5 python3 …`) werden
-  // vom Aufrufer per unwrapWrappers abgeschält, sodass der Interpreter dann an toks[0] steht.
-  const base = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
-  if (!INTERPRETERS.has(base)) return null;
-  for (let i = 1; i < toks.length; i++) {
-    const t = toks[i];
-    if (/[<>&|]/.test(t)) continue; // Redirect/Operator (2>/dev/null, 2>&1, &) — kein Skript
-    if (/^-(c|e|E|r|x)$/.test(t)) return "Interpreter führt Inline-Code aus (-c/-e)";
-    if (/^--(eval|command)$/.test(t)) return "Interpreter führt Inline-Code aus (--eval)";
-    if (t === "-m" || /^-m[A-Za-z]/.test(t)) {
-      const mod = (t === "-m" ? toks[i + 1] ?? "" : t.slice(2)).toLowerCase();
-      if (!SAFE_PY_MODULES.has(mod)) return `Modul-Ausführung „${mod || "?"}“ (-m, Code-/Netz-Fläche)`;
-      return null; // sicheres Modul → alle Folge-Tokens sind Modul-Argumente, kein Skript
-    }
-    if (/^-[WXQIRS]$/.test(t)) {
-      i += 1; // Option mit eigenem Wert-Argument (der Wert ist KEIN Skript)
-      continue;
-    }
-    // Erstes Nicht-Options-Token — oder `-` (= Skript von stdin) — ist ein SKRIPT/Programm →
-    // arbiträre Code-Ausführung → fragen. (Deckt `python3 x.py`, `node evil.js`, `python3 - <<PY`.)
-    if (t === "-" || !t.startsWith("-")) return "Interpreter führt ein Skript/Programm aus (arbiträrer Code)";
-  }
-  return null;
-}
-
-// Transparente Wrapper: führen das NÄCHSTE (Nicht-Options-)Token als Befehl aus. Der Kopf-Token
-// ist harmlos, ABER das ausgeführte Programm muss selbst eingestuft werden — sonst ist
-// `timeout 5 /tmp/evil` / `env /tmp/evil` / `xargs /tmp/evil` auto-erlaubt. `unwrapWrappers`
-// schält die Wrapper (auch verkettet) ab und liefert das INNERSTE Kommando zurück.
-const WRAPPERS = new Set(["timeout", "nice", "nohup", "stdbuf", "env", "xargs"]);
-function unwrapWrappers(toks: string[]): string[] {
-  let cur = toks;
-  for (let depth = 0; depth < 6; depth++) {
-    const base = (cur[0].split("/").pop() ?? cur[0]).toLowerCase();
-    if (!WRAPPERS.has(base)) break;
-    let i = 1;
-    while (i < cur.length) {
-      const t = cur[i];
-      if (t.startsWith("-")) {
-        // Optionen mit eigenem Wert-Argument → das Argument mit überspringen.
-        i += /^-(n|s|k|P|I|E|u|d|L|-signal|-kill-after|-max-procs|-max-args|-replace)$/.test(t) ? 2 : 1;
-        continue;
-      }
-      if (base === "env" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) {
-        i += 1; // NAME=VAL-Zuweisung (DANGER fängt Code-ausführende Vars separat)
-        continue;
-      }
-      if ((base === "timeout" || base === "nice") && /^-?\d+(\.\d+)?[smhd]?$/.test(t)) {
-        i += 1; // Dauer (timeout) / Priorität (nice)
-        continue;
-      }
-      break;
-    }
-    if (i >= cur.length) break; // kein inneres Kommando
-    cur = cur.slice(i);
-  }
-  return cur;
-}
-
-/** Befehle, deren Programm-KÖRPER an der Token-/DANGER-Prüfung vorbeiläuft (z. B. `find -exec`
- *  führt beliebige Kommandos aus; awk-`system()` fängt bereits DANGER über die Rohzeile). */
-function specialExecRisk(toks: string[]): string | null {
-  const base = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
-  if (base === "find" && toks.some((t) => /^-(exec|execdir|ok|okdir)$/.test(t)))
-    return "find -exec führt einen Befehl aus";
-  if (/^(awk|gawk|mawk|nawk)$/.test(base) && toks.includes("-f")) return "awk -f führt eine Programmdatei aus";
-  if (base === "sed" && toks.includes("-f")) return "sed -f führt eine Programmdatei aus";
-  return null;
-}
-
+/**
+ * „Trusted-Local-Dev": lokale Ausführung läuft still; gefragt wird nur bei echtem Risiko.
+ * Reihenfolge der Gates (jedes greift auch, wenn das Risiko in einem Code-String versteckt ist —
+ * der DANGER-/Netz-Scan läuft QUOTE-NEUTRALISIERT):
+ *   1) DANGER   — sudo/rm/chmod/kill/dd, ssh/scp/nc/rsync/ftp, brew/apt/docker/systemctl,
+ *                 osascript/defaults/pbcopy, gh, git push/pull/fetch/clone/reset/clean,
+ *                 Fork-Bomb, Hijack-/Egress-Env-Vars.
+ *   2) Netz     — curl/wget nach AUSSEN (Loopback = lokaler Healthcheck → erlaubt).
+ *   3) Pakete   — install/publish/add/… bzw. pip/gem/npx (Netz/Supply-Chain).
+ *   4) git      — argv-bewusst (Config-Exec-Keys, remote add/set-url, branch -D …).
+ *   5) Redirect — Schreiben per > AUSSERHALB von Projekt/Temp.
+ *   6) Schreib-Tools — tee/cp/mv/ln mit Ziel AUSSERHALB von Projekt/Temp.
+ * Fällt nichts davon → ALLOW (Skripte, `python -c`, `-m`, node, Dev-Server, unbekannte lokale Tools).
+ */
 export function classifyBashCommand(command: string): AutoDecision {
   const cmd = command.trim();
   if (!cmd) return ASK("leerer Befehl");
 
-  for (const d of DANGER) if (d.re.test(cmd)) return ASK(d.why);
-  if (hasWriteRedirect(cmd)) return ASK("schreibt per Umleitung (>) in eine Datei");
+  // Anführungszeichen/Backticks → Leerzeichen: riskante Tokens INNERHALB von Code-Strings
+  // (z. B. python -c 'os.system("rm -rf x")') behalten so ihre Wortgrenzen und werden gefangen.
+  const neutralized = cmd.replace(/['"`]/g, " ");
+
+  for (const d of DANGER) if (d.re.test(neutralized)) return ASK(d.why);
+
+  const net = outwardNetworkRisk(neutralized);
+  if (net) return ASK(net);
+
+  const pkg = pkgManagerRisk(cmd);
+  if (pkg) return ASK(pkg);
 
   const git = classifyGit(cmd);
   if (git) return git;
 
-  const segs = segmentCommands(cmd);
-  if (segs.length === 0) return ASK("Befehl nicht eindeutig");
-  for (const rawToks of segs) {
-    // Programm-Körper, die an Token-/DANGER-Prüfung vorbeilaufen (find -exec, awk/sed -f).
-    const special = specialExecRisk(rawToks);
-    if (special) return ASK(special);
-    // Transparente Wrapper (timeout/nice/env/xargs …) abschälen → das TATSÄCHLICH ausgeführte Kommando.
-    const toks = unwrapWrappers(rawToks);
-    const headBase = (toks[0].split("/").pop() ?? toks[0]).toLowerCase();
-    // xargs speist stdin als zusätzliche ARGV → ein Interpreter dahinter bekommt so ein Skript.
-    if (INTERPRETERS.has(headBase) && rawToks.some((t) => (t.split("/").pop() ?? t).toLowerCase() === "xargs"))
-      return ASK("xargs speist ein Skript an einen Interpreter");
-    // Interpreter (Inline-Code ODER Skript) in Kommando-Position → prüfen.
-    const interp = interpreterRisk(toks);
-    if (interp) return ASK(interp);
-    const c = toks[0];
-    if (SAFE_CMDS.has(c)) continue;
-    if (isUvRunner(toks)) continue;
-    if (/(^|\/)\.venv\/bin\//.test(c)) continue; // Projekt-venv-Tool (z.B. .venv/bin/ruff)
-    if ((c === "source" || c === ".") && /(^|\/)activate$/.test(toks[1] ?? "")) continue; // venv aktivieren
-    return ASK(`enthält nicht-eingestuften Befehl „${c}“`);
-  }
-  return ALLOW;
+  const wr = unsafeWriteRedirect(cmd);
+  if (wr) return ASK(wr);
+
+  const wo = writesOutsideProject(cmd);
+  if (wo) return ASK(wo);
+
+  return ALLOW; // lokale Ausführung — im Trusted-Local-Dev-Modus erlaubt
 }
 
+// Für SCHREIB-Zugriffe (Edit/Write): innerhalb des Worktrees ok, ausserhalb bzw. auf geschützte
+// Pfade → fragen. Trusted-Local-Dev lockert das Lesen (siehe sensitivePath), NICHT das Schreiben.
 function pathUnsafe(p: string | undefined, cwd?: string): string | null {
   if (typeof p !== "string" || !p) return "kein Pfad angegeben";
   if (/(^|\/)\.(git|ssh|aws|gnupg)(\/|$)/.test(p)) return "geschützter Ordner";
@@ -398,6 +367,18 @@ function pathUnsafe(p: string | undefined, cwd?: string): string | null {
     return "Pfad außerhalb des Arbeitsverzeichnisses";
   }
   if (p.split("/").includes("..")) return "Pfad verlässt das Arbeitsverzeichnis (..)";
+  return null;
+}
+
+/** Für LESE-Zugriffe: Trusted-Local-Dev erlaubt Lesen auch AUSSERHALB des Projekts (Doku,
+ *  Referenzen …). Nur echte Secrets-/Schlüssel-Ablagen bleiben tabu. Kein Pfad → LS/Glob im
+ *  cwd → erlaubt. */
+function sensitivePath(p: string | undefined): string | null {
+  if (typeof p !== "string" || !p) return null;
+  if (/(^|\/)\.(ssh|aws|gnupg|gpg|kube|docker)(\/|$)/.test(p)) return "geschützter Ordner (Secrets)";
+  if (/(^|\/)(\.env(\.|$)|\.npmrc$|\.mcp\.json$|\.netrc$|\.pgpass$|\.git-credentials$|id_rsa|id_ed25519|id_ecdsa|id_dsa)/.test(p))
+    return "geschützte Datei (Secret)";
+  if (/\.(pem|p12|pfx|keychain)$/i.test(p)) return "geschützte Schlüssel-/Zertifikatsdatei";
   return null;
 }
 
@@ -435,11 +416,9 @@ export function classifyToolCall(
   if (READ_TOOLS.has(toolName)) {
     if (toolName === "TodoWrite") return ALLOW; // keine Datei
     const p = (input?.file_path ?? input?.notebook_path ?? input?.path) as string | undefined;
-    // Glob/Grep/LS ohne expliziten Pfad → Arbeitsverzeichnis (sicher). Nur prüfen, wenn
-    // ein Pfad angegeben ist: Lesen von ~/.ssh/.aws/.env oder außerhalb des Worktrees
-    // (Exfiltrations-Primitive, INJ-3) → Rückfrage statt stiller Freigabe.
-    if (p === undefined || p === "") return ALLOW;
-    const bad = pathUnsafe(p, ctx.cwd);
+    // Trusted-Local-Dev: Lesen ist erlaubt — auch ausserhalb des Projekts (Doku/Referenzen).
+    // Nur echte Secrets/Schlüssel (~/.ssh, .env, *.pem …) → Rückfrage statt stiller Freigabe.
+    const bad = sensitivePath(p);
     return bad ? ASK(`Lesezugriff: ${bad}`) : ALLOW;
   }
 
