@@ -573,10 +573,26 @@ export async function createPr(
 ): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
   const pushed = await pushBranch(worktree, branch, base);
   if (!pushed.ok) return { ok: false, error: pushed.error };
+  // Idempotent: existiert für den Branch bereits ein OFFENER PR, hat der Push oben ihn
+  // aktualisiert → diesen PR melden. Sonst würde `gh pr create` mit „a pull request … already
+  // exists" scheitern und mads fälschlich `push_rejected` eskalieren, obwohl alles i.O. ist.
+  // (Ein GEMERGTER/GESCHLOSSENER Alt-PR blockiert `gh pr create` nicht → dann neuen PR erstellen.)
+  const existing = await prStatus(repoRoot, branch);
+  if (existing && existing.state === "OPEN") return { ok: true, url: existing.url };
   const args = ["pr", "create", "--head", branch, "--base", base, "--title", title, "--body", body];
   if (draft) args.push("--draft");
   const r = await gh(args, repoRoot);
-  if (r.code !== 0) return { ok: false, error: r.stderr || r.stdout };
+  if (r.code !== 0) {
+    const err = (r.stderr || r.stdout).trim();
+    // Race zwischen Check und create (oder ein PR, den prStatus nicht sah): „already exists" ist
+    // KEIN Fehler — den vorhandenen PR (URL aus der Meldung, sonst Nachpoll) übernehmen.
+    if (/already exists/i.test(err)) {
+      const urlInErr = /(https?:\/\/\S+\/pull\/\d+)/i.exec(err)?.[1];
+      const again = urlInErr ? null : await prStatus(repoRoot, branch);
+      return { ok: true, url: urlInErr ?? again?.url ?? existing?.url ?? "" };
+    }
+    return { ok: false, error: err };
+  }
   return { ok: true, url: r.stdout.trim().split("\n").pop() ?? "" };
 }
 
