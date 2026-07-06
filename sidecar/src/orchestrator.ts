@@ -11,6 +11,7 @@ import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
 import { autoCommit, createPr, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
+import { DevServerRun, ensureRunManifest, loadRunManifest } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
 import { ensureMadsDir, loadRegistry, mergeRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
@@ -58,6 +59,9 @@ export class Orchestrator {
   // A: PR-Erstellungen serialisieren, damit die ADR-Nummern-Vergabe (Scan aller Worktrees +
   // Umbenennen) atomar ist und zwei Streams nie dieselbe Nummer ziehen.
   private createPrLock: Promise<void> = Promise.resolve();
+  // Höchstens EIN Stream-Dev-Server gleichzeitig (Standard-Ports → kein Konflikt). Ein Start
+  // stoppt einen zuvor laufenden; jeder Teardown-Pfad (stop/cleanup/merge/switch/shutdown) killt ihn.
+  private devServer?: DevServerRun;
 
   async dispatch(msg: HostMessage): Promise<void> {
     switch (msg.type) {
@@ -86,6 +90,7 @@ export class Orchestrator {
         // blieben die alten Streams im Pool und würden weiter gepollt; ihre git/PR-Updates
         // würden in die UI des NEUEN Projekts lecken (falsche Kacheln, Fehlklick-Risiko).
         if (this.project && this.project.repoRoot !== msg.repoRoot) {
+          await this.stopDevServerIf(); // Projektwechsel → jeden laufenden Dev-Server beenden
           for (const s of this.pool.values()) await s.stop(false);
           this.pool.clear();
           this.gitState.clear();
@@ -137,12 +142,21 @@ export class Orchestrator {
 
       case "stop_agent": {
         const s = this.pool.get(msg.agentId);
+        await this.stopDevServerIf(msg.agentId); // laufenden Dev-Server dieses Streams zuerst beenden
         await s?.stop(msg.removeWorktree ?? false);
         this.pool.delete(msg.agentId);
         this.removed.add(msg.agentId); // bewusst entfernt → merge-persist nicht wiederbeleben
         this.persist();
         break;
       }
+
+      case "start_devserver":
+        await this.handleStartDevServer(msg.agentId);
+        break;
+
+      case "stop_devserver":
+        await this.stopDevServerIf(msg.agentId);
+        break;
 
       case "create_pr":
         await this.handleCreatePr(msg.agentId, msg.title, msg.body, msg.draft);
@@ -256,6 +270,7 @@ export class Orchestrator {
               break;
             }
           }
+          await this.stopDevServerIf(msg.agentId); // Dev-Server hält den Worktree offen → erst killen
           await removeWorktree(root, path, msg.branch);
           this.removed.add(msg.agentId); // aufgeräumt → merge-persist nicht wiederbeleben
           saveRegistry(root, loadRegistry(root).filter((e) => e.agentId !== msg.agentId));
@@ -302,6 +317,7 @@ export class Orchestrator {
 
       case "shutdown":
         if (this.pollTimer) clearInterval(this.pollTimer);
+        await this.stopDevServerIf(); // laufenden Dev-Server sauber beenden (Prozess-Gruppen-Kill)
         for (const s of this.pool.values()) await s.stop(false);
         this.pool.clear();
         process.exit(0);
@@ -506,6 +522,7 @@ export class Orchestrator {
       if (pr) this.suppressedMergedPr.set(agentId, pr.number);
       let resyncOk = true;
       if (s.worktreePath) {
+        await this.stopDevServerIf(agentId); // Dev-Server killen, bevor der Worktree hart resettet wird
         const base = this.project.defaultBranch;
         await run("git", ["-C", s.worktreePath, "fetch", "origin", base], s.worktreePath);
         const reset = await run("git", ["-C", s.worktreePath, "reset", "--hard", `origin/${base}`], s.worktreePath);
@@ -541,6 +558,7 @@ export class Orchestrator {
     // Branch), danach den Remote-Branch löschen.
     if (s.worktreePath) {
       try {
+        await this.stopDevServerIf(agentId); // Dev-Server killen, bevor der Worktree entfernt wird
         await removeWorktree(s.repoRoot, s.worktreePath, s.branch);
       } catch (e) {
         log(`[orchestrator] worktree cleanup after merge failed: ${String(e)}`);
@@ -734,6 +752,7 @@ export class Orchestrator {
         offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url });
         log(`[orchestrator] reconcile: ${c.branch} ${doneWord}, aber ${aheadOfMain} neue Commit(s) über ${db} → aktiver Stream (ungemergte Arbeit)`);
       } else if (!res.dirty && res.unpushed === 0) {
+        await this.stopDevServerIf(c.agentId); // (Sicherheit) Dev-Server vor Worktree-Entfernung killen
         await removeWorktree(repoRoot, c.worktreePath, c.branch);
         dropped.add(c.agentId);
         cleaned.push(c.label);
@@ -921,6 +940,10 @@ export class Orchestrator {
   private async syncOne(s: AgentSession): Promise<void> {
     if (!this.project || s.role !== "sub" || !s.worktreePath || !s.branch) return;
     if (s.status === "running") return; // nicht unter laufender Arbeit rebasen
+    // Läuft in diesem Worktree ein Dev-Server, den Auto-Rebase AUFSCHIEBEN — sonst schreibt der
+    // rebase/force die Dateien um, während der Server sie ausliefert. Nach dem Stoppen zieht der
+    // nächste Poll nach. (Der Nutzer testet bewusst einen stabilen Stand.)
+    if (this.devServer?.agentId === s.agentId) return;
     if (this.syncing.has(s.agentId) || this.autoSyncConflicted.has(s.agentId)) return;
     const st = this.gitState.get(s.agentId);
     if (!st || st.behind <= 0 || st.dirty) return; // nur saubere, zurückliegende Branches
@@ -1042,5 +1065,51 @@ export class Orchestrator {
   }
   private emit(obj: unknown): void {
     void send(obj);
+  }
+
+  // ---------------------------------------------------------------- Dev-Server
+  /** Dev-Server dieses Streams starten (Front-/Backend im Worktree). Nur ein Stream gleichzeitig. */
+  private async handleStartDevServer(agentId: string): Promise<void> {
+    if (!this.project) return;
+    const repoRoot = this.project.repoRoot;
+    const worktree = this.pool.get(agentId)?.worktreePath;
+    if (!worktree || !existsSync(worktree)) {
+      this.emit({
+        ...envelope(),
+        type: "devserver_status",
+        agentId,
+        state: "error",
+        message: "Kein Worktree für diesen Stream — Dev-Server nur in Sub-Streams mit eigenem Worktree.",
+      });
+      return;
+    }
+    let manifest = loadRunManifest(repoRoot);
+    if (!manifest) {
+      // Keine (gültige) run.json → Vorlage erzeugen und den Nutzer prüfen lassen (nicht blind starten).
+      const scaf = ensureRunManifest(repoRoot);
+      this.emit({
+        ...envelope(),
+        type: "devserver_status",
+        agentId,
+        state: "error",
+        message: scaf.generated
+          ? `Keine .mads/run.json gefunden — Vorlage mit ${scaf.services} erkannten Service(s) erzeugt. Bitte Befehle/Ports prüfen und erneut starten.`
+          : "Keine gültige .mads/run.json gefunden. Bitte die Datei anlegen/prüfen.",
+      });
+      return;
+    }
+    await this.stopDevServerIf(); // evtl. laufenden (anderen) Dev-Server zuerst stoppen — nur einer
+    log(`[orchestrator] devserver start für ${agentId} (${manifest.services.length} service(s)) in ${worktree}`);
+    this.devServer = new DevServerRun(agentId, worktree, manifest);
+    await this.devServer.start();
+  }
+
+  /** Laufenden Dev-Server stoppen — nur, wenn er zu `agentId` gehört (undefined = immer). */
+  private async stopDevServerIf(agentId?: string): Promise<void> {
+    const ds = this.devServer;
+    if (!ds) return;
+    if (agentId !== undefined && ds.agentId !== agentId) return;
+    await ds.stop();
+    this.devServer = undefined;
   }
 }

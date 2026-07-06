@@ -66,7 +66,24 @@ export type HostMessage =
   | PollProjectMsg
   | CleanupWorktreeMsg
   | UpdateMainMsg
+  | StartDevServerMsg
+  | StopDevServerMsg
   | ShutdownMsg;
+
+/**
+ * Lokalen Dev-Server dieses Streams starten (Front-/Backend im WORKTREE des Streams, damit
+ * noch nicht gemergte Änderungen live getestet werden — main bleibt unangetastet). Wie die
+ * App läuft, deklariert `<repoRoot>/.mads/run.json` (projekt-agnostisch). Es läuft immer nur
+ * EIN Stream-Dev-Server gleichzeitig — ein Start stoppt einen zuvor laufenden.
+ */
+export interface StartDevServerMsg extends BaseMsg {
+  type: "start_devserver";
+  agentId: string;
+}
+export interface StopDevServerMsg extends BaseMsg {
+  type: "stop_devserver";
+  agentId: string;
+}
 
 export interface ProjectInfo {
   projectId: string;
@@ -281,7 +298,35 @@ export type SidecarMessage =
   | ReconcileSummaryMsg
   | CollisionWarningMsg
   | SpawnSubstreamsRequestMsg
+  | DevServerStatusMsg
+  | DevServerLogMsg
   | SidecarErrorMsg;
+
+/** Ein einzelner Service des Stream-Dev-Servers (aus `.mads/run.json`), für die Statusanzeige. */
+export interface DevServerService {
+  name: string;
+  ready: boolean;
+  url?: string;
+}
+/** Zustand des Stream-Dev-Servers (treibt Button/Badge/„im Browser öffnen"-Link im Frontend). */
+export interface DevServerStatusMsg extends BaseMsg {
+  type: "devserver_status";
+  agentId: string;
+  state: "installing" | "starting" | "running" | "stopped" | "error";
+  services?: DevServerService[];
+  /** primäre URL zum Öffnen im Browser (i. d. R. das Frontend), sobald bereit. */
+  url?: string;
+  /** menschenlesbarer Hinweis (Fehlergrund / „Vorlage erzeugt" o. Ä.). */
+  message?: string;
+}
+/** Eine Ausgabezeile eines Dev-Server-Services (Live-Log im Inspector). */
+export interface DevServerLogMsg extends BaseMsg {
+  type: "devserver_log";
+  agentId: string;
+  service: string;
+  stream: "stdout" | "stderr";
+  line: string;
+}
 
 export interface SidecarReadyMsg extends BaseMsg {
   type: "sidecar_ready";

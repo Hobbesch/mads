@@ -92,6 +92,21 @@ export type TimelineEvent =
   | { id: string; kind: "todos"; todos: TodoItem[] }
   | { id: string; kind: "notice"; tone: NoticeTone; text: string };
 
+/** Eine Ausgabezeile des Stream-Dev-Servers (Live-Log im Inspector). */
+export interface DevLogLine {
+  id: string;
+  service: string;
+  stream: "stdout" | "stderr";
+  line: string;
+}
+/** Sicht auf den Stream-Dev-Server (Front-/Backend im Worktree, siehe `.mads/run.json`). */
+export interface DevServerVM {
+  state: "installing" | "starting" | "running" | "stopped" | "error";
+  url?: string;
+  services?: { name: string; ready: boolean; url?: string }[];
+  message?: string;
+}
+
 export interface AgentVM {
   id: string;
   label: string;
@@ -120,6 +135,8 @@ export interface AgentVM {
   syncBlocked?: boolean; // Auto-Sync pausiert (Rebase-Konflikt) — manuelles Eingreifen nötig
   pr?: PullRequestInfo;
   gate?: { ok: boolean; steps: GateStep[] };
+  /** Zustand des Stream-Dev-Servers (Front-/Backend im Worktree; undefined = nie gestartet). */
+  devServer?: DevServerVM;
   /** true = im Sidecar-Pool aktiv (gestartet/fortgesetzt). false = passiv wiederhergestellt
    *  (Kachel + Verlauf sichtbar, aber KEINE laufende KI — wird beim ersten Senden fortgesetzt). */
   live?: boolean;
@@ -243,6 +260,8 @@ export interface MadsState {
   agents: Record<string, AgentVM>;
   order: string[];
   events: Record<string, TimelineEvent[]>;
+  /** Live-Log des Stream-Dev-Servers pro Agent (Ringpuffer). */
+  devLog: Record<string, DevLogLine[]>;
   permissions: PermissionRequestMsg[];
   escalations: SidecarErrorMsg[];
   resumables: ResumableAgent[];
@@ -347,6 +366,8 @@ export interface MadsState {
   syncAllBehind: () => Promise<void>;
   integratePr: (id: string, keep?: boolean) => Promise<void>;
   runGate: (id: string) => Promise<void>;
+  startDevServer: (id: string) => Promise<void>;
+  stopDevServer: (id: string) => Promise<void>;
   pollProject: () => Promise<void>;
   resumeAgent: (r: ResumableAgent) => Promise<void>;
   resumeAll: () => Promise<void>;
@@ -452,6 +473,15 @@ export const useStore = create<MadsState>((set) => {
 
   function notice(agentId: string, tone: NoticeTone, text: string) {
     pushEvent(agentId, { id: mkId(), kind: "notice", tone, text });
+  }
+
+  function appendDevLog(agentId: string, line: DevLogLine) {
+    set((s) => {
+      const prev = s.devLog[agentId] ?? [];
+      const next = [...prev, line];
+      if (next.length > 600) next.splice(0, next.length - 600); // Ringpuffer
+      return { devLog: { ...s.devLog, [agentId]: next } };
+    });
   }
 
   function completeTool(agentId: string, toolUseId: string, output: string | undefined, ok: boolean) {
@@ -570,6 +600,7 @@ export const useStore = create<MadsState>((set) => {
                   agents: {},
                   order: [],
                   events: {},
+                  devLog: {},
                   permissions: [],
                   escalations: [],
                   collisions: [],
@@ -642,6 +673,19 @@ export const useStore = create<MadsState>((set) => {
           msg.ok ? "ok" : "err",
           `Clean-Code-Gate: ${msg.ok ? "grün" : "rot"} — ${msg.steps.map((s) => `${s.name}:${s.status}`).join(", ")}`,
         );
+        break;
+
+      case "devserver_status":
+        patchAgent(msg.agentId, {
+          devServer: { state: msg.state, url: msg.url, services: msg.services, message: msg.message },
+        });
+        if (msg.state === "running" && msg.url) notice(msg.agentId, "ok", `▶ Dev-Server läuft → ${msg.url}`);
+        else if (msg.state === "stopped") notice(msg.agentId, "info", "■ Dev-Server gestoppt");
+        else if (msg.state === "error") notice(msg.agentId, "err", `Dev-Server: ${msg.message ?? "Fehler"}`);
+        break;
+
+      case "devserver_log":
+        appendDevLog(msg.agentId, { id: mkId(), service: msg.service, stream: msg.stream, line: msg.line });
         break;
 
       case "resumable_agents":
@@ -749,8 +793,10 @@ export const useStore = create<MadsState>((set) => {
               delete agents[msg.agentId!];
               const events = { ...s.events };
               delete events[msg.agentId!];
+              const devLog = { ...s.devLog };
+              delete devLog[msg.agentId!];
               const order = s.order.filter((x) => x !== msg.agentId);
-              return { agents, events, order, selectedId: s.selectedId === msg.agentId ? order[0] : s.selectedId };
+              return { agents, events, devLog, order, selectedId: s.selectedId === msg.agentId ? order[0] : s.selectedId };
             });
           } else {
             patchAgent(msg.agentId, { status: msg.recoverable ? "escalation" : "error" });
@@ -796,6 +842,7 @@ export const useStore = create<MadsState>((set) => {
     agents: {},
     order: [],
     events: {},
+    devLog: {},
     permissions: [],
     escalations: [],
     resumables: [],
@@ -1134,7 +1181,9 @@ export const useStore = create<MadsState>((set) => {
         const editsByFile = Object.fromEntries(
           Object.entries(s.editsByFile).filter(([k]) => !k.startsWith(prefix)),
         );
-        return { agents, events, order, editsByFile, selectedId: s.selectedId === id ? order[0] : s.selectedId };
+        const devLog = { ...s.devLog };
+        delete devLog[id];
+        return { agents, events, order, editsByFile, devLog, selectedId: s.selectedId === id ? order[0] : s.selectedId };
       });
     },
 
@@ -1232,6 +1281,17 @@ export const useStore = create<MadsState>((set) => {
     runGate: async (id) => {
       notice(id, "accent", "▶ Clean-Code-Gate…");
       await sendHost({ ...envelope(), type: "gate_task", agentId: id });
+    },
+
+    startDevServer: async (id) => {
+      set((s) => ({ devLog: { ...s.devLog, [id]: [] } })); // altes Log verwerfen
+      patchAgent(id, { devServer: { state: "starting" } }); // optimistisch
+      notice(id, "accent", "▶ Dev-Server startet…");
+      await sendHost({ ...envelope(), type: "start_devserver", agentId: id });
+    },
+
+    stopDevServer: async (id) => {
+      await sendHost({ ...envelope(), type: "stop_devserver", agentId: id });
     },
 
     pollProject: async () => {

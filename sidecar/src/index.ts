@@ -40,8 +40,10 @@ async function main(): Promise<void> {
   });
 
   rl.on("close", () => {
+    // Über den Shutdown-Pfad beenden → laufender Dev-Server wird sauber gekillt (sonst verwaist
+    // dessen Prozess-Gruppe). Der shutdown-Handler ruft am Ende selbst process.exit(0).
     log("[sidecar] stdin geschlossen — beende");
-    process.exit(0);
+    orchestrator.dispatch({ ...envelope(), type: "shutdown" }).catch(() => process.exit(0));
   });
 
   const sdk = await detectSdk();

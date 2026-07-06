@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Mic } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "../store";
-import type { AttachedFile } from "../store";
+import type { AttachedFile, DevLogLine } from "../store";
 import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { agentBadges, nextStep, unsavedWork, gateDisabledReason, syncDisabledReason } from "../derive";
@@ -19,6 +19,7 @@ import type { PermissionMode, ImageInput, AutopilotLevel } from "../../shared/pr
 // zurückgeben (sonst Endlos-Render-Schleife → App-Crash / graues Fenster).
 const NO_IMAGES: ImageInput[] = [];
 const NO_FILES: AttachedFile[] = [];
+const NO_DEVLOG: DevLogLine[] = [];
 
 export function Inspector() {
   const selectedId = useStore((s) => s.selectedId);
@@ -35,6 +36,15 @@ export function Inspector() {
   const continueStream = useStore((s) => s.continueStream);
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
+  const startDevServer = useStore((s) => s.startDevServer);
+  const stopDevServer = useStore((s) => s.stopDevServer);
+  const devLog = useStore((s) => (s.selectedId ? s.devLog[s.selectedId] ?? NO_DEVLOG : NO_DEVLOG));
+  const devLogRef = useRef<HTMLDivElement>(null);
+  const devLogStickRef = useRef(true); // an den unteren Rand „geklebt"? (nur dann folgen)
+  useLayoutEffect(() => {
+    const el = devLogRef.current;
+    if (el && devLogStickRef.current) el.scrollTop = el.scrollHeight; // nur, wenn User schon unten steht
+  }, [devLog]);
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   const setAutopilot = useStore((s) => s.setAutopilot);
   const setStreamModel = useStore((s) => s.setStreamModel);
@@ -365,6 +375,44 @@ export function Inspector() {
               Gate{agent.gate ? (agent.gate.ok ? " ✓" : " ✖") : ""}
             </button>
           )}
+          {/* Dev-Server: Front-/Backend dieses Streams IM Worktree starten (main bleibt unberührt).
+              Es läuft immer nur einer gleichzeitig; Konfiguration in .mads/run.json. */}
+          {live && agent.role === "sub" && agent.worktreePath && (
+            (() => {
+              const ds = agent.devServer;
+              const on = !!ds && ds.state !== "stopped" && ds.state !== "error";
+              const label =
+                ds?.state === "running"
+                  ? "■ Dev-Server (läuft)"
+                  : ds?.state === "installing"
+                    ? "■ Dev-Server (install…)"
+                    : ds?.state === "starting"
+                      ? "■ Dev-Server (startet…)"
+                      : "▶ Dev-Server";
+              return (
+                <button
+                  className={`devserver-btn${on ? " on" : ""}`}
+                  onClick={() => (on ? void stopDevServer(selectedId) : void startDevServer(selectedId))}
+                  title={
+                    on
+                      ? "Dev-Server dieses Streams stoppen"
+                      : "Front-/Backend dieses Streams lokal starten (aus dem Worktree — main bleibt unberührt). Konfig: .mads/run.json"
+                  }
+                >
+                  {label}
+                </button>
+              );
+            })()
+          )}
+          {live && agent.role === "sub" && agent.devServer?.state === "running" && agent.devServer.url && (
+            <button
+              className="devserver-open"
+              onClick={() => void openUrl(agent.devServer!.url!)}
+              title="Dev-Server im Browser öffnen"
+            >
+              {agent.devServer.url.replace(/^https?:\/\//, "")} ↗
+            </button>
+          )}
           {/* Sub: rebase onto origin/<default> + force-with-lease. NIE für den Integrator —
               dessen „behind" betrifft den main-Checkout, der per fast-forward (nicht rebase!)
               nachgezogen wird. */}
@@ -415,6 +463,36 @@ export function Inspector() {
           </div>
         </div>
       </header>
+
+      {agent.role === "sub" && (agent.devServer || devLog.length > 0) && (
+        <details className="devserver-log" open>
+          <summary>
+            <span className={`devserver-dot ${agent.devServer?.state ?? "stopped"}`} />
+            Dev-Server
+            {agent.devServer?.state ? ` — ${agent.devServer.state}` : ""}
+            {agent.devServer?.message ? ` · ${agent.devServer.message}` : ""}
+          </summary>
+          <div
+            className="devserver-log-body"
+            ref={devLogRef}
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              devLogStickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+            }}
+          >
+            {devLog.length === 0 ? (
+              <div className="devserver-log-empty">Noch keine Ausgabe.</div>
+            ) : (
+              devLog.map((l) => (
+                <div key={l.id} className={`devserver-log-line${l.stream === "stderr" ? " err" : ""}`}>
+                  <span className="devserver-log-svc">{l.service}</span>
+                  <span className="devserver-log-text">{l.line}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </details>
+      )}
 
       {agent.role === "integrator" && (
         <div className="inspector-rolehint">
