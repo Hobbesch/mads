@@ -8,10 +8,10 @@
  *
  * Siehe docs/research/github-multiagent.md und docs/design/04-sub-agents.md.
  */
-import { execFile } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync, type Dirent } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { EscalationKind, PullRequestInfo, PrChecksState } from "../../shared/protocol.js";
 import { scanSecrets, type SecretHit } from "../../shared/secrets.js";
 import { log } from "./io.js";
@@ -123,41 +123,181 @@ export function classifyGitError(text: string): EscalationKind | undefined {
   return undefined;
 }
 
-// Lokale Dev-Config, die die App zum Laufen braucht, aber via .gitignore NICHT im Repo liegt
-// (Secrets/Keys, z. B. appsettings.json, client/.env). Ein frischer Worktree hat sie darum nicht.
-// BASENAME-Muster gängiger lokaler Config. Getrackte Beispiel-/Dev-Vorlagen (…example…,
-// appsettings.Development.json) liegen ohnehin schon im Worktree → werden durch die
-// „nur kopieren, wenn im Ziel fehlt"-Regel NIE überschrieben.
-const SEED_NAME_RE: RegExp[] = [
-  /^appsettings(\..+)?\.json$/i, // appsettings.json, appsettings.<env>.json
-  /^\.env(\..+)?$/, // .env, .env.local, .env.<x> (.env.example ist getrackt → im Ziel vorhanden)
-  /^secrets\.json$/i,
-  /^.+\.secrets\.json$/i,
-  /^local\.settings\.json$/i, // Azure Functions
-];
-// Diese Verzeichnisse beim Suchen NIE betreten (riesig/irrelevant).
-const SEED_SKIP_DIRS = new Set([
-  "node_modules", ".git", ".mads", "dist", "build", "out", "bin", "obj", "target",
-  ".venv", "venv", ".next", ".nuxt", ".svelte-kit", "coverage", "__pycache__", ".idea", ".vs",
-]);
-const SEED_MAX_DEPTH = 6;
+// ─── Lokale Dev-Config seeden ────────────────────────────────────────────────
+// Ein frischer Worktree enthält NUR getrackte Dateien. Die lokale Config, die eine App zum
+// Laufen braucht (Secrets/Keys: appsettings.json, client/.env …), liegt per .gitignore NICHT
+// im Repo → fehlt dem Stream. Wir ziehen sie aus dem Haupt-Checkout nach.
+//
+// „Was ist lokale Config?" ermitteln wir NICHT per hartkodierter Namensliste, sondern aus git
+// selbst: `git ls-files -o -i --exclude-standard --directory` listet exakt die *vorhandenen,
+// aber gitignorierten* Dateien (die projekt-spezifische Wahrheit). `--directory` fasst voll-
+// ignorierte Ordner zu EINER Zeile zusammen (Boba: 21 statt 37991 Einträge) → nie node_modules
+// durchlaufen. Wir klassifizieren die Treffer per Basename in confident/uncertain/junk und
+// kopieren nur „confident". So werden weder Daten-Dumps (data/*.sql) noch in einem ignorierten
+// Ordner vergrabene Prod-Snapshots (backups/*/config/.env) je kopiert.
+
 const SEED_MAX_BYTES = 5 * 1024 * 1024; // Config ist klein; schützt vor versehentlichem Riesen-Match
 
+// „confident": mit hoher Sicherheit lokale App-Config, die zum Laufen gebraucht wird.
+const CONFIG_CONFIDENT_RE: RegExp[] = [
+  /^\.env(\..+)?$/i, //          .env, .env.local, .env.production
+  /^appsettings(\..+)?\.json$/i, // .NET
+  /^local\.settings\.json$/i, //  Azure Functions
+  /^secrets\.json$/i,
+  /^.+\.secrets?\.json$/i, //     db.secrets.json / x.secret.json
+  /^config\.local\.[^.]+$/i, //   config.local.js/json/…
+  /^.+\.local\.(json|ya?ml|toml)$/i, // settings.local.json, x.local.yaml
+  /^google-services\.json$/i,
+  /^GoogleService-Info\.plist$/i,
+  /^firebase.*\.json$/i,
+  /^serviceAccount.*\.json$/i,
+  /^credentials\.json$/i,
+];
+// Getrackte Vorlagen (…example…/…sample…) sind ohnehin schon im Worktree — nie als „confident".
+const CONFIG_TEMPLATE_RE = /(^|[.\-_])(example|sample|template|dist)([.\-_]|$)/i;
+// „uncertain": evtl. sensibel (Schlüssel/Zert.) oder generisch → nur als Vorschlag anbieten.
+const CONFIG_UNCERTAIN_RE: RegExp[] = [
+  /\.(pem|key|crt|cer|pfx|p12|jks|keystore|kdbx)$/i, // Schlüssel/Zertifikate
+  /^.+\.(ini|toml|conf)$/i,
+  /^.+\.ya?ml$/i,
+  /^config\.json$/i,
+  /^\.npmrc$/i,
+  /^\.netrc$/i,
+  /.*credentials.*\.json$/i,
+];
+// Reiner Müll / Daten-Dumps / Kompilate → nie kopieren.
+const SEED_JUNK_RE: RegExp[] = [
+  /^\.DS_Store$/, /^Thumbs\.db$/i, /^desktop\.ini$/i, /~$/,
+  /\.(log|swp|swo|pyc|pyo|class|o|obj)$/i,
+  /\.(sql|dump|bak|db|sqlite\d?|mdb)$/i,
+  /\.(gz|tgz|zip|tar|7z|rar)$/i,
+  /\.(gguf|safetensors|bin|onnx|pt|pth|ckpt)$/i,
+];
+// Ordnernamen, die (an BELIEBIGER Pfad-Stelle) den ganzen Pfad als Artefakt/Junk markieren.
+const SEED_SKIP_SEGMENTS = new Set([
+  ".git", ".mads", ".svn", ".hg",
+  "node_modules", "bower_components", "vendor",
+  "dist", "build", "out", "bin", "obj", "target",
+  ".venv", "venv", "virtualenv",
+  ".next", ".nuxt", ".svelte-kit", ".angular", ".parcel-cache", ".turbo", ".cache",
+  "coverage", "htmlcov", ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache__",
+  ".idea", ".vscode", ".vs", ".claude", ".fleet", ".zed",
+  "logs", "tmp", "temp",
+  "backups", "backup", "Pods", "DerivedData",
+]);
+// Ignorierte ORDNER mit diesen Namen als Hinweis anbieten (nicht auto-kopieren — Vergraben-Gefahr).
+const CONFIG_DIR_HINT = new Set([
+  "config", "configs", ".config", "secrets", "secret", "certs", "certificates", "credentials", "keys",
+]);
+
+function classifyIgnoredFile(relPath: string): "confident" | "uncertain" | "skip" {
+  if (relPath.split("/").some((s) => SEED_SKIP_SEGMENTS.has(s))) return "skip";
+  const base = relPath.split("/").pop() ?? "";
+  if (SEED_JUNK_RE.some((re) => re.test(base))) return "skip";
+  if (CONFIG_CONFIDENT_RE.some((re) => re.test(base)) && !CONFIG_TEMPLATE_RE.test(base)) return "confident";
+  if (CONFIG_UNCERTAIN_RE.some((re) => re.test(base))) return "uncertain";
+  return "skip";
+}
+
 /**
- * Kopiert lokale, gitignorte Dev-Config (appsettings.json, .env, …) aus dem HAUPT-Checkout in einen
- * frisch erzeugten Worktree — damit ein Stream sofort front-/backend-lauffähig ist (siehe Boba:
- * Secrets liegen nur lokal, nicht im Git). Sicher & projekt-agnostisch:
- *  - überschreibt NIE eine im Worktree bereits vorhandene (also getrackte) Datei,
- *  - überspringt große/irrelevante Verzeichnisse und folgt keinen Symlinks,
- *  - kopiert nur reguläre Dateien bis 5 MB.
- * Erweiterbar pro Projekt über `<repoRoot>/.mads/worktree-seed` (ein relativer Pfad pro Zeile).
+ * Ermittelt aus git die vorhandenen, gitignorierten Dateien des Haupt-Checkouts und klassifiziert
+ * sie: `confident` (lokale App-Config → wird kopiert), `uncertain` (Schlüssel/generisch → Vorschlag)
+ * und `dirHints` (ignorierte Ordner mit Config-Namen → Hinweis, nicht auto-kopiert). Read-only.
+ */
+function detectIgnoredConfig(repoRoot: string): { confident: string[]; uncertain: string[]; dirHints: string[] } {
+  const confident: string[] = [];
+  const uncertain: string[] = [];
+  const dirHints: string[] = [];
+  let out = "";
+  try {
+    // --directory: voll-ignorierte Ordner zu EINER Zeile (Perf!). -z: NUL-getrennt, kein Quoting.
+    out = execFileSync(
+      "git",
+      ["-C", repoRoot, "ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z"],
+      { encoding: "utf8", timeout: 10_000, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] },
+    );
+  } catch {
+    return { confident, uncertain, dirHints }; // kein git / Fehler → leer
+  }
+  for (const entry of out.split("\0")) {
+    const p = entry.trim();
+    if (!p) continue;
+    if (p.endsWith("/")) {
+      // Voll-ignorierter Ordner: NIE automatisch expandieren (in backups/*/config/.env stecken
+      // z. B. Prod-Secrets). Nur als Hinweis anbieten, wenn der Name nach Config aussieht.
+      const segs = p.split("/").filter(Boolean);
+      if (!segs.some((s) => SEED_SKIP_SEGMENTS.has(s)) && CONFIG_DIR_HINT.has((segs.at(-1) ?? "").toLowerCase())) {
+        dirHints.push(p);
+      }
+      continue;
+    }
+    const cls = classifyIgnoredFile(p);
+    if (cls === "confident") confident.push(p);
+    else if (cls === "uncertain") uncertain.push(p);
+  }
+  confident.sort();
+  uncertain.sort();
+  dirHints.sort();
+  return { confident, uncertain, dirHints };
+}
+
+/**
+ * Legt `<repoRoot>/.mads/worktree-seed` beim ERSTEN Öffnen an (generate-if-absent → self-healing,
+ * überschreibt nie eine vom Nutzer editierte Liste). Inhalt = automatisch erkannte lokale Config:
+ * confident-Treffer aktiv, uncertain/Ordner auskommentiert (`# ? …`) zum Opt-in. Voraussetzung:
+ * `.mads/` existiert bereits (ensureMadsDir lief). Gibt zurück, ob generiert wurde + Zähler.
+ */
+export function ensureWorktreeSeedFile(repoRoot: string): { generated: boolean; confident: number; uncertain: number } {
+  const seedPath = join(repoRoot, ".mads", "worktree-seed");
+  if (existsSync(seedPath)) return { generated: false, confident: 0, uncertain: 0 };
+  const det = detectIgnoredConfig(repoRoot);
+  const lines: string[] = [
+    "# mads worktree-seed — lokale, gitignorte Dev-Config, die in JEDEN neuen Stream kopiert wird,",
+    "# damit er sofort front-/backend-lauffähig ist. Automatisch beim ersten Öffnen ermittelt",
+    "# (git-ignorierte, projekt-lokale Dateien). Ein Pfad pro Zeile, relativ zum Repo-Root.",
+    "#   • aktive (nicht auskommentierte) Zeile → wird kopiert",
+    "#   • '#'-Zeile = aus; '# ? pfad' = Vorschlag → zum Aktivieren '# ? ' entfernen",
+    "# Bereits im Stream vorhandene (getrackte) Dateien werden NIE überschrieben.",
+    "",
+  ];
+  if (det.confident.length) {
+    lines.push("# — erkannte lokale Config (wird kopiert) —");
+    for (const p of det.confident) lines.push(p);
+  } else {
+    lines.push("# (keine eindeutige lokale Config erkannt — bei Bedarf Pfade unten eintragen)");
+  }
+  if (det.uncertain.length) {
+    lines.push("", "# — unsicher: Schlüssel/Zertifikate/generische Config — bei Bedarf aktivieren —");
+    for (const p of det.uncertain) lines.push(`# ? ${p}`);
+  }
+  if (det.dirHints.length) {
+    lines.push("", "# — ignorierte Ordner mit möglicher Config (nicht auto-kopiert; einzelne Dateien eintragen) —");
+    for (const d of det.dirHints) lines.push(`# ? ${d}`);
+  }
+  lines.push("");
+  try {
+    writeFileSync(seedPath, lines.join("\n"), "utf8");
+    return { generated: true, confident: det.confident.length, uncertain: det.uncertain.length };
+  } catch {
+    return { generated: false, confident: 0, uncertain: 0 };
+  }
+}
+
+/**
+ * Kopiert lokale, gitignorte Dev-Config aus dem HAUPT-Checkout in einen frisch erzeugten Worktree —
+ * damit ein Stream sofort front-/backend-lauffähig ist. Quelle:
+ *   1) `.mads/worktree-seed` (beim ersten Öffnen auto-generiert, vom Nutzer kuratierbar) — aktive Zeilen,
+ *   2) zusätzlich live per git erkannte confident-Config, sofern in (1) NICHT erwähnt (respektiert
+ *      bewusste Opt-outs / auskommentierte Zeilen und zieht neu hinzugekommene Dateien nach).
+ * Sicher & projekt-agnostisch: überschreibt NIE eine im Worktree vorhandene (getrackte) Datei,
+ * kopiert nur reguläre Dateien ≤ 5 MB, keine Symlinks/Ordner, keine absoluten/`..`-Pfade.
  * Gibt die kopierten Relativpfade zurück. Best effort — Fehler einzelner Dateien werden ignoriert.
  */
 export function seedLocalDevFiles(repoRoot: string, worktree: string): string[] {
   const copied: string[] = [];
   const seen = new Set<string>();
   const tryCopy = (rel: string): void => {
-    if (!rel || seen.has(rel) || rel.split(sep).includes("..")) return;
+    if (!rel || seen.has(rel) || isAbsolute(rel) || rel.split(sep).includes("..")) return;
     seen.add(rel);
     try {
       const dst = join(worktree, rel);
@@ -172,34 +312,38 @@ export function seedLocalDevFiles(repoRoot: string, worktree: string): string[] 
       /* einzelne Datei nicht kopierbar → überspringen */
     }
   };
-  // 1) Muster-basiert einsammeln (begrenzte Tiefe, große Verzeichnisse ausgelassen).
-  const walk = (dir: string, depth: number): void => {
-    if (depth > SEED_MAX_DEPTH) return;
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (e.isSymbolicLink()) continue;
-      if (e.isDirectory()) {
-        if (!SEED_SKIP_DIRS.has(e.name)) walk(join(dir, e.name), depth + 1);
-      } else if (e.isFile() && SEED_NAME_RE.some((re) => re.test(e.name))) {
-        tryCopy(relative(repoRoot, join(dir, e.name)));
-      }
-    }
-  };
-  walk(repoRoot, 0);
-  // 2) Optionale Projekt-Liste: `<repoRoot>/.mads/worktree-seed` — ein relativer Pfad pro Zeile.
+
+  // 1) Projekt-Liste `.mads/worktree-seed` parsen: aktive Pfade + „erwähnte" (auch auskommentierte).
+  const activePaths: string[] = [];
+  const mentioned = new Set<string>();
   try {
-    for (const line of readFileSync(join(repoRoot, ".mads", "worktree-seed"), "utf8").split(/\r?\n/)) {
-      const p = line.trim();
-      if (p && !p.startsWith("#")) tryCopy(p);
+    for (const raw of readFileSync(join(repoRoot, ".mads", "worktree-seed"), "utf8").split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (line.startsWith("#")) {
+        const m = line.match(/^#\s*\??\s*(\S+)/); // '# ? pfad' → Pfad als „erwähnt" (bewusstes Opt-out)
+        if (m) mentioned.add(m[1]);
+        continue;
+      }
+      const token = line.split(/\s+/)[0]; // aktive Zeile: Pfad (evtl. mit Inline-Notiz dahinter)
+      activePaths.push(token);
+      mentioned.add(token);
     }
   } catch {
-    /* keine Projekt-Liste → nur Muster */
+    /* keine Liste → nur Live-Erkennung unten */
   }
+  for (const rel of activePaths) tryCopy(rel);
+
+  // 2) Live per git erkannte confident-Config zusätzlich — aber nur, was in der Liste NICHT erwähnt
+  //    ist (respektiert Opt-outs; zieht nach dem ersten Öffnen neu entstandene Config automatisch nach).
+  try {
+    for (const rel of detectIgnoredConfig(repoRoot).confident) {
+      if (!mentioned.has(rel)) tryCopy(rel);
+    }
+  } catch (e) {
+    log(`[git] seed: git-Erkennung fehlgeschlagen: ${String(e)}`);
+  }
+
   return copied;
 }
 

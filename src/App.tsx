@@ -235,36 +235,47 @@ export default function App() {
 
         <StalenessBanner />
 
-        {reconcileSummary && (
-          <div className={`reconcile-banner${reconcileSummary.mainBehind > 0 ? " warn" : ""}`}>
-            <span className="reconcile-text">
-              ↻ GitHub-Abgleich:
-              {reconcileSummary.mainFastForwarded > 0 && ` ${defaultBranch} +${reconcileSummary.mainFastForwarded} aktualisiert`}
-              {reconcileSummary.cleaned.length > 0 &&
-                `${reconcileSummary.mainFastForwarded > 0 ? " · " : " "}${reconcileSummary.cleaned.length} erledigte aufgeräumt (${reconcileSummary.cleaned.join(", ")})`}
-              {reconcileSummary.residue.length > 0 &&
-                ` · ${reconcileSummary.residue.length} gemergt mit lokalen Resten — bitte prüfen`}
-              {reconcileSummary.mainBehind > 0 &&
-                ` ⚠ ${defaultBranch} ist ${reconcileSummary.mainBehind} Commits hinter origin/${defaultBranch} und konnte nicht automatisch nachgezogen werden (${
-                  reconcileSummary.mainBlocked === "dirty"
-                    ? "uncommittete Änderungen"
-                    : reconcileSummary.mainBlocked === "diverged"
-                      ? "lokale Commits / divergiert"
-                      : reconcileSummary.mainBlocked === "detached"
-                        ? "detached HEAD"
-                        : "Grund unbekannt"
-                }) — im Integrator-Stream „main aktualisieren"`}
-            </span>
-            <button
-              className="banner-close"
-              title="Hinweis schließen"
-              aria-label="Hinweis schließen"
-              onClick={() => dismissReconcile()}
-            >
-              ✕
-            </button>
-          </div>
-        )}
+        {reconcileSummary &&
+          (() => {
+            const rc = reconcileSummary;
+            const hasGit = rc.mainFastForwarded > 0 || rc.cleaned.length > 0 || rc.residue.length > 0 || rc.mainBehind > 0;
+            const seed = rc.seedGenerated ?? 0;
+            return (
+              <div className={`reconcile-banner${rc.mainBehind > 0 ? " warn" : ""}`}>
+                <span className="reconcile-text">
+                  {hasGit && (
+                    <>
+                      ↻ GitHub-Abgleich:
+                      {rc.mainFastForwarded > 0 && ` ${defaultBranch} +${rc.mainFastForwarded} aktualisiert`}
+                      {rc.cleaned.length > 0 &&
+                        `${rc.mainFastForwarded > 0 ? " · " : " "}${rc.cleaned.length} erledigte aufgeräumt (${rc.cleaned.join(", ")})`}
+                      {rc.residue.length > 0 && ` · ${rc.residue.length} gemergt mit lokalen Resten — bitte prüfen`}
+                      {rc.mainBehind > 0 &&
+                        ` ⚠ ${defaultBranch} ist ${rc.mainBehind} Commits hinter origin/${defaultBranch} und konnte nicht automatisch nachgezogen werden (${
+                          rc.mainBlocked === "dirty"
+                            ? "uncommittete Änderungen"
+                            : rc.mainBlocked === "diverged"
+                              ? "lokale Commits / divergiert"
+                              : rc.mainBlocked === "detached"
+                                ? "detached HEAD"
+                                : "Grund unbekannt"
+                        }) — im Integrator-Stream „main aktualisieren"`}
+                    </>
+                  )}
+                  {seed > 0 &&
+                    `${hasGit ? " · " : ""}📦 ${seed} lokale Config-Datei(en) erkannt → werden in neue Streams kopiert (.mads/worktree-seed)`}
+                </span>
+                <button
+                  className="banner-close"
+                  title="Hinweis schließen"
+                  aria-label="Hinweis schließen"
+                  onClick={() => dismissReconcile()}
+                >
+                  ✕
+                </button>
+              </div>
+            );
+          })()}
 
         {liveResumables.length > 0 && (
           <div className="resume-banner">

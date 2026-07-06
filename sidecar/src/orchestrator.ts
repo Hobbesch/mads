@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
-import { autoCommit, createPr, discoverWorktrees, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
+import { autoCommit, createPr, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
 import { ensureMadsDir, loadRegistry, mergeRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
@@ -646,6 +646,15 @@ export class Orchestrator {
     // `.mads/` selbst-ignorieren, BEVOR wir „dirty" prüfen — sonst blockiert mads'
     // eigener untracked-State den fast-forward von main (genau dieser Bug trat auf).
     ensureMadsDir(repoRoot);
+    // Beim ersten Öffnen: lokale, gitignorte Dev-Config ermitteln + `.mads/worktree-seed` anlegen,
+    // damit neu erzeugte Streams sofort front-/backend-lauffähig sind. Best effort, generate-if-absent.
+    let seedGenerated = 0;
+    try {
+      const s = ensureWorktreeSeedFile(repoRoot);
+      if (s.generated && s.confident > 0) seedGenerated = s.confident;
+    } catch (e) {
+      log(`[orchestrator] worktree-seed-Erkennung fehlgeschlagen: ${String(e)}`);
+    }
     await run("git", ["-C", repoRoot, "fetch", "origin", "--prune"], repoRoot);
     const defaultBranch = this.project?.defaultBranch ?? "main";
     const ff = await fastForwardMain(repoRoot, defaultBranch);
@@ -752,10 +761,10 @@ export class Orchestrator {
     const mainBehind = ff.blocked ? ff.behind : 0;
     const mainBlocked = ff.blocked;
     if (offer.length > 0) this.emit({ ...envelope(), type: "resumable_agents", agents: offer });
-    if (mainFastForwarded > 0 || mainBehind > 0 || cleaned.length > 0 || residue.length > 0) {
-      this.emit({ ...envelope(), type: "reconcile_summary", mainFastForwarded, mainBehind, mainBlocked, cleaned, residue });
+    if (mainFastForwarded > 0 || mainBehind > 0 || cleaned.length > 0 || residue.length > 0 || seedGenerated > 0) {
+      this.emit({ ...envelope(), type: "reconcile_summary", mainFastForwarded, mainBehind, mainBlocked, cleaned, residue, seedGenerated });
     }
-    log(`[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length}`);
+    log(`[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length} seed=${seedGenerated}`);
   }
 
   // ---------------------------------------------------------------- Polling

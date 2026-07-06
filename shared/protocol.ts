@@ -484,6 +484,12 @@ export interface ReconcileSummaryMsg extends BaseMsg {
   cleaned: string[];
   /** PR gemergt, aber lokale Reste → zur Hand-Prüfung angeboten statt gelöscht — Labels. */
   residue: string[];
+  /**
+   * Beim ERSTEN Öffnen dieses Projekts hat mads N lokale, gitignorte Config-Dateien erkannt und
+   * `.mads/worktree-seed` angelegt — sie werden künftig in jeden neuen Stream kopiert. Nur gesetzt
+   * (> 0), wenn die Liste gerade generiert wurde UND ≥ 1 Datei erkannt wurde. Rein informativ.
+   */
+  seedGenerated?: number;
 }
 
 /** Laufzeit-Kollisionen zwischen aktiven Agenten (leeres Array = aufgeräumt). */
