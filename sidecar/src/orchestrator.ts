@@ -80,6 +80,19 @@ export class Orchestrator {
           });
           break;
         }
+        // Echter Projektwechsel: den alten Projekt-Zustand sauber TRENNEN — laufende Sessions
+        // beenden (Query schließen; Worktrees, Commits UND agents.json bleiben erhalten → beim
+        // Zurückwechseln wieder fortsetzbar) und alle projekt-gebundenen Caches leeren. Sonst
+        // blieben die alten Streams im Pool und würden weiter gepollt; ihre git/PR-Updates
+        // würden in die UI des NEUEN Projekts lecken (falsche Kacheln, Fehlklick-Risiko).
+        if (this.project && this.project.repoRoot !== msg.repoRoot) {
+          for (const s of this.pool.values()) await s.stop(false);
+          this.pool.clear();
+          this.gitState.clear();
+          this.removed.clear();
+          this.autoSyncConflicted.clear();
+          log(`[orchestrator] project switch → previous pool stopped & cleared`);
+        }
         this.project = { projectId: msg.projectId, repoRoot: msg.repoRoot, ...info };
         this.emit({ ...envelope(), type: "project_resolved", project: this.project });
         log(`[orchestrator] project resolved: ${info.owner}/${info.repo} (default ${info.defaultBranch})`);

@@ -551,16 +551,38 @@ export const useStore = create<MadsState>((set) => {
       }
 
       case "project_resolved":
-        set((s) => ({
-          project: msg.project,
-          projectStatus: "ready",
-          recentProjects: rememberProject(s.recentProjects, msg.project, Date.now()),
-          // Reconcile-Artefakte des VORHERIGEN Projekts verwerfen — der frische Abgleich
-          // emittiert nur etwas, wenn es etwas zu melden gibt; sonst bliebe sonst ein
-          // veralteter Banner/Resume-Vorschlag aus dem alten Projekt stehen.
-          reconcileSummary: undefined,
-          resumables: [],
-        }));
+        set((s) => {
+          // Echter Projektwechsel (anderer repoRoot) → den PROJEKT-gebundenen Zustand KOMPLETT
+          // räumen, damit keine Streams/Transkripte/Eskalationen/Entwürfe des alten Projekts in
+          // der neuen Ansicht hängen bleiben (Fehlklick-Risiko auf einen Fremd-Projekt-Stream).
+          // Beim Re-Open DESSELBEN Projekts NICHT räumen — der Sidecar-Pool behält dort die
+          // Live-Sessions und würde sie nicht erneut anbieten.
+          const switching = !!s.project && s.project.repoRoot !== msg.project.repoRoot;
+          return {
+            project: msg.project,
+            projectStatus: "ready",
+            recentProjects: rememberProject(s.recentProjects, msg.project, Date.now()),
+            // Reconcile-Artefakte des Vorprojekts immer verwerfen (frischer Abgleich meldet neu).
+            reconcileSummary: undefined,
+            resumables: [],
+            ...(switching
+              ? {
+                  agents: {},
+                  order: [],
+                  events: {},
+                  permissions: [],
+                  escalations: [],
+                  collisions: [],
+                  editsByFile: {},
+                  selectedId: undefined,
+                  parallelPicker: undefined,
+                  drafts: {},
+                  draftImages: {},
+                  draftFiles: {},
+                }
+              : {}),
+          };
+        });
         // repoRoot im Core registrieren + als Default-Explorer-Root setzen (doc 07 §4.2:
         // „aufgerufen direkt nachdem project gesetzt ist"). Erst bei aktiver Files-View geladen.
         void useStore.getState().setActiveRoot({ kind: "project", path: msg.project.repoRoot });
