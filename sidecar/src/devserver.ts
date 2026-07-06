@@ -17,7 +17,7 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import readline from "node:readline";
 import { send, envelope, log } from "./io.js";
 
@@ -217,6 +217,13 @@ export class DevServerRun {
   private buildEnv(spec: ServiceSpec): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...process.env };
     for (const [k, v] of Object.entries(spec.env ?? {})) env[k] = expandEnv(v);
+    // Denselben node/npm wie der Sidecar erzwingen (dessen bin-Verzeichnis GANZ vorne im PATH).
+    // Sonst nimmt die Sub-Shell evtl. ein node anderer Architektur (macOS: /usr/local x64 vs.
+    // /opt/homebrew arm64) als das, mit dem node_modules installiert wurde → native Binaries wie
+    // esbuild passen nicht („You installed esbuild for another platform", darwin-arm64 vs -x64).
+    // process.execPath ist exakt das node, unter dem der Sidecar läuft; dessen bin hat auch npm/npx.
+    const nodeDir = dirname(process.execPath);
+    env.PATH = `${nodeDir}:${env.PATH ?? ""}`;
     return env;
   }
 
@@ -225,7 +232,9 @@ export class DevServerRun {
       const cwd = join(this.worktree, spec.cwd ?? ".");
       // detached → eigene Prozess-Gruppe, damit stop() auch von npm/dotnet geforkte Install-Kinder
       // (Lifecycle-Scripts, node-gyp …) per Gruppen-Kill erwischt und nichts verwaist.
-      const child = spawn("/bin/sh", ["-lc", command], { cwd, env: this.buildEnv(spec), detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      // KEIN Login-Shell (`-c`, nicht `-lc`): sonst würde macOS' path_helper den PATH neu aufbauen
+      // und unser vorangestelltes node-Verzeichnis wieder nach hinten schieben (arm64→x64-Mismatch).
+      const child = spawn("/bin/sh", ["-c", command], { cwd, env: this.buildEnv(spec), detached: true, stdio: ["ignore", "pipe", "pipe"] });
       this.installChild = child;
       if (child.stdout) readline.createInterface({ input: child.stdout }).on("line", (l) => this.emitLog(spec.name, "stdout", l));
       if (child.stderr) readline.createInterface({ input: child.stderr }).on("line", (l) => this.emitLog(spec.name, "stderr", l));
@@ -242,7 +251,7 @@ export class DevServerRun {
 
   private spawnService(p: ServiceProc): void {
     const cwd = join(this.worktree, p.spec.cwd ?? ".");
-    const child = spawn("/bin/sh", ["-lc", p.spec.command], {
+    const child = spawn("/bin/sh", ["-c", p.spec.command], {
       cwd,
       env: this.buildEnv(p.spec),
       detached: true, // eigene Prozess-GRUPPE → Gruppen-Kill erwischt geforkte Kinder
