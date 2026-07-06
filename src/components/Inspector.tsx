@@ -271,16 +271,23 @@ export function Inspector() {
               <option value="autopilot">🤖 Autopilot</option>
             </select>
           )}
-          {/* Modell + Effort dieses Streams live umstellen (Modell via setModel, Effort/Ultracode
-              via applyFlagSettings — ohne Neustart). Nur für aktive, echte Streams. */}
+          {/* Modell + Effort DIESES Streams live umstellen (Modell via setModel, Effort/Ultracode
+              via applyFlagSettings — ohne Neustart). Kleines „Stream"-Label als Gegenstück zum
+              „· DEFAULT" der linken Leiste, damit klar ist: das gilt nur für diesen Stream. */}
           {live && !agent.mock && (
-            <ModelEffortPicker
-              model={agent.model ?? defaultModel}
-              effort={agent.effort}
-              onModel={(m) => void setStreamModel(selectedId, m)}
-              onEffort={(e) => void setStreamEffort(selectedId, e)}
-              className="inspector"
-            />
+            <div
+              className="insp-me"
+              title="Modell & Effort NUR für diesen Stream (live umgestellt). Der Regler in der linken Leiste ist der Default für neue Streams."
+            >
+              <span className="insp-me-label">Stream</span>
+              <ModelEffortPicker
+                model={agent.model ?? defaultModel}
+                effort={agent.effort}
+                onModel={(m) => void setStreamModel(selectedId, m)}
+                onEffort={(e) => void setStreamEffort(selectedId, e)}
+                className="inspector"
+              />
+            </div>
           )}
           </div>
           {/* Cluster 2 — Aktions-Buttons (kontextabhängig). Bricht als eigene Einheit um. */}

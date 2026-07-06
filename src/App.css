@@ -1035,6 +1035,19 @@ button.primary:hover {
   flex: 0 0 auto;
   min-width: 78px;
 }
+/* Kleines „Stream"-Label vor dem Pro-Stream-Picker (Gegenstück zum „· DEFAULT" der linken Leiste). */
+.insp-me {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.insp-me-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
 .inspector-actions button {
   border: 1px solid var(--border-strong);
   background: var(--panel);
