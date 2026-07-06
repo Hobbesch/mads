@@ -9,11 +9,12 @@
  * Siehe docs/research/github-multiagent.md und docs/design/04-sub-agents.md.
  */
 import { execFile } from "node:child_process";
-import { lstatSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { EscalationKind, PullRequestInfo, PrChecksState } from "../../shared/protocol.js";
 import { scanSecrets, type SecretHit } from "../../shared/secrets.js";
+import { log } from "./io.js";
 import { planAdrCollisionRenames } from "../../shared/adr.js";
 import { isArtifactPath } from "../../shared/commit-hygiene.js";
 
@@ -122,6 +123,86 @@ export function classifyGitError(text: string): EscalationKind | undefined {
   return undefined;
 }
 
+// Lokale Dev-Config, die die App zum Laufen braucht, aber via .gitignore NICHT im Repo liegt
+// (Secrets/Keys, z. B. appsettings.json, client/.env). Ein frischer Worktree hat sie darum nicht.
+// BASENAME-Muster gängiger lokaler Config. Getrackte Beispiel-/Dev-Vorlagen (…example…,
+// appsettings.Development.json) liegen ohnehin schon im Worktree → werden durch die
+// „nur kopieren, wenn im Ziel fehlt"-Regel NIE überschrieben.
+const SEED_NAME_RE: RegExp[] = [
+  /^appsettings(\..+)?\.json$/i, // appsettings.json, appsettings.<env>.json
+  /^\.env(\..+)?$/, // .env, .env.local, .env.<x> (.env.example ist getrackt → im Ziel vorhanden)
+  /^secrets\.json$/i,
+  /^.+\.secrets\.json$/i,
+  /^local\.settings\.json$/i, // Azure Functions
+];
+// Diese Verzeichnisse beim Suchen NIE betreten (riesig/irrelevant).
+const SEED_SKIP_DIRS = new Set([
+  "node_modules", ".git", ".mads", "dist", "build", "out", "bin", "obj", "target",
+  ".venv", "venv", ".next", ".nuxt", ".svelte-kit", "coverage", "__pycache__", ".idea", ".vs",
+]);
+const SEED_MAX_DEPTH = 6;
+const SEED_MAX_BYTES = 5 * 1024 * 1024; // Config ist klein; schützt vor versehentlichem Riesen-Match
+
+/**
+ * Kopiert lokale, gitignorte Dev-Config (appsettings.json, .env, …) aus dem HAUPT-Checkout in einen
+ * frisch erzeugten Worktree — damit ein Stream sofort front-/backend-lauffähig ist (siehe Boba:
+ * Secrets liegen nur lokal, nicht im Git). Sicher & projekt-agnostisch:
+ *  - überschreibt NIE eine im Worktree bereits vorhandene (also getrackte) Datei,
+ *  - überspringt große/irrelevante Verzeichnisse und folgt keinen Symlinks,
+ *  - kopiert nur reguläre Dateien bis 5 MB.
+ * Erweiterbar pro Projekt über `<repoRoot>/.mads/worktree-seed` (ein relativer Pfad pro Zeile).
+ * Gibt die kopierten Relativpfade zurück. Best effort — Fehler einzelner Dateien werden ignoriert.
+ */
+export function seedLocalDevFiles(repoRoot: string, worktree: string): string[] {
+  const copied: string[] = [];
+  const seen = new Set<string>();
+  const tryCopy = (rel: string): void => {
+    if (!rel || seen.has(rel) || rel.split(sep).includes("..")) return;
+    seen.add(rel);
+    try {
+      const dst = join(worktree, rel);
+      if (existsSync(dst)) return; // im Worktree schon vorhanden (getrackt) → nie überschreiben
+      const src = join(repoRoot, rel);
+      const st = lstatSync(src);
+      if (!st.isFile() || st.size > SEED_MAX_BYTES) return; // keine Symlinks/Ordner/Riesen
+      mkdirSync(dirname(dst), { recursive: true });
+      copyFileSync(src, dst);
+      copied.push(rel);
+    } catch {
+      /* einzelne Datei nicht kopierbar → überspringen */
+    }
+  };
+  // 1) Muster-basiert einsammeln (begrenzte Tiefe, große Verzeichnisse ausgelassen).
+  const walk = (dir: string, depth: number): void => {
+    if (depth > SEED_MAX_DEPTH) return;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.isSymbolicLink()) continue;
+      if (e.isDirectory()) {
+        if (!SEED_SKIP_DIRS.has(e.name)) walk(join(dir, e.name), depth + 1);
+      } else if (e.isFile() && SEED_NAME_RE.some((re) => re.test(e.name))) {
+        tryCopy(relative(repoRoot, join(dir, e.name)));
+      }
+    }
+  };
+  walk(repoRoot, 0);
+  // 2) Optionale Projekt-Liste: `<repoRoot>/.mads/worktree-seed` — ein relativer Pfad pro Zeile.
+  try {
+    for (const line of readFileSync(join(repoRoot, ".mads", "worktree-seed"), "utf8").split(/\r?\n/)) {
+      const p = line.trim();
+      if (p && !p.startsWith("#")) tryCopy(p);
+    }
+  } catch {
+    /* keine Projekt-Liste → nur Muster */
+  }
+  return copied;
+}
+
 export async function createWorktree(
   repoRoot: string,
   agentId: string,
@@ -132,6 +213,14 @@ export async function createWorktree(
   const path = worktreePathFor(repoRoot, agentId);
   const r = await git(["-C", repoRoot, "worktree", "add", "-b", branch, path, baseRef], repoRoot);
   if (r.code !== 0) return { ok: false, error: r.stderr || r.stdout };
+  // Lokale, gitignorte Dev-Config aus dem Haupt-Checkout nachziehen → Stream sofort lauffähig.
+  try {
+    const seeded = seedLocalDevFiles(repoRoot, path);
+    if (seeded.length)
+      log(`[git] worktree ${branch}: ${seeded.length} lokale Dev-Datei(en) geseedet (${seeded.slice(0, 6).join(", ")}${seeded.length > 6 ? " …" : ""})`);
+  } catch (e) {
+    log(`[git] seedLocalDevFiles fehlgeschlagen: ${String(e)}`);
+  }
   return { ok: true, path };
 }
 
