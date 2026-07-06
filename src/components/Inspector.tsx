@@ -376,8 +376,9 @@ export function Inspector() {
             </button>
           )}
           {/* Dev-Server: Front-/Backend dieses Streams IM Worktree starten (main bleibt unberührt).
-              Es läuft immer nur einer gleichzeitig; Konfiguration in .mads/run.json. */}
-          {live && agent.role === "sub" && agent.worktreePath && (
+              Auch für PASSIVE („fertige") Streams — der Server hängt am Worktree, nicht an einer
+              aktiven KI-Session. Es läuft immer nur einer gleichzeitig; Konfig in .mads/run.json. */}
+          {agent.role === "sub" && agent.worktreePath && (
             (() => {
               const ds = agent.devServer;
               const on = !!ds && ds.state !== "stopped" && ds.state !== "error";
@@ -404,7 +405,7 @@ export function Inspector() {
               );
             })()
           )}
-          {live && agent.role === "sub" && agent.devServer?.state === "running" && agent.devServer.url && (
+          {agent.role === "sub" && agent.devServer?.state === "running" && agent.devServer.url && (
             <button
               className="devserver-open"
               onClick={() => void openUrl(agent.devServer!.url!)}

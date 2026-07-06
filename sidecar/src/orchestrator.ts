@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { AgentSession } from "./session.js";
 import { send, log, envelope } from "./io.js";
-import { autoCommit, createPr, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
+import { autoCommit, createPr, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
@@ -1072,7 +1072,13 @@ export class Orchestrator {
   private async handleStartDevServer(agentId: string): Promise<void> {
     if (!this.project) return;
     const repoRoot = this.project.repoRoot;
-    const worktree = this.pool.get(agentId)?.worktreePath;
+    // Worktree auflösen — auch für PASSIVE (wiederhergestellte, „fertige") Streams, die nicht im
+    // Pool liegen: der Dev-Server hängt am Worktree auf der Platte, nicht an einer aktiven KI-Session.
+    // Reihenfolge: aktive Session → Registry-Eintrag → Konvention (~/mads-worktrees/<slug>/<agentId>).
+    const worktree =
+      this.pool.get(agentId)?.worktreePath ??
+      loadRegistry(repoRoot).find((e) => e.agentId === agentId)?.worktreePath ??
+      worktreePathFor(repoRoot, agentId);
     if (!worktree || !existsSync(worktree)) {
       this.emit({
         ...envelope(),
@@ -1082,6 +1088,14 @@ export class Orchestrator {
         message: "Kein Worktree für diesen Stream — Dev-Server nur in Sub-Streams mit eigenem Worktree.",
       });
       return;
+    }
+    // Lokale, gitignorte Dev-Config sicherstellen (v. a. bei Worktrees VOR dem Seeding-Feature oder
+    // wenn seither Config dazukam) — idempotent, überschreibt nie eine vorhandene Datei.
+    try {
+      const seeded = seedLocalDevFiles(repoRoot, worktree);
+      if (seeded.length) log(`[orchestrator] devserver: ${seeded.length} lokale Config-Datei(en) nachgeseedet (${seeded.slice(0, 5).join(", ")})`);
+    } catch {
+      /* best effort */
     }
     let manifest = loadRunManifest(repoRoot);
     if (!manifest) {
