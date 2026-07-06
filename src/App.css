@@ -101,6 +101,12 @@ button {
   padding: 30px 8px 8px;
   gap: 4px;
   position: relative;
+  /* Die Rail bildet über `backdrop-filter` einen eigenen Stacking-Context. Ohne z-index läge
+     der (auf nav-Ebene gerenderte) Projekt-Popover unter den positionierten Content-Kacheln
+     (.card, z-index 6) → er erschien HINTER den Stream-Kacheln. z-index hebt die ganze Rail
+     samt Popover über den Content, bleibt aber unter echten Overlays (.perm-overlay 50,
+     .modal-overlay 60, .change-overlay 80), die die Rail weiterhin abdecken. */
+  z-index: 30;
 }
 .activity-rail.collapsed {
   width: 52px;
