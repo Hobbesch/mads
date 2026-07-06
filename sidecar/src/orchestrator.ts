@@ -176,8 +176,7 @@ export class Orchestrator {
           this.emitError(msg.integratorId, "main_edited", "Auslagern nicht möglich (kein Integrator/Repo).");
           break;
         }
-        const worktreePath = worktreePathFor(integ.repoRoot, msg.agentId);
-        const res = await outsourceMainChanges(integ.repoRoot, this.project.defaultBranch, worktreePath, msg.branch);
+        const res = await outsourceMainChanges(integ.repoRoot, this.project.defaultBranch, msg.agentId, msg.branch);
         if (!res.ok) {
           // Auslagern scheiterte (z.B. nichts zu verschieben, main sauber) → die neue Kachel als
           // fehlgeschlagen melden (das Frontend entfernt eine noch startende Kachel), und dem
@@ -198,7 +197,7 @@ export class Orchestrator {
             "fasse kurz zusammen, was sie bewirken. Committen/Push/PR übernimmt mads — nicht selbst pushen.",
           repoRoot: integ.repoRoot,
           branch: msg.branch,
-          resumeWorktreePath: worktreePath,
+          resumeWorktreePath: res.worktreePath,
           label: msg.label,
           role: "sub",
           model: "claude-sonnet-4-6",

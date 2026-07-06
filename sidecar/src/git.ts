@@ -662,26 +662,31 @@ export async function reconcileAdrCollisions(
 export async function outsourceMainChanges(
   repoRoot: string,
   defaultBranch: string,
-  worktreePath: string,
+  agentId: string,
   branch: string,
-): Promise<{ ok: true; conflicted: boolean } | { ok: false; error: string }> {
+): Promise<{ ok: true; conflicted: boolean; worktreePath: string } | { ok: false; error: string }> {
   const dirty = await git(["-C", repoRoot, "status", "--porcelain"], repoRoot);
   if (!dirty.stdout.trim()) return { ok: false, error: "Keine uncommitteten Änderungen im Main-Checkout." };
   const stash = await git(["-C", repoRoot, "stash", "push", "-u", "-m", `mads:outsource ${branch}`], repoRoot);
   if (stash.code !== 0) return { ok: false, error: `git stash fehlgeschlagen: ${stash.stderr || stash.stdout}` };
   const stashSha = (await git(["-C", repoRoot, "rev-parse", "stash@{0}"], repoRoot)).stdout.trim();
   await fastForwardMain(repoRoot, defaultBranch); // jetzt möglich (main clean); best effort
-  try {
-    await createWorktree(repoRoot, worktreePath, branch, `origin/${defaultBranch}`);
-  } catch (e) {
+  // createWorktree joint agentId→Pfad (worktreePathFor) und liefert ihn zurück — das ist die EINZIGE
+  // Quelle der Wahrheit für den Worktree-Pfad. Nur diesen zurückgegebenen Pfad fürs `stash apply` unten
+  // nutzen; einen selbst vorbereiteten Pfad hier durchzureichen würde von createWorktree ein zweites Mal
+  // gejoint (~/mads-worktrees/<slug>/<pfad>) → git legte am einen, das apply am anderen Verzeichnis an.
+  // createWorktree wirft NICHT, sondern liefert {ok:false} — deshalb hier explizit prüfen (kein try/catch).
+  const wt = await createWorktree(repoRoot, agentId, branch, `origin/${defaultBranch}`);
+  if (!wt.ok) {
     await git(["-C", repoRoot, "stash", "pop"], repoRoot); // Worktree fehlgeschlagen → Stash zurück nach main
-    return { ok: false, error: `Worktree konnte nicht erstellt werden (Änderungen sind zurück im Main-Checkout): ${String(e)}` };
+    return { ok: false, error: `Worktree konnte nicht erstellt werden (Änderungen sind zurück im Main-Checkout): ${wt.error}` };
   }
+  const worktreePath = wt.path;
   const apply = await git(["-C", worktreePath, "stash", "apply", stashSha], worktreePath);
   const conflicted = apply.code !== 0 || /CONFLICT|Merge conflict/i.test(`${apply.stdout}\n${apply.stderr}`);
   if (!conflicted) await git(["-C", repoRoot, "stash", "drop", "stash@{0}"], repoRoot); // sauber → Stash weg
   // bei Konflikt: Stash BEWUSST behalten (Sicherheitsnetz), Konflikt wird auf dem Sub eskaliert
-  return { ok: true, conflicted };
+  return { ok: true, conflicted, worktreePath };
 }
 
 /** Lokale Commits, die noch nicht auf origin/<branch> liegen (für „PR aktuell halten"). */
