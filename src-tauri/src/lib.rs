@@ -129,6 +129,13 @@ fn start_remote_bridge(app: &tauri::App) {
         return;
     }
     let tee = app.state::<SidecarState>().tee();
+    // Command-Forward-Senke: eine validierte HostMessage roh auf den Sidecar-stdin schreiben.
+    // Kapselt SidecarState::send_line über einen (Send+Sync) AppHandle, damit bridge.rs
+    // Tauri-frei und testbar bleibt.
+    let app_handle = app.handle().clone();
+    let forward: bridge::CommandSink = std::sync::Arc::new(move |line: &str| {
+        app_handle.state::<SidecarState>().send_line(line)
+    });
     let cert_dir = app
         .path()
         .app_data_dir()
@@ -145,7 +152,7 @@ fn start_remote_bridge(app: &tauri::App) {
             }
         };
         rt.block_on(async move {
-            match bridge::start(tee, cert_dir, "mads".to_string()).await {
+            match bridge::start(tee, forward, cert_dir, "mads".to_string()).await {
                 Ok(b) => {
                     eprintln!("[mads:bridge] läuft auf Port {} (SPKI-fp {})", b.port, b.spki_fp_hex);
                     let _keep = b; // Handle im Scope halten → Accept-Task + mDNS bleiben aktiv

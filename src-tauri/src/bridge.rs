@@ -40,6 +40,60 @@ const HEARTBEAT: Duration = Duration::from_secs(15);
 
 type BridgeResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// Senke, die eine validierte HostMessage (kanonisches JSON) an den Sidecar-stdin schreibt.
+/// Injiziert von lib.rs (kapselt `SidecarState::send_line`), damit `bridge.rs` NICHT von Tauri
+/// abhängt und testbar bleibt.
+pub type CommandSink = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+/// Allowlist der bekannten HostMessage-`type`-Werte (shared/protocol.ts, HostMessage-Union). NUR
+/// diese werden an den Sidecar-stdin weitergereicht — ein unbekannter Typ wird verworfen. Der
+/// Rust-Core bleibt protokoll-dünn: er kennt nur die Typ-NAMEN (Allowlist), nicht deren Semantik.
+const HOST_MESSAGE_TYPES: &[&str] = &[
+    "open_project", "set_project", "poll_project", "start_agent", "send_input",
+    "answer_permission", "interrupt_agent", "set_permission_mode", "stop_agent",
+    "cleanup_worktree", "create_pr", "sync_branch", "gate_task", "integrate_pr",
+    "set_autonomy", "set_autopilot", "set_model_effort", "outsource_main", "update_main",
+    "start_devserver", "stop_devserver", "shutdown", "request_snapshot",
+];
+
+/// Permission-Modi, die ein Remote-Client NICHT setzen darf: sie würden Agent-Tool-Calls
+/// automatisch freigeben — RCE-äquivalent. Höchste Sicherheitspriorität
+/// (mads-remote/docs/architecture.md §6 P0 #1).
+const FORBIDDEN_PERMISSION_MODES: &[&str] = &["bypassPermissions", "dontAsk"];
+
+/// Validiert ein rohes WS-Text-Frame (Envelope) und gibt die KANONISCH re-serialisierte
+/// HostMessage (nur `msg`, ohne Envelope) zurück, die an den Sidecar-stdin geht. Fehler = Grund
+/// (der Frame wird verworfen). Kontrollen: (1) Kanal muss `command` sein; (2) `msg.type` in der
+/// Allowlist; (3) `permissionMode`/`mode` nicht in der Deny-Liste. Die Re-Serialisierung
+/// normalisiert das JSON — u. a. keine eingebetteten rohen Newlines → keine NDJSON-Injection
+/// (ein Frame == genau eine stdin-Zeile).
+fn validate_command(frame: &str) -> Result<String, String> {
+    let env: serde_json::Value = serde_json::from_str(frame).map_err(|_| "kein gültiges JSON".to_string())?;
+
+    let channel = env.get("channel").and_then(|c| c.as_str()).unwrap_or("");
+    if channel != "command" {
+        return Err(format!("Kanal '{channel}' nicht erlaubt (nur 'command' geht an stdin)"));
+    }
+
+    let msg = env.get("msg").ok_or("Envelope ohne 'msg'")?;
+    let ty = msg.get("type").and_then(|t| t.as_str()).ok_or("msg ohne 'type'")?;
+    if !HOST_MESSAGE_TYPES.contains(&ty) {
+        return Err(format!("unbekannter HostMessage-Typ '{ty}'"));
+    }
+
+    // permissionMode (start_agent) bzw. mode (set_permission_mode) gegen die Deny-Liste prüfen.
+    for field in ["permissionMode", "mode"] {
+        if let Some(v) = msg.get(field).and_then(|v| v.as_str()) {
+            if FORBIDDEN_PERMISSION_MODES.contains(&v) {
+                return Err(format!("permissionMode '{v}' von Remote nicht erlaubt (RCE-Schutz)"));
+            }
+        }
+    }
+
+    // Kanonisch re-serialisieren (nur die HostMessage) → normalisiert, kein Newline-Smuggling.
+    serde_json::to_string(msg).map_err(|e| e.to_string())
+}
+
 /// Ein laufender Bridge-Dienst. Solange dieser Handle lebt, laufen Accept-Loop und
 /// mDNS-Registrierung; beim Drop werden der Accept-Task abgebrochen und der mDNS-Daemon
 /// heruntergefahren (best effort).
@@ -61,12 +115,12 @@ impl Drop for Bridge {
 /// Bridge starten: Zert laden/erzeugen (persistiert → stabiler Pin über Neustarts), TCP auf einem
 /// ephemeren Port binden (Multi-Instanz-freundlich), mDNS advertisen, Accept-Loop spawnen.
 /// `tee` = Sender des Sidecar-stdout-Broadcasts; pro Client wird `tee.subscribe()` aufgerufen.
-pub async fn start(tee: broadcast::Sender<String>, cert_dir: PathBuf, project: String) -> BridgeResult<Bridge> {
+pub async fn start(tee: broadcast::Sender<String>, forward: CommandSink, cert_dir: PathBuf, project: String) -> BridgeResult<Bridge> {
     let cert = load_or_generate_cert(&cert_dir)?;
     let spki_fp_hex = hex_lower(&cert.spki_fp);
     let tls_config = make_server_config(cert.cert_der, cert.key_der)?;
 
-    let (port, accept) = bind_and_serve(tls_config, tee).await?;
+    let (port, accept) = bind_and_serve(tls_config, tee, forward).await?;
     let mdns = advertise(port, &spki_fp_hex, &project)?;
 
     Ok(Bridge { port, spki_fp_hex, accept, mdns })
@@ -75,11 +129,11 @@ pub async fn start(tee: broadcast::Sender<String>, cert_dir: PathBuf, project: S
 /// Testbarer Kern OHNE mDNS: auf allen Interfaces binden (der iPad im LAN muss uns erreichen;
 /// ephemerer Port = Multi-Instanz-freundlich), Accept-Loop spawnen. Gibt (Port, Accept-Handle)
 /// zurück.
-async fn bind_and_serve(tls_config: Arc<ServerConfig>, tee: broadcast::Sender<String>) -> BridgeResult<(u16, tokio::task::JoinHandle<()>)> {
+async fn bind_and_serve(tls_config: Arc<ServerConfig>, tee: broadcast::Sender<String>, forward: CommandSink) -> BridgeResult<(u16, tokio::task::JoinHandle<()>)> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     let port = listener.local_addr()?.port();
     let acceptor = TlsAcceptor::from(tls_config);
-    let accept = tokio::spawn(accept_loop(listener, acceptor, tee));
+    let accept = tokio::spawn(accept_loop(listener, acceptor, tee, forward));
     Ok((port, accept))
 }
 
@@ -186,7 +240,7 @@ fn advertise(port: u16, fp_hex: &str, project: &str) -> BridgeResult<mdns_sd::Se
 
 // ─────────────────────────────────────────────────────────────── Accept-Loop
 
-async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcast::Sender<String>) {
+async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcast::Sender<String>, forward: CommandSink) {
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -198,8 +252,9 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcas
         // Subscription VOR dem Handshake ziehen: gepufferte Zeilen gehen dem Client so nicht verloren.
         let rx = tee.subscribe();
         let acceptor = acceptor.clone();
+        let forward = forward.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(tcp, acceptor, rx).await {
+            if let Err(e) = handle_conn(tcp, acceptor, rx, forward).await {
                 eprintln!("[mads:bridge] Verbindung {peer} beendet: {e}");
             }
         });
@@ -207,9 +262,13 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcas
 }
 
 /// Eine Client-Verbindung: TLS-Accept → WSS-Handshake (mit Anti-CSWSH-Origin-Check) → roher
-/// stdout-Tee an den Client + Heartbeat. P0.2 ist read-only: Client→Server-Frames werden verworfen
-/// (Command-Forward kommt in P0.3), Close/Fehler beenden die Schleife.
-async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::Receiver<String>) -> BridgeResult<()> {
+/// stdout-Tee an den Client + Heartbeat, und (P0.3) Command-Forward: Text-Frames werden gegen
+/// `validate_command` geprüft und die kanonische HostMessage an den Sidecar-stdin gereicht.
+/// Abgelehnte/ungültige Frames werden verworfen (stderr-Log) — NICHT weitergereicht.
+///
+/// P0.3 hat NOCH keine Auth (kommt P1.2, hinter dem MADS_REMOTE_BRIDGE-Gate); ein verbundener
+/// Client darf also bereits Befehle senden — außer den per Deny-Liste gesperrten permissionMode.
+async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::Receiver<String>, forward: CommandSink) -> BridgeResult<()> {
     let tls = acceptor.accept(tcp).await?;
 
     // Anti-CSWSH: ein nativer Client sendet KEINEN Origin-Header; ein Browser schon → ablehnen.
@@ -241,8 +300,16 @@ async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::R
             },
             _ = heartbeat.tick() => sink.send(Message::Ping(Vec::<u8>::new().into())).await?,
             incoming = source.next() => match incoming {
+                Some(Ok(Message::Text(t))) => match validate_command(t.as_str()) {
+                    Ok(line) => {
+                        if let Err(e) = forward(&line) {
+                            eprintln!("[mads:bridge] Forward an Sidecar fehlgeschlagen: {e}");
+                        }
+                    }
+                    Err(reason) => eprintln!("[mads:bridge] Command abgelehnt: {reason}"),
+                },
                 Some(Ok(Message::Close(_))) | None => break,
-                Some(Ok(_)) => { /* P0.2 read-only: ignorieren (P0.3 forwarded HostMessages) */ }
+                Some(Ok(_)) => { /* Ping/Pong/Binary: in P0.3 ignorieren (Binär-Frames erst OE-R6) */ }
                 Some(Err(e)) => return Err(e.into()),
             },
         }
@@ -297,6 +364,7 @@ mod tests {
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::{DigitallySignedStruct, SignatureScheme};
     use rustls_pki_types::{ServerName, UnixTime};
+    use tokio_rustls::TlsConnector as TlsConnectorClient;
 
     /// TEST-ONLY: akzeptiert jedes Server-Zert (wir testen den Transport, nicht das Pinning —
     /// das SPKI-Pinning lebt im iOS-Client). NIEMALS in Produktion.
@@ -304,14 +372,7 @@ mod tests {
     struct AcceptAnyServerCert(Arc<rustls::crypto::CryptoProvider>);
 
     impl ServerCertVerifier for AcceptAnyServerCert {
-        fn verify_server_cert(
-            &self,
-            _end_entity: &CertificateDer<'_>,
-            _intermediates: &[CertificateDer<'_>],
-            _server_name: &ServerName<'_>,
-            _ocsp: &[u8],
-            _now: UnixTime,
-        ) -> Result<ServerCertVerified, rustls::Error> {
+        fn verify_server_cert(&self, _e: &CertificateDer<'_>, _i: &[CertificateDer<'_>], _s: &ServerName<'_>, _o: &[u8], _n: UnixTime) -> Result<ServerCertVerified, rustls::Error> {
             Ok(ServerCertVerified::assertion())
         }
         fn verify_tls12_signature(&self, _m: &[u8], _c: &CertificateDer<'_>, _d: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
@@ -325,36 +386,46 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn tee_reaches_tls_ws_client() {
-        // Hermetisch: frisches Zert erzeugen + bind_and_serve (KEIN mDNS — Multicast ist in
-        // Sandboxes oft gesperrt und für diesen Transport-Test irrelevant).
-        let (cert_der_bytes, key_pkcs8, fp) = generate_cert().expect("cert gen");
-        assert_eq!(fp.len(), 32);
-        let cfg = make_server_config(
+    /// Hermetische Test-Server-Config aus einem frischen Zert (kein mDNS — Multicast ist in
+    /// Sandboxes oft gesperrt und für die Transport-/Command-Tests irrelevant).
+    fn test_config() -> Arc<ServerConfig> {
+        let (cert_der_bytes, key_pkcs8, _fp) = generate_cert().expect("cert gen");
+        make_server_config(
             CertificateDer::from(cert_der_bytes),
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pkcs8)),
         )
-        .expect("server config");
+        .expect("server config")
+    }
 
-        let (tee, _keep) = broadcast::channel::<String>(64);
-        let (port, accept) = bind_and_serve(cfg, tee.clone()).await.expect("bind_and_serve");
+    /// Command-Senke, die Forwards verwirft.
+    fn noop_sink() -> CommandSink {
+        Arc::new(|_line: &str| Ok(()))
+    }
 
-        // --- TLS-1.3-WSS-Client (skip-verify, test-only) ---
+    /// TLS-1.3-WSS-Client zur Bridge (skip-verify, test-only).
+    async fn connect_ws_client(port: u16) -> tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>> {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let client_config = rustls::ClientConfig::builder_with_protocol_versions(&[&TLS13])
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert(provider)))
             .with_no_client_auth();
         let connector = TlsConnectorClient::from(Arc::new(client_config));
-
         let tcp = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await.expect("tcp connect");
         let server_name = ServerName::try_from("localhost").unwrap();
         let tls = connector.connect(server_name, tcp).await.expect("tls handshake");
         let (ws, _resp) = tokio_tungstenite::client_async("wss://localhost/", tls).await.expect("ws handshake");
+        ws
+    }
+
+    /// P0.2: der stdout-Tee erreicht einen TLS-WSS-Client end-to-end (Zert + Handshake + Broadcast).
+    #[tokio::test]
+    async fn tee_reaches_tls_ws_client() {
+        let (tee, _keep) = broadcast::channel::<String>(64);
+        let (port, accept) = bind_and_serve(test_config(), tee.clone(), noop_sink()).await.expect("bind_and_serve");
+
+        let ws = connect_ws_client(port).await;
         let (mut _sink, mut source) = ws.split();
 
-        // Eine Zeile in den Tee schieben — muss roh beim Client ankommen.
         let payload = r#"{"v":1,"type":"agent_event","hello":42}"#;
         tee.send(payload.to_string()).expect("tee send");
 
@@ -367,24 +438,98 @@ mod tests {
             Message::Text(t) => assert_eq!(t.as_str(), payload),
             other => panic!("unerwartete Nachricht: {other:?}"),
         }
+        accept.abort();
+    }
+
+    /// P0.3: ein gültiges `command` wird an die stdin-Senke geforwardet; ein `bypassPermissions`-
+    /// start_agent wird ÜBERSPRUNGEN (RCE-Schutz). Deterministisch: Frames werden in Reihenfolge
+    /// verarbeitet, also muss der nächste Forward NACH dem bypass das FOLGENDE gültige Command sein.
+    #[tokio::test]
+    async fn command_forwards_but_bypass_permissions_is_blocked() {
+        let (tee, _keep) = broadcast::channel::<String>(64);
+        let (fwd_tx, mut fwd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let forward: CommandSink = Arc::new(move |line: &str| fwd_tx.send(line.to_string()).map_err(|e| e.to_string()));
+        let (port, accept) = bind_and_serve(test_config(), tee, forward).await.expect("bind_and_serve");
+
+        let ws = connect_ws_client(port).await;
+        let (mut sink, mut _source) = ws.split();
+
+        // (1) gültiges Command → wird geforwardet, kanonisch, OHNE Envelope.
+        sink.send(Message::text(r#"{"v":1,"id":"a","ts":0,"channel":"command","msg":{"type":"poll_project"}}"#)).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(5), fwd_rx.recv()).await.expect("timeout").expect("sender offen");
+        assert!(first.contains(r#""type":"poll_project""#), "geforwardet: {first}");
+        assert!(!first.contains("channel"), "nur die HostMessage, nicht der Envelope: {first}");
+
+        // (2) bypassPermissions (muss übersprungen werden) gefolgt von (3) gültigem Command.
+        sink.send(Message::text(r#"{"channel":"command","msg":{"type":"start_agent","agentId":"x","prompt":"p","permissionMode":"bypassPermissions"}}"#)).await.unwrap();
+        sink.send(Message::text(r#"{"channel":"command","msg":{"type":"interrupt_agent","agentId":"z9"}}"#)).await.unwrap();
+
+        // Der nächste (und einzige) Forward MUSS (3) sein — (2) wurde verworfen.
+        let next = tokio::time::timeout(Duration::from_secs(5), fwd_rx.recv()).await.expect("timeout").expect("sender offen");
+        assert!(next.contains("interrupt_agent") && next.contains("z9"), "nächster Forward ist (3): {next}");
+        assert!(!next.contains("bypassPermissions"), "bypassPermissions durfte nicht an stdin");
 
         accept.abort();
     }
 
-    // Alias, um den Client-Connector klar vom Server-`TlsAcceptor` zu trennen.
-    use tokio_rustls::TlsConnector as TlsConnectorClient;
+    #[test]
+    fn validate_accepts_known_command() {
+        let f = r#"{"v":1,"id":"x","ts":0,"channel":"command","msg":{"type":"poll_project"}}"#;
+        let out = validate_command(f).expect("gültig");
+        assert!(out.contains(r#""type":"poll_project""#));
+        assert!(!out.contains("channel")); // Envelope entfernt
+    }
+
+    #[test]
+    fn validate_rejects_unknown_type() {
+        assert!(validate_command(r#"{"channel":"command","msg":{"type":"rm_rf"}}"#).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_command_channel() {
+        // Ein Client darf keine `event`/`snapshot`-Frames an den stdin schmuggeln.
+        assert!(validate_command(r#"{"channel":"event","msg":{"type":"poll_project"}}"#).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_bypass_permissions() {
+        let f = r#"{"channel":"command","msg":{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":"bypassPermissions"}}"#;
+        assert!(validate_command(f).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_dont_ask_mode() {
+        let f = r#"{"channel":"command","msg":{"type":"set_permission_mode","agentId":"a","mode":"dontAsk"}}"#;
+        assert!(validate_command(f).is_err());
+    }
+
+    #[test]
+    fn validate_allows_safe_permission_mode() {
+        let f = r#"{"channel":"command","msg":{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":"default"}}"#;
+        assert!(validate_command(f).is_ok());
+    }
+
+    #[test]
+    fn validate_normalizes_away_raw_newline() {
+        // Eingebettetes Newline in einem String-Feld darf NICHT als rohe Zeile in stdin landen
+        // (NDJSON-Injection) — kanonisches JSON escaped es zu \n.
+        let f = "{\"channel\":\"command\",\"msg\":{\"type\":\"send_input\",\"agentId\":\"a\",\"text\":\"a\\nb\"}}";
+        let out = validate_command(f).expect("gültig");
+        assert!(!out.contains('\n'), "kanonisch: kein rohes Newline");
+    }
+
+    #[test]
+    fn validate_rejects_malformed_json() {
+        assert!(validate_command("nicht json").is_err());
+    }
 
     /// mDNS-Advertise startet ohne Fehler und registriert den Service. Multicast ist in manchen
     /// CI-/Sandbox-Umgebungen gesperrt → toleriert einen `ServiceDaemon`-Fehler, statt hart zu failen.
     #[tokio::test]
     async fn advertise_starts_or_is_sandboxed() {
         match advertise(12345, "deadbeef".repeat(8).as_str(), "test") {
-            Ok(daemon) => {
-                let _ = daemon.shutdown();
-            }
-            Err(e) => {
-                eprintln!("[test] mDNS in dieser Umgebung nicht verfügbar (ok in Sandbox): {e}");
-            }
+            Ok(daemon) => { let _ = daemon.shutdown(); }
+            Err(e) => eprintln!("[test] mDNS in dieser Umgebung nicht verfügbar (ok in Sandbox): {e}"),
         }
     }
 }
