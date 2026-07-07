@@ -13,7 +13,7 @@
 import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
 import { createWorktree, removeWorktree } from "./git.js";
-import { classifyToolCall, isGitCommit } from "../../shared/safe-command.js";
+import { classifyToolCall, isGitCommit, registrableDomain, rememberableFetchDomain } from "../../shared/safe-command.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
@@ -56,6 +56,7 @@ interface PendingPermission {
   resolve: (r: PermissionResult) => void;
   suggestions?: unknown[]; // Regel-Vorschläge von Claude Code (für „Immer erlauben")
   input?: Record<string, unknown>; // ursprünglicher Tool-Input — als updatedInput zurückgeben
+  toolName?: string; // für „Immer erlauben" domänenweit bei WebFetch (approvedFetchHosts)
 }
 
 interface SdkUserMessage {
@@ -169,6 +170,9 @@ export class AgentSession {
 
   private readonly inbox = new AsyncQueue<SdkUserMessage>();
   private readonly pending = new Map<string, PendingPermission>();
+  // Vom Nutzer per „Immer erlauben" freigegebene WebFetch-Domains (registrierbare Domain, z. B.
+  // „sec.gov") → weitere Seiten dort laufen ohne Rückfrage. Pro Stream, in-memory.
+  private readonly approvedFetchHosts = new Set<string>();
   private q?: QueryHandle;
   private readonly onChange?: () => void;
 
@@ -399,7 +403,10 @@ export class AgentSession {
     // Auto-Modus: harmlose (lesende + datei-ändernde) Aktionen ohne Rückfrage erlauben;
     // außen-sichtbare/destruktive Aktionen kommen mit klarem Grund zur Bestätigung.
     if (this.permissionMode === "auto" && toolName !== "AskUserQuestion") {
-      const verdict = classifyToolCall(toolName, input, { cwd: this.cwd });
+      const verdict = classifyToolCall(toolName, input, {
+        cwd: this.cwd,
+        isFetchHostApproved: (h) => this.approvedFetchHosts.has(registrableDomain(h)),
+      });
       if (verdict.decision === "allow") {
         // updatedInput ist im CLI-Schema PFLICHT (Record) — sonst ZodError. Ursprünglichen
         // Input zurückgeben.
@@ -418,7 +425,7 @@ export class AgentSession {
   ): Promise<PermissionResult> {
     return new Promise<PermissionResult>((resolve) => {
       const requestId = randomUUID();
-      this.pending.set(requestId, { resolve, suggestions: opts.suggestions as unknown[] | undefined, input });
+      this.pending.set(requestId, { resolve, suggestions: opts.suggestions as unknown[] | undefined, input, toolName });
       const isAsk = toolName === "AskUserQuestion";
       this.emit({
         ...envelope(),
@@ -444,8 +451,17 @@ export class AgentSession {
       return;
     }
     this.pending.delete(requestId);
-    const { resolve, suggestions, input } = entry;
+    const { resolve, suggestions, input, toolName } = entry;
     if (decision.behavior === "allow") {
+      // „Immer erlauben" bei WebFetch → die ganze DOMAIN dieses Streams merken (nicht die einzelne
+      // URL) → weitere Seiten dort ohne Rückfrage. SSRF/privat/Creds sind ausgeschlossen (null).
+      if (decision.remember && toolName === "WebFetch") {
+        const dom = rememberableFetchDomain(String(input?.url ?? ""));
+        if (dom) {
+          this.approvedFetchHosts.add(dom);
+          log(`[${this.agentId}] WebFetch-Domain gemerkt: ${dom}`);
+        }
+      }
       resolve({
         behavior: "allow",
         // updatedInput ist im CLI-Schema PFLICHT — Original-Input (oder geänderten) zurückgeben.

