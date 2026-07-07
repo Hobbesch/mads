@@ -1,3 +1,4 @@
+mod auth;
 mod bridge;
 mod dictation;
 mod files;
@@ -105,7 +106,11 @@ pub fn run() {
             whisper_download_model,
             dictation_start,
             dictation_stop,
-            dictation_cancel
+            dictation_cancel,
+            remote_bridge_status,
+            remote_bridge_issue_pin,
+            remote_bridge_list_devices,
+            remote_bridge_revoke_device
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -118,30 +123,43 @@ pub fn run() {
         });
 }
 
-/// Remote-Bridge (docs/design/remote-companion-app.md) auf einem EIGENEN Thread mit eigener
-/// tokio-Runtime starten — entkoppelt vom Tauri-Runtime, garantiert den IO-Reactor für den
-/// WSS-Server. Gegated hinter `MADS_REMOTE_BRIDGE=1`: Stand P0.2 ist noch AUTH-LOS (Pairing kommt
-/// in P1.2), darf also nicht versehentlich laufen. Der stdout-Tee ist immer aktiv, aber ohne
-/// laufende Bridge ohne Empfänger (kein Overhead).
+/// Remote-Bridge (docs/design/remote-companion-app.md) einrichten: Auth-DB IMMER öffnen + als
+/// `RemoteBridgeState` managen (die Pairing-Commands brauchen sie), und — nur hinter
+/// `MADS_REMOTE_BRIDGE=1` — den WSS/mDNS-Server auf einem EIGENEN Thread mit eigener tokio-Runtime
+/// starten (entkoppelt vom Tauri-Runtime, garantiert den IO-Reactor). Der stdout-Tee ist immer aktiv,
+/// aber ohne laufende Bridge ohne Empfänger (kein Overhead).
 fn start_remote_bridge(app: &tauri::App) {
     use tauri::Manager;
-    if std::env::var("MADS_REMOTE_BRIDGE").as_deref() != Ok("1") {
-        return;
-    }
-    let tee = app.state::<SidecarState>().tee();
-    // Command-Forward-Senke: eine validierte HostMessage roh auf den Sidecar-stdin schreiben.
-    // Kapselt SidecarState::send_line über einen (Send+Sync) AppHandle, damit bridge.rs
-    // Tauri-frei und testbar bleibt.
-    let app_handle = app.handle().clone();
-    let forward: bridge::CommandSink = std::sync::Arc::new(move |line: &str| {
-        app_handle.state::<SidecarState>().send_line(line)
-    });
-    let cert_dir = app
+
+    let data_dir = app
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
         .join("mads")
         .join("remote-bridge");
+
+    // Auth-DB immer öffnen (Pairing-Commands brauchen sie, auch bevor die Bridge läuft).
+    let auth = match auth::AuthState::open(&data_dir.join("devices.sqlite")) {
+        Ok(a) => std::sync::Arc::new(a),
+        Err(e) => {
+            eprintln!("[mads:bridge] Auth-DB konnte nicht geöffnet werden: {e}");
+            return;
+        }
+    };
+    app.manage(bridge::RemoteBridgeState::new(auth.clone()));
+
+    if std::env::var("MADS_REMOTE_BRIDGE").as_deref() != Ok("1") {
+        return; // WSS/mDNS gegated; die Auth-State ist trotzdem gemanagt.
+    }
+
+    let tee = app.state::<SidecarState>().tee();
+    let app_handle = app.handle().clone();
+    // Command-Forward-Senke: validierte HostMessage roh auf den Sidecar-stdin (kapselt send_line
+    // über einen Send+Sync-AppHandle → bridge.rs bleibt Tauri-frei/testbar).
+    let forward: bridge::CommandSink = {
+        let ah = app_handle.clone();
+        std::sync::Arc::new(move |line: &str| ah.state::<SidecarState>().send_line(line))
+    };
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -152,9 +170,10 @@ fn start_remote_bridge(app: &tauri::App) {
             }
         };
         rt.block_on(async move {
-            match bridge::start(tee, forward, cert_dir, "mads".to_string()).await {
+            match bridge::start(tee, forward, auth, data_dir, "mads".to_string()).await {
                 Ok(b) => {
                     eprintln!("[mads:bridge] läuft auf Port {} (SPKI-fp {})", b.port, b.spki_fp_hex);
+                    app_handle.state::<bridge::RemoteBridgeState>().set_info(b.port, b.spki_fp_hex.clone());
                     let _keep = b; // Handle im Scope halten → Accept-Task + mDNS bleiben aktiv
                     futures_util::future::pending::<()>().await; // Thread/Runtime am Leben halten
                 }
@@ -162,6 +181,34 @@ fn start_remote_bridge(app: &tauri::App) {
             }
         });
     });
+}
+
+// ── Pairing-/Geräte-Commands (Frontend → Rust) für das mads-Pairing-Panel ──────────────────────
+
+#[tauri::command]
+fn remote_bridge_status(state: tauri::State<'_, bridge::RemoteBridgeState>) -> serde_json::Value {
+    match state.info.lock().unwrap().as_ref() {
+        Some(i) => serde_json::json!({ "running": true, "port": i.port, "spkiFp": i.spki_fp_hex }),
+        None => serde_json::json!({ "running": false }),
+    }
+}
+
+#[tauri::command]
+fn remote_bridge_issue_pin(state: tauri::State<'_, bridge::RemoteBridgeState>) -> Result<serde_json::Value, String> {
+    let pin = state.auth.issue_pin();
+    let fp = state.info.lock().unwrap().as_ref().map(|i| i.spki_fp_hex.clone()).unwrap_or_default();
+    let qr = bridge::pairing_qr_svg(&fp, &pin)?;
+    Ok(serde_json::json!({ "pin": pin, "qrSvg": qr }))
+}
+
+#[tauri::command]
+fn remote_bridge_list_devices(state: tauri::State<'_, bridge::RemoteBridgeState>) -> Result<Vec<auth::DeviceInfo>, String> {
+    state.auth.list_devices()
+}
+
+#[tauri::command]
+fn remote_bridge_revoke_device(state: tauri::State<'_, bridge::RemoteBridgeState>, id: String) -> Result<(), String> {
+    state.auth.revoke_device(&id)
 }
 
 /// Startet eine ZWEITE mads-Instanz (eigener Prozess → eigener Sidecar) via `open -n`, damit man
