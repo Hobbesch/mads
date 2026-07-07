@@ -336,9 +336,48 @@ export class Orchestrator {
         process.exit(0);
         break;
 
+      case "request_snapshot":
+        // [Remote-Bridge] Ist-Zustand für einen (später) verbindenden Client re-emittieren (§4.3).
+        this.emitSnapshot();
+        break;
+
       default:
         log("[orchestrator] unbekannter HostMessage-Typ", JSON.stringify(msg));
     }
+  }
+
+  /**
+   * Re-Emit des aktuellen Ist-Zustands für einen (später) verbindenden Remote-Client
+   * (docs/design/remote-companion-app.md §4.3). Sendet KEINE neuen Fakten, sondern re-emittiert
+   * gecachten State über exakt die Nachrichten, die der zustand-Store ohnehin verarbeitet, und
+   * schiebt ein frisches `pollAll()` (Live-git/PR) asynchron nach — der Snapshot blockiert nicht.
+   *
+   * Hinweis: stdout ist geteilt — die (idempotenten) State-Updates sehen auch das lokale Frontend
+   * und andere Clients. Das ist harmlos (der Reducer ist für diese Nachrichten idempotent).
+   *
+   * Bewusst (noch) NICHT enthalten: `gate_result` (nirgends gecacht — ein Re-Run wäre ein
+   * Seiteneffekt), `devserver_log`-Historie, `resumable_agents`/`reconcile_summary` (kommen aus
+   * `offerResumable`, das Reconciliation-Seiteneffekte hätte). Kommen in einem späteren Hardening-Pass.
+   */
+  private emitSnapshot(): void {
+    if (this.project) this.emit({ ...envelope(), type: "project_resolved", project: this.project });
+    for (const s of this.pool.values()) {
+      this.emit({ ...envelope(), type: "status_update", agentId: s.agentId, status: s.status });
+      this.emit({
+        ...envelope(),
+        type: "cost_update",
+        agentId: s.agentId,
+        totalCostUsd: s.costUsd,
+        numTurns: s.numTurns,
+        inputTokens: s.inputTokens,
+        outputTokens: s.outputTokens,
+      });
+      const gs = this.gitState.get(s.agentId);
+      if (gs) this.emitGitStatus(s.agentId, gs);
+      if (s.lastPr) this.emit({ ...envelope(), type: "pr_update", agentId: s.agentId, pr: s.lastPr });
+    }
+    // Live-Refresh (git/PR) asynchron nachschieben — blockiert den Snapshot nicht.
+    void this.pollAll();
   }
 
   // ---------------------------------------------------------------- GitHub

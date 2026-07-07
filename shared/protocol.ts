@@ -68,6 +68,7 @@ export type HostMessage =
   | UpdateMainMsg
   | StartDevServerMsg
   | StopDevServerMsg
+  | RequestSnapshotMsg
   | ShutdownMsg;
 
 /**
@@ -208,6 +209,18 @@ export interface OutsourceMainMsg extends BaseMsg {
 
 export interface PollProjectMsg extends BaseMsg {
   type: "poll_project"; // git-/PR-Status aller Agenten jetzt aktualisieren
+}
+
+/**
+ * [Remote-Bridge] Ein (später) verbindender Remote-Client fordert den aktuellen Ist-Zustand an
+ * (docs/design/remote-companion-app.md §4.3). Der Orchestrator re-emittiert gecachten State über
+ * exakt die Nachrichten, die der Store ohnehin verarbeitet — `project_resolved`, je Agent
+ * `status_update` + `cost_update` + (gecachtes) `git_status` + `pr_update` — und schiebt einen
+ * frischen Poll für Live-git/PR nach. Sendet KEINE neuen Fakten: reiner Re-Emit, damit ein
+ * Late-Joiner denselben Reducer aufbaut wie das lokale Frontend.
+ */
+export interface RequestSnapshotMsg extends BaseMsg {
+  type: "request_snapshot";
 }
 
 export interface SendInputMsg extends BaseMsg {
