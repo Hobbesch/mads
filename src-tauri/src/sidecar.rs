@@ -17,11 +17,30 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::ipc::Channel;
+use tokio::sync::broadcast;
 
-#[derive(Default)]
+/// Kapazität des stdout-Tee-Ringpuffers (Zeilen). Großzügig, damit kurze Bursts
+/// (z. B. Dev-Server-Logs) einen langsamen WSS-Client nicht sofort „laggen" lassen.
+const TEE_CAPACITY: usize = 4096;
+
 pub struct SidecarState {
     child: Mutex<Option<Child>>,
     stdin: Mutex<Option<ChildStdin>>,
+    /// Tee des Sidecar-stdout an die Remote-Bridge: jede rohe NDJSON-Zeile wird zusätzlich
+    /// zum Frontend-Channel hier gebroadcastet (docs/design/remote-companion-app.md §4.2 #3).
+    /// Ein Sender ohne Empfänger verwirft still (Bridge nicht verbunden → kein Overhead).
+    tee_tx: broadcast::Sender<String>,
+}
+
+impl Default for SidecarState {
+    fn default() -> Self {
+        let (tee_tx, _rx) = broadcast::channel(TEE_CAPACITY);
+        Self {
+            child: Mutex::new(None),
+            stdin: Mutex::new(None),
+            tee_tx,
+        }
+    }
 }
 
 impl SidecarState {
@@ -34,6 +53,24 @@ impl SidecarState {
                 let _ = child.wait();
             }
         }
+    }
+
+    /// Sender-Klon des stdout-Tees. Genutzt vom stdout-Reader-Thread (publish) UND von der
+    /// Remote-Bridge, die pro WSS-Client `tee().subscribe()` aufruft.
+    pub(crate) fn tee(&self) -> broadcast::Sender<String> {
+        self.tee_tx.clone()
+    }
+
+    /// Eine HostMessage (bereits JSON) roh auf den Sidecar-stdin schreiben. Genutzt vom lokalen
+    /// `sidecar_send`-Command UND (künftig) von der Remote-Bridge fürs Command-Forwarding — ein
+    /// Remote-Befehl == ein lokaler Befehl (docs/design/remote-companion-app.md §4.2 #4).
+    pub fn send_line(&self, line: &str) -> Result<(), String> {
+        let mut guard = self.stdin.lock().map_err(|_| "stdin-Lock vergiftet")?;
+        let stdin = guard.as_mut().ok_or("Sidecar läuft nicht")?;
+        stdin.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        stdin.write_all(b"\n").map_err(|e| e.to_string())?;
+        stdin.flush().map_err(|e| e.to_string())?;
+        Ok(())
     }
 }
 
@@ -115,13 +152,17 @@ pub fn start_sidecar(
     let stderr = child.stderr.take().ok_or("kein stderr-Handle")?;
     let stdin = child.stdin.take().ok_or("kein stdin-Handle")?;
 
-    // stdout-Reader: NDJSON-Zeilen -> Line-Events; bei EOF -> Exit.
+    // stdout-Reader: NDJSON-Zeilen -> Line-Events (Frontend) UND -> Tee (Remote-Bridge);
+    // bei EOF -> Exit. Der Tee ist ein roher Durchlass (kein Parsen), exakt wie das
+    // Frontend-Relay — dieselbe Zeile geht an beide Konsumenten.
     let ch_out = on_event.clone();
+    let tee = state.tee();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             match line {
                 Ok(l) => {
+                    let _ = tee.send(l.clone()); // Err (kein Empfänger) ist ok = Bridge nicht verbunden
                     let _ = ch_out.send(SidecarChannelEvent::Line { line: l });
                 }
                 Err(_) => break,
@@ -147,12 +188,7 @@ pub fn start_sidecar(
 /// Schreibt eine HostMessage (bereits als JSON-String) auf den Sidecar-stdin.
 #[tauri::command]
 pub fn sidecar_send(state: tauri::State<'_, SidecarState>, line: String) -> Result<(), String> {
-    let mut guard = state.stdin.lock().unwrap();
-    let stdin = guard.as_mut().ok_or("Sidecar läuft nicht")?;
-    stdin.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
-    stdin.write_all(b"\n").map_err(|e| e.to_string())?;
-    stdin.flush().map_err(|e| e.to_string())?;
-    Ok(())
+    state.send_line(&line)
 }
 
 #[tauri::command]

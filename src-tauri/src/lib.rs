@@ -1,3 +1,4 @@
+mod bridge;
 mod dictation;
 mod files;
 mod sidecar;
@@ -78,6 +79,7 @@ pub fn run() {
         .manage(DictationState::default()) // Spracheingabe (Whisper)
         .setup(|app| {
             build_app_menu(app)?;
+            start_remote_bridge(app);
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -114,6 +116,45 @@ pub fn run() {
                 graceful_exit(app_handle);
             }
         });
+}
+
+/// Remote-Bridge (docs/design/remote-companion-app.md) auf einem EIGENEN Thread mit eigener
+/// tokio-Runtime starten — entkoppelt vom Tauri-Runtime, garantiert den IO-Reactor für den
+/// WSS-Server. Gegated hinter `MADS_REMOTE_BRIDGE=1`: Stand P0.2 ist noch AUTH-LOS (Pairing kommt
+/// in P1.2), darf also nicht versehentlich laufen. Der stdout-Tee ist immer aktiv, aber ohne
+/// laufende Bridge ohne Empfänger (kein Overhead).
+fn start_remote_bridge(app: &tauri::App) {
+    use tauri::Manager;
+    if std::env::var("MADS_REMOTE_BRIDGE").as_deref() != Ok("1") {
+        return;
+    }
+    let tee = app.state::<SidecarState>().tee();
+    let cert_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("mads")
+        .join("remote-bridge");
+
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("[mads:bridge] Runtime-Build fehlgeschlagen: {e}");
+                return;
+            }
+        };
+        rt.block_on(async move {
+            match bridge::start(tee, cert_dir, "mads".to_string()).await {
+                Ok(b) => {
+                    eprintln!("[mads:bridge] läuft auf Port {} (SPKI-fp {})", b.port, b.spki_fp_hex);
+                    let _keep = b; // Handle im Scope halten → Accept-Task + mDNS bleiben aktiv
+                    futures_util::future::pending::<()>().await; // Thread/Runtime am Leben halten
+                }
+                Err(e) => eprintln!("[mads:bridge] Start fehlgeschlagen: {e}"),
+            }
+        });
+    });
 }
 
 /// Startet eine ZWEITE mads-Instanz (eigener Prozess → eigener Sidecar) via `open -n`, damit man
