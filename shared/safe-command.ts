@@ -394,23 +394,118 @@ const TRUSTED_FETCH_SUFFIXES = [
   "developer.apple.com", "developer.android.com", "kubernetes.io", "docker.com",
   "anthropic.com", "claude.ai",
 ];
-/** Host aus einer http(s)-URL (ohne userinfo/Port, klein). */
-function fetchHost(url: string): string | null {
-  const m = /^https?:\/\/([^/?#]+)/i.exec(url.trim());
-  if (!m) return null;
-  return (m[1].split("@").pop() ?? m[1]).split(":")[0].toLowerCase();
-}
 function isTrustedFetchHost(host: string): boolean {
   return TRUSTED_FETCH_SUFFIXES.some((s) => host === s || host.endsWith("." + s));
 }
 
+/** http(s)-URL robust zerlegen. null = nicht interpretierbar. Host klein, ohne IPv6-Klammern. */
+function parseFetchUrl(url: string): { host: string; scheme: string; hasCreds: boolean; pathname: string; search: string } | null {
+  try {
+    const u = new URL(url.trim());
+    return {
+      host: u.hostname.toLowerCase().replace(/^\[|\]$/g, ""),
+      scheme: u.protocol.replace(/:$/, "").toLowerCase(),
+      hasCreds: u.username !== "" || u.password !== "",
+      pathname: u.pathname,
+      search: u.search,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * SSRF-Ziel? — internes/privates/Loopback/Cloud-Metadaten-Ziel. Solche Aufrufe MÜSSEN immer bestätigt
+ * werden (nie stillschweigend, nie domänenweit merkbar): sie können lokale Dienste oder Cloud-Metadaten
+ * (z. B. 169.254.169.254 → temporäre Cloud-Credentials) treffen. Deckt IPv4/IPv6-Literale + Namensmuster.
+ */
+function isPrivateOrSsrfHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/\.$/, ""); // FQDN-Wurzel-Punkt (localhost.) normalisieren
+  if (!h) return true; // kein Host → verdächtig
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".intranet") || h.endsWith(".lan") || h.endsWith(".home.arpa")) return true;
+  if (h === "metadata.google.internal") return true;
+  // IP-Obfuskationen, die curl/der Resolver trotzdem auflöst → als SSRF-Verdacht behandeln:
+  //  • Dezimal-Ganzzahl (2130706433 = 127.0.0.1), • Hex (0x7f000001) — kein legitimer Hostname ist so.
+  if (/^0x[0-9a-f]+$/.test(h) || /^\d+$/.test(h)) return true;
+  if (/^[0-9.]+$/.test(h)) {
+    // Nur ein SAUBERES öffentliches dotted-quad ist erlaubt; alles andere (Oktal-Leading-Zero wie
+    // 0177.0.0.1, Oktett > 255, ≠ 4 Oktette) ist obfuskiert/ungültig → Verdacht.
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (!v4) return true;
+    const oct = [v4[1], v4[2], v4[3], v4[4]];
+    if (oct.some((o) => +o > 255 || (o.length > 1 && o.startsWith("0")))) return true; // ungültig/oktal
+    const a = +oct[0], b = +oct[1];
+    if (a === 0 || a === 127 || a === 10) return true; // this-host, loopback, RFC1918 10/8
+    if (a === 169 && b === 254) return true; //           link-local INKL. 169.254.169.254 (Cloud-Metadata)
+    if (a === 192 && b === 168) return true; //           RFC1918 192.168/16
+    if (a === 172 && b >= 16 && b <= 31) return true; //  RFC1918 172.16/12
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
+    return false; // sonst öffentliches IPv4
+  }
+  if (h.includes(":")) {
+    // IPv6-Literal
+    if (h === "::1" || h === "::" || h === "0:0:0:0:0:0:0:1") return true; // loopback/unspecified
+    if (h.startsWith("fe80:") || h.startsWith("fc") || h.startsWith("fd")) return true; // link-local, ULA
+    const mapped = /::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h); // IPv4-mapped
+    if (mapped) return isPrivateOrSsrfHost(mapped[1]);
+    return false;
+  }
+  return false;
+}
+
+/** Sieht wie kodierte Daten aus (base64/hex/url-safe, ≥24, hohe Entropie, keine reine ID)? → Exfil-Verdacht. */
+function looksEncodedBlob(s: string): boolean {
+  if (s.length < 24) return false;
+  if (!/^[A-Za-z0-9+/=_-]+$/.test(s)) return false; // base64/hex/url-safe-Zeichensatz
+  if (/^[0-9]+$/.test(s)) return false; //             reine Ziffern = ID/Nummer, keine kodierten Daten
+  const freq: Record<string, number> = {};
+  for (const c of s) freq[c] = (freq[c] ?? 0) + 1;
+  let entropy = 0;
+  for (const c in freq) {
+    const p = freq[c] / s.length;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy >= 3.5; // hohe Zeichen-Entropie → wirkt zufällig/kodiert (nicht ein strukturierter Slug)
+}
+function pathHasEncodedBlob(pathname: string): boolean {
+  return pathname.split("/").some((seg) => looksEncodedBlob(seg));
+}
+
+// Mehrteilige Public-Suffixe, bei denen die registrierbare Domain 3 Labels braucht.
+const MULTIPART_TLDS = new Set([
+  "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk",
+  "com.au", "net.au", "org.au", "gov.au", "edu.au", "co.nz", "org.nz", "govt.nz",
+  "co.jp", "or.jp", "ne.jp", "go.jp", "com.br", "com.cn", "co.in", "co.za",
+]);
+/** „Registrierbare" Domain (eTLD+1, Heuristik) — Basis für domänenweites „Immer erlauben". */
+export function registrableDomain(host: string): string {
+  const parts = host.toLowerCase().split(".").filter(Boolean);
+  if (parts.length <= 2) return parts.join(".");
+  const lastTwo = parts.slice(-2).join(".");
+  if (MULTIPART_TLDS.has(lastTwo) && parts.length >= 3) return parts.slice(-3).join(".");
+  return lastTwo;
+}
+/**
+ * Für „Immer erlauben" bei WebFetch: die registrierbare Domain, die domänenweit gemerkt werden darf —
+ * ODER null, wenn die URL NICHT merk-fähig ist (SSRF/privat, Zugangsdaten, unlesbar, nicht-http). Solche
+ * dürfen nie domänenweit freigegeben werden (defense in depth zusätzlich zur Prüfung in classifyToolCall).
+ */
+export function rememberableFetchDomain(url: string): string | null {
+  const u = parseFetchUrl(url);
+  if (!u || u.hasCreds || (u.scheme !== "https" && u.scheme !== "http")) return null;
+  if (isPrivateOrSsrfHost(u.host)) return null;
+  return registrableDomain(u.host) || null;
+}
+
 /**
  * Zentrale Policy: darf dieser Tool-Aufruf im "Auto"-Modus ohne Rückfrage laufen?
+ * `ctx.isFetchHostApproved` (optional): der Nutzer hat diese Domain per „Immer erlauben" freigegeben.
  */
 export function classifyToolCall(
   toolName: string,
   input: Record<string, unknown> | undefined,
-  ctx: { cwd?: string } = {},
+  ctx: { cwd?: string; isFetchHostApproved?: (host: string) => boolean } = {},
 ): AutoDecision {
   if (toolName === "AskUserQuestion") return ASK("Rückfrage des Agenten");
   if (READ_TOOLS.has(toolName)) {
@@ -441,18 +536,30 @@ export function classifyToolCall(
     return ASK("startet neue Sub-Streams (eigener Worktree/Branch, Autopilot) — bewusst bestätigen");
   if (toolName.startsWith("mcp__mads__")) return ALLOW;
 
-  // WebFetch: GET + Zusammenfassung. Sanktionierter Netz-Kanal (Bash-curl/wget fragt ohnehin) —
-  // damit ist er die Umgehung, über die ein injizierter Agent Repo-Daten (base64/hex in der
-  // URL) an einen ANGREIFER-Host exfiltrieren könnte. Zwei Gates: (1) Secret-Muster in der URL,
-  // (2) Host-Allowlist — bekannte Doku-/Registry-Hosts laufen still, ALLES andere fragt.
+  // WebFetch: GET + Zusammenfassung. Sanktionierter Netz-Kanal — die zwei realen Gefahren sind
+  // EXFILTRATION (Daten IN der URL an einen Angreifer-Host) und SSRF (internes/Metadaten-Ziel).
+  // Ein reiner Lese-Aufruf trägt praktisch keine Daten nach aussen → wird erlaubt (kein nerviges
+  // per-URL-Nachfragen). Gefragt wird nur bei echtem Risiko-Signal; „Immer erlauben" merkt die
+  // ganze DOMAIN (nicht die einzelne URL). SSRF wird IMMER gefragt, nie gemerkt.
   if (toolName === "WebSearch") return ALLOW; // Suche → fester Provider, kein wählbarer Ziel-Host
   if (toolName === "WebFetch") {
     const url = String(input?.url ?? "");
+    const u = parseFetchUrl(url);
+    if (!u) return ASK("WebFetch: URL nicht interpretierbar — bewusst bestätigen");
+    if (u.scheme !== "https" && u.scheme !== "http") return ASK(`WebFetch: ungewöhnliches Schema „${u.scheme}“ — bewusst bestätigen`);
+    if (u.hasCreds) return ASK("WebFetch-URL enthält Zugangsdaten (user:pass@) — bewusst bestätigen");
+    if (isPrivateOrSsrfHost(u.host)) return ASK(`WebFetch auf internes/privates Ziel „${u.host}“ (SSRF) — bewusst bestätigen`);
     const hits = findSecrets(url);
     if (hits.length) return ASK(`WebFetch-URL enthält ein mögliches Secret (${hits[0].kind}) — Exfiltration verhindern`);
-    const host = fetchHost(url);
-    if (host && isTrustedFetchHost(host)) return ALLOW;
-    return ASK(`WebFetch auf nicht gelistete Domain „${host || "?"}“ — mögliche Datenexfiltration bestätigen`);
+    // Kuratierte ODER vom Nutzer per „Immer erlauben" freigegebene Domain → still (auch mit Query).
+    if (isTrustedFetchHost(u.host) || ctx.isFetchHostApproved?.(u.host)) return ALLOW;
+    // Unbekannter öffentlicher Host: datentragende URL = möglicher Exfil-Kanal → einmal je Domain
+    // bestätigen. Reiner Lese-Aufruf (keine Query, kein kodierter Pfad-Blob) → erlauben.
+    if (u.search && u.search !== "?")
+      return ASK(`WebFetch auf „${u.host}“ mit Query-Parametern — mögliche Exfiltration; „Immer erlauben“ merkt die ganze Domain`);
+    if (pathHasEncodedBlob(u.pathname))
+      return ASK(`WebFetch auf „${u.host}“ mit kodiert wirkendem Pfad-Segment — mögliche Exfiltration bestätigen`);
+    return ALLOW;
   }
 
   // Drittanbieter-MCP-Tools, Task, Unbekanntes → fragen.
