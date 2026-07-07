@@ -202,8 +202,18 @@ fn dispatch_file_rpc(op: &str, args: &serde_json::Value, conn_fs: &files::FsScop
             let fr = files::read_file_inner(conn_fs, arg("path")?)?;
             serde_json::to_value(fr).map_err(|e| e.to_string())
         }
-        "write_file" | "write_file_bytes" | "save_transcript" | "load_transcript" => {
-            Err(format!("file-rpc op '{op}' noch nicht implementiert (P3)"))
+        "write_file" => {
+            // Optimistic-Concurrency: base{MtimeMs,Size,Hash} werden mitgeschickt; write_file_inner
+            // liefert `saved{…}` oder `conflict`, wenn die Datei sich seit dem Laden geändert hat.
+            let content = args.get("content").and_then(|v| v.as_str()).ok_or("arg 'content' fehlt")?;
+            let base_mtime = args.get("baseMtimeMs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let base_size = args.get("baseSize").and_then(|v| v.as_u64()).unwrap_or(0);
+            let base_hash = args.get("baseHash").and_then(|v| v.as_str()).unwrap_or("");
+            let result = files::write_file_inner(conn_fs, arg("path")?, content, base_mtime, base_size, base_hash)?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "write_file_bytes" | "save_transcript" | "load_transcript" => {
+            Err(format!("file-rpc op '{op}' noch nicht implementiert (P3/P4)"))
         }
         other => Err(format!("unbekannte file-rpc op '{other}'")),
     }
@@ -791,6 +801,32 @@ mod tests {
         // (3) read_dir → jetzt in-scope, sieht Cargo.toml.
         let ls = file_rpc_reply(&serde_json::json!({"id":"2","op":"read_dir","args":{"path":root}}), &fs);
         assert!(ls.contains(r#""ok":true"#) && ls.contains("Cargo.toml"), "{ls}");
+    }
+
+    #[test]
+    fn file_rpc_write_file_saves_and_detects_conflict() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fname = format!(".p32-test-{}.md", std::process::id());
+        let path = dir.join(&fname);
+        let _ = std::fs::remove_file(&path);
+
+        let fs = files::FsScope::default();
+        let reg = file_rpc_reply(&serde_json::json!({"id":"1","op":"register_root","args":{"path": dir.to_string_lossy()}}), &fs);
+        assert!(reg.contains(r#""ok":true"#), "{reg}");
+
+        // Neue Datei (keine base) → saved.
+        let w = file_rpc_reply(&serde_json::json!({"id":"2","op":"write_file","args":{
+            "path": path.to_string_lossy(), "content": "# hallo", "baseMtimeMs": 0, "baseSize": 0, "baseHash": ""
+        }}), &fs);
+        assert!(w.contains(r#""ok":true"#) && w.contains(r#""kind":"saved""#), "{w}");
+
+        // Erneut mit FALSCHER base (Datei existiert jetzt) → conflict.
+        let c = file_rpc_reply(&serde_json::json!({"id":"3","op":"write_file","args":{
+            "path": path.to_string_lossy(), "content": "# anders", "baseMtimeMs": 1.0, "baseSize": 99, "baseHash": "wrong"
+        }}), &fs);
+        assert!(c.contains(r#""kind":"conflict""#), "{c}");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     /// mDNS-Advertise startet ohne Fehler und registriert den Service. Multicast ist in manchen

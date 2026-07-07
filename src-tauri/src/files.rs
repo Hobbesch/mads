@@ -345,8 +345,9 @@ pub fn mads_write_file(
     write_file_inner(&scope, &path, &content, base_mtime_ms, base_size, &base_hash)
 }
 
-/// Innere Schreib-Logik (free fn, ohne Tauri-`State`) — direkt unit-testbar (§9).
-fn write_file_inner(
+/// Innere Schreib-Logik (free fn, ohne Tauri-`State`) — direkt unit-testbar (§9) UND von der
+/// Remote-Bridge (file-rpc `write_file`, pro-Verbindungs-Scope) genutzt.
+pub(crate) fn write_file_inner(
     scope: &FsScope,
     path: &str,
     content: &str,
