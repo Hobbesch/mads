@@ -3,7 +3,8 @@
  * Liegt unter <repoRoot>/.mads/agents.json (via .mads/.gitignore selbst-ignoriert),
  * atomar geschrieben.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, renameSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import type { ResumableAgent } from "../../shared/protocol.js";
 
@@ -29,6 +30,90 @@ export function ensureMadsDir(repoRoot: string): void {
   mkdirSync(dir, { recursive: true });
   const gi = join(dir, ".gitignore");
   if (!existsSync(gi)) writeFileSync(gi, "*\n", "utf8");
+}
+
+// ─── Multi-Instanz-Projekt-Lock ──────────────────────────────────────────────
+// Jede mads-Instanz startet einen EIGENEN Sidecar. Öffneten zwei Instanzen dasselbe Projekt,
+// würden beide parallel `<repoRoot>/.mads/agents.json` + dieselben Worktrees schreiben → Korruption.
+// Ein pid-basierter Lock in `<repoRoot>/.mads/instance.lock` verhindert das. Crash-sicher: stirbt
+// eine Instanz, bleibt die Lock-Datei liegen, aber ihre pid ist tot → die nächste Instanz übernimmt.
+interface LockInfo {
+  pid: number;
+  startedAt: string;
+  host: string;
+}
+
+function lockPath(repoRoot: string): string {
+  return join(repoRoot, ".mads", "instance.lock");
+}
+
+/** Läuft der Prozess mit dieser pid noch? (EPERM = lebt, gehört nur anderem User; ESRCH = tot.) */
+export function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Projekt-Lock übernehmen. Erfolg, wenn frei / von uns / verwaist (tote pid). Andernfalls
+ * `{ ok:false, byPid }` — das Projekt ist in einer anderen, lebenden Instanz offen.
+ */
+export function acquireProjectLock(repoRoot: string, force = false): { ok: true } | { ok: false; byPid: number } {
+  ensureMadsDir(repoRoot);
+  const p = lockPath(repoRoot);
+  const mine = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), host: hostname() } satisfies LockInfo);
+  if (force) {
+    // Nutzer-Override: Lock ignorieren und übernehmen (haltende Instanz hängt/pid recycelt).
+    try {
+      writeFileSync(p, mine, "utf8");
+    } catch {
+      /* best effort */
+    }
+    return { ok: true };
+  }
+  // Der atomare O_EXCL-Create ("wx") ist der Schiedsrichter: existiert die Datei bereits, prüfen
+  // wir, ob eine ANDERE lebende Instanz auf DIESEM Host sie hält → ablehnen. Sonst (verwaist/uns/
+  // kaputt) wegräumen und atomar neu versuchen. So gewinnt bei zwei gleichzeitig öffnenden
+  // Instanzen genau EINE (statt dass beide eine nicht-atomare Überschreibung „gewinnen").
+  for (let i = 0; i < 8; i++) {
+    try {
+      writeFileSync(p, mine, { flag: "wx" });
+      return { ok: true };
+    } catch {
+      /* existiert bereits → prüfen */
+    }
+    let prev: LockInfo | null = null;
+    try {
+      prev = JSON.parse(readFileSync(p, "utf8")) as LockInfo;
+    } catch {
+      prev = null;
+    }
+    // Nur eine andere, lebende Instanz AUF DIESEM HOST hält gültig — pids sind host-lokal; eine
+    // fremder-Host- oder recycelte pid darf nicht dauerhaft aussperren (Notausgang: force).
+    if (prev && prev.pid !== process.pid && prev.host === hostname() && pidAlive(prev.pid)) {
+      return { ok: false, byPid: prev.pid };
+    }
+    try {
+      rmSync(p, { force: true }); // verwaist/uns → entfernen, dann atomar neu versuchen (Schleife)
+    } catch {
+      /* schon weg */
+    }
+  }
+  return { ok: true }; // nach mehreren Versuchen: best effort
+}
+
+/** Projekt-Lock freigeben — NUR, wenn er uns gehört (fremde/verwaiste nie löschen). */
+export function releaseProjectLock(repoRoot: string): void {
+  try {
+    const prev = JSON.parse(readFileSync(lockPath(repoRoot), "utf8")) as LockInfo;
+    if (prev.pid === process.pid) rmSync(lockPath(repoRoot), { force: true });
+  } catch {
+    /* keine/fremde Lock → nichts tun */
+  }
 }
 
 export function loadRegistry(repoRoot: string): RegistryEntry[] {

@@ -22,6 +22,9 @@ fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
     // `terminate:` → libc `exit()` → C++-Static-Destruktoren, und ggml-metal (whisper)
     // bricht dort mit `ggml_abort` ab. Wir beenden stattdessen über graceful_exit (_exit).
     let quit_item = MenuItem::with_id(app, "quit", "mads beenden", true, Some("CmdOrCtrl+Q"))?;
+    // Zweite mads-Instanz öffnen (eigener Prozess + eigener Sidecar) → in einem anderen Projekt
+    // arbeiten, ohne dass sich die beiden Umgebungen ins Gehege kommen (Projekt-Lock schützt).
+    let new_instance_item = MenuItem::with_id(app, "new_instance", "Neue Instanz", true, Some("CmdOrCtrl+Shift+N"))?;
 
     let app_menu = SubmenuBuilder::new(app, "mads")
         .item(&about_item)
@@ -34,6 +37,8 @@ fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
         .separator()
         .item(&quit_item)
         .build()?;
+
+    let file_menu = SubmenuBuilder::new(app, "Ablage").item(&new_instance_item).build()?;
 
     let edit_menu = SubmenuBuilder::new(app, "Bearbeiten")
         .undo()
@@ -53,6 +58,7 @@ fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
 
     let menu = MenuBuilder::new(app)
         .item(&app_menu)
+        .item(&file_menu)
         .item(&edit_menu)
         .item(&window_menu)
         .build()?;
@@ -78,6 +84,7 @@ pub fn run() {
             "about" => {
                 let _ = app.emit("show-about", ());
             }
+            "new_instance" => open_new_instance(),
             "quit" => graceful_exit(app),
             _ => {}
         })
@@ -107,6 +114,21 @@ pub fn run() {
                 graceful_exit(app_handle);
             }
         });
+}
+
+/// Startet eine ZWEITE mads-Instanz (eigener Prozess → eigener Sidecar) via `open -n`, damit man
+/// in einem zweiten Fenster an einem ANDEREN Projekt arbeiten kann. macOS bietet kein natives
+/// „Rechtsklick auf die App → neue Instanz"; dies ist das Äquivalent (auch als Ablage → Neue Instanz
+/// / Cmd+Shift+N). Nur aus dem installierten .app-Bundle sinnvoll — im Dev-Build ein No-Op.
+fn open_new_instance() {
+    if let Ok(exe) = std::env::current_exe() {
+        // exe = …/mads.app/Contents/MacOS/mads → das .app-Bundle liegt 3 Ebenen höher.
+        if let Some(bundle) = exe.ancestors().nth(3) {
+            if bundle.extension().and_then(|s| s.to_str()) == Some("app") {
+                let _ = std::process::Command::new("open").arg("-n").arg(bundle).spawn();
+            }
+        }
+    }
 }
 
 /// Sauberer, harter Prozess-Exit: erst den Sidecar-Child beenden (sonst verwaist er),

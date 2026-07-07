@@ -667,6 +667,23 @@ button.primary:hover {
   opacity: 1;
   background: rgba(0, 0, 0, 0.06);
 }
+.banner-action {
+  flex-shrink: 0;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 9px;
+  border-radius: 6px;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+.banner-action:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.06);
+}
 .resume-banner {
   background: var(--accent-weak);
   border-bottom: 1px solid var(--border);

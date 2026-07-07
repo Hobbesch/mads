@@ -20,6 +20,7 @@ export default function App() {
   const escalations = useStore((s) => s.escalations);
   const sidecar = useStore((s) => s.sidecar);
   const project = useStore((s) => s.project);
+  const projectLocked = useStore((s) => s.projectLocked);
   const pollProject = useStore((s) => s.pollProject);
   const resumables = useStore((s) => s.resumables);
   const resumeAgent = useStore((s) => s.resumeAgent);
@@ -216,6 +217,31 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {projectLocked && (
+          <div className="escalation-banner">
+            <span className="escalation-text">
+              ⚠ „{projectLocked.repoRoot.split("/").filter(Boolean).pop()}" ist bereits in einem anderen
+              mads-Fenster geöffnet — ein Projekt kann nur in einem Fenster gleichzeitig offen sein.
+              {project ? " Du arbeitest weiter im aktuellen Projekt." : " Wähle über den Projekt-Knopf ein anderes."}
+            </span>
+            <button
+              className="banner-action"
+              title="Lock ignorieren und hier öffnen — nur, wenn das andere Fenster hängt/geschlossen ist (kann Doppel-Öffnen erzwingen)."
+              onClick={() => void useStore.getState().openRecentProject(projectLocked.repoRoot, true)}
+            >
+              Trotzdem hier öffnen
+            </button>
+            <button
+              className="banner-close"
+              title="Hinweis schließen"
+              aria-label="Hinweis schließen"
+              onClick={() => useStore.setState({ projectLocked: undefined })}
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         {lastEscalation && (
           <div className="escalation-banner">

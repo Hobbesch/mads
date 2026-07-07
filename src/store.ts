@@ -256,6 +256,8 @@ export interface MadsState {
   sidecar: SidecarInfo;
   project?: ProjectInfo;
   projectStatus: "none" | "opening" | "ready" | "error";
+  /** Öffnen abgelehnt: Projekt ist in einer anderen mads-Instanz offen (Multi-Instanz-Schutz). */
+  projectLocked?: { repoRoot: string };
   recentProjects: RecentProject[];
   agents: Record<string, AgentVM>;
   order: string[];
@@ -318,7 +320,7 @@ export interface MadsState {
   init: () => Promise<void>;
   setAutonomy: (config: AutonomyConfig) => Promise<void>;
   openProject: () => Promise<void>;
-  openRecentProject: (repoRoot: string) => Promise<void>;
+  openRecentProject: (repoRoot: string, force?: boolean) => Promise<void>;
   forgetRecentProject: (repoRoot: string) => void;
   createAgent: (opts: {
     label: string;
@@ -569,6 +571,13 @@ export const useStore = create<MadsState>((set) => {
 
   function handleSidecarMessage(msg: SidecarMessage) {
     switch (msg.type) {
+      case "project_locked":
+        // Projekt ist in einer anderen mads-Instanz offen → nicht öffnen. Ist bereits ein Projekt
+        // geladen (fehlgeschlagener WECHSEL), es behalten + "ready" bleiben; sonst zurück zur
+        // Auswahl ("none"). Der Header-Banner zeigt den Hinweis in beiden Fällen.
+        set((s) => ({ projectStatus: s.project ? "ready" : "none", projectLocked: { repoRoot: msg.repoRoot } }));
+        break;
+
       case "sidecar_ready": {
         set({ sidecar: { status: "ready", sdkAvailable: msg.sdkAvailable, sdkVersion: msg.sdkVersion } });
         // Beim Start das zuletzt geöffnete Projekt automatisch wiederöffnen, damit man
@@ -591,6 +600,7 @@ export const useStore = create<MadsState>((set) => {
           return {
             project: msg.project,
             projectStatus: "ready",
+            projectLocked: undefined, // erfolgreiches Öffnen → evtl. alten Lock-Hinweis verwerfen
             recentProjects: rememberProject(s.recentProjects, msg.project, Date.now()),
             // Reconcile-Artefakte des Vorprojekts immer verwerfen (frischer Abgleich meldet neu).
             reconcileSummary: undefined,
@@ -838,6 +848,7 @@ export const useStore = create<MadsState>((set) => {
     sidecar: { status: "down", sdkAvailable: false },
     project: undefined,
     projectStatus: "none",
+    projectLocked: undefined,
     recentProjects: loadRecentProjects(),
     agents: {},
     order: [],
@@ -916,13 +927,13 @@ export const useStore = create<MadsState>((set) => {
     openProject: async () => {
       const repoRoot = await pickFolder();
       if (!repoRoot) return;
-      set({ projectStatus: "opening" });
+      set({ projectStatus: "opening", projectLocked: undefined });
       await sendHost({ ...envelope(), type: "open_project", projectId: crypto.randomUUID(), repoRoot });
     },
 
-    openRecentProject: async (repoRoot) => {
-      set({ projectStatus: "opening" });
-      await sendHost({ ...envelope(), type: "open_project", projectId: crypto.randomUUID(), repoRoot });
+    openRecentProject: async (repoRoot, force) => {
+      set({ projectStatus: "opening", projectLocked: undefined });
+      await sendHost({ ...envelope(), type: "open_project", projectId: crypto.randomUUID(), repoRoot, ...(force ? { force: true } : {}) });
     },
 
     forgetRecentProject: (repoRoot) => {

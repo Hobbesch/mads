@@ -53,8 +53,12 @@ function save(list: RecentProject[]): void {
   }
 }
 
-/** Projekt vorne einreihen (dedupliziert nach repoRoot), persistieren, neue Liste zurückgeben. */
-export function rememberProject(list: RecentProject[], project: ProjectInfo, now: number): RecentProject[] {
+/**
+ * Projekt vorne einreihen (dedupliziert nach repoRoot), persistieren, neue Liste zurückgeben.
+ * Liest FRISCH von der Platte (statt den `list`-Snapshot des Aufrufers), damit gleichzeitige
+ * mads-Instanzen (geteilter localStorage per Bundle-ID) sich nicht gegenseitig überschreiben.
+ */
+export function rememberProject(_list: RecentProject[], project: ProjectInfo, now: number): RecentProject[] {
   const entry: RecentProject = {
     repoRoot: project.repoRoot,
     owner: project.owner,
@@ -62,14 +66,15 @@ export function rememberProject(list: RecentProject[], project: ProjectInfo, now
     defaultBranch: project.defaultBranch,
     lastOpenedAt: now,
   };
-  const next = [entry, ...list.filter((e) => e.repoRoot !== project.repoRoot)].slice(0, MAX);
+  const current = loadRecentProjects(); // on-disk-Stand (kann von anderer Instanz aktualisiert sein)
+  const next = [entry, ...current.filter((e) => e.repoRoot !== project.repoRoot)].slice(0, MAX);
   save(next);
   return next;
 }
 
-/** Einen Eintrag aus der Liste entfernen, persistieren, neue Liste zurückgeben. */
-export function forgetProject(list: RecentProject[], repoRoot: string): RecentProject[] {
-  const next = list.filter((e) => e.repoRoot !== repoRoot);
+/** Einen Eintrag entfernen, persistieren, neue Liste zurückgeben. Liest ebenfalls frisch von Platte. */
+export function forgetProject(_list: RecentProject[], repoRoot: string): RecentProject[] {
+  const next = loadRecentProjects().filter((e) => e.repoRoot !== repoRoot);
   save(next);
   return next;
 }

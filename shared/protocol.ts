@@ -103,6 +103,9 @@ export interface OpenProjectMsg extends BaseMsg {
   type: "open_project";
   projectId: string;
   repoRoot: string;
+  /** Multi-Instanz-Lock ignorieren und trotzdem öffnen (Nutzer-Override, z. B. wenn die haltende
+   *  Instanz hängt/tot ist und die pid recycelt wurde). Bewusst — kann Doppel-Öffnen erzwingen. */
+  force?: boolean;
 }
 
 export interface StartAgentMsg extends BaseMsg {
@@ -300,7 +303,20 @@ export type SidecarMessage =
   | SpawnSubstreamsRequestMsg
   | DevServerStatusMsg
   | DevServerLogMsg
+  | ProjectLockedMsg
   | SidecarErrorMsg;
+
+/**
+ * Öffnen abgelehnt: dieses Projekt ist bereits in einer ANDEREN, laufenden mads-Instanz offen
+ * (Multi-Instanz-Schutz — zwei Sidecars dürfen nicht parallel denselben `.mads`-State/Worktrees
+ * schreiben). Das Frontend fällt auf die Projektauswahl zurück und zeigt einen Hinweis.
+ */
+export interface ProjectLockedMsg extends BaseMsg {
+  type: "project_locked";
+  repoRoot: string;
+  /** pid der Instanz, die das Projekt hält (nur informativ). */
+  byPid?: number;
+}
 
 /** Ein einzelner Service des Stream-Dev-Servers (aus `.mads/run.json`), für die Statusanzeige. */
 export interface DevServerService {

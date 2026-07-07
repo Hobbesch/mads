@@ -104,10 +104,13 @@ pub async fn whisper_download_model(app: AppHandle) -> Result<(), String> {
     }
     let dir = path.parent().ok_or("kein Modell-Ordner")?.to_path_buf();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let tmp = dir.join(format!("{MODEL_FILE}.download"));
+    // Temp-Datei PRO PROZESS eindeutig: das Modell-Verzeichnis (~/Library/Application Support/
+    // com.hobbesch.mads/models) ist nur nach Bundle-ID geschlüsselt und damit von ALLEN Instanzen
+    // geteilt (kein Repo-Lock). Ein gemeinsamer `.download`-Name → zwei parallele Downloads würden
+    // sich gegenseitig zerstören. curl `-o` überschreibt unsere eigene Temp; kein Vorab-Löschen nötig.
+    let tmp = dir.join(format!("{MODEL_FILE}.{}.download", std::process::id()));
 
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let _ = std::fs::remove_file(&tmp);
         let mut child = Command::new("curl")
             .args(["-L", "--fail", "--silent", "--show-error", "-o"])
             .arg(&tmp)

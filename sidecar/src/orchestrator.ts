@@ -13,7 +13,7 @@ import { autoCommit, createPr, discoverWorktrees, ensureWorktreeSeedFile, fastFo
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
-import { ensureMadsDir, loadRegistry, mergeRegistry, saveRegistry, type RegistryEntry } from "./persistence.js";
+import { acquireProjectLock, ensureMadsDir, loadRegistry, mergeRegistry, releaseProjectLock, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
 import { parseDiffRegions, detectCollisions, type AgentRegions } from "../../shared/collision.js";
 import { detectTrespass, pathMatches, type TrespassFinding } from "../../shared/ownership.js";
@@ -84,12 +84,24 @@ export class Orchestrator {
           });
           break;
         }
+        // Multi-Instanz-Schutz: dasselbe Projekt darf nicht in zwei mads-Fenstern offen sein
+        // (zwei Sidecars, die parallel `.mads/agents.json` + dieselben Worktrees schreiben →
+        // Korruption). Ist das Projekt in einer anderen, lebenden Instanz offen → ablehnen und
+        // das Frontend auf die Projektauswahl zurückfallen lassen (deckt auch den Auto-Öffnen-Fall
+        // beim Start ab: dann startet das zweite Fenster nicht im selben Projekt).
+        const lock = acquireProjectLock(msg.repoRoot, msg.force);
+        if (!lock.ok) {
+          this.emit({ ...envelope(), type: "project_locked", repoRoot: msg.repoRoot, byPid: lock.byPid });
+          log(`[orchestrator] open_project abgelehnt: ${msg.repoRoot} bereits offen in Instanz pid ${lock.byPid}`);
+          break;
+        }
         // Echter Projektwechsel: den alten Projekt-Zustand sauber TRENNEN — laufende Sessions
         // beenden (Query schließen; Worktrees, Commits UND agents.json bleiben erhalten → beim
         // Zurückwechseln wieder fortsetzbar) und alle projekt-gebundenen Caches leeren. Sonst
         // blieben die alten Streams im Pool und würden weiter gepollt; ihre git/PR-Updates
         // würden in die UI des NEUEN Projekts lecken (falsche Kacheln, Fehlklick-Risiko).
         if (this.project && this.project.repoRoot !== msg.repoRoot) {
+          releaseProjectLock(this.project.repoRoot); // altes Projekt-Lock freigeben (wir haben schon das neue)
           await this.stopDevServerIf(); // Projektwechsel → jeden laufenden Dev-Server beenden
           for (const s of this.pool.values()) await s.stop(false);
           this.pool.clear();
@@ -318,6 +330,7 @@ export class Orchestrator {
       case "shutdown":
         if (this.pollTimer) clearInterval(this.pollTimer);
         await this.stopDevServerIf(); // laufenden Dev-Server sauber beenden (Prozess-Gruppen-Kill)
+        if (this.project) releaseProjectLock(this.project.repoRoot); // Projekt-Lock freigeben
         for (const s of this.pool.values()) await s.stop(false);
         this.pool.clear();
         process.exit(0);
