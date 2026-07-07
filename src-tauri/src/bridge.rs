@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::auth::AuthState;
 use crate::files;
 use futures_util::{SinkExt, StreamExt};
 use rcgen::{CertifiedKey, PublicKeyData};
@@ -103,11 +104,17 @@ fn validate_command_value(env: &serde_json::Value) -> Result<String, String> {
     serde_json::to_string(msg).map_err(|e| e.to_string())
 }
 
-/// Ein rohes Client-Text-Frame verarbeiten. `command` → validieren + an stdin forwarden (keine
-/// Sofort-Antwort; Ergebnisse kommen über den Event-Tee). `file-rpc` → gegen den PRO-VERBINDUNGS-
-/// Scope dispatchen und eine `file-rpc-reply` bauen. Anderes → verwerfen. Gibt die optionale
+/// Ein rohes Client-Text-Frame verarbeiten. Die Verbindung ist erst nach `pair` (PIN einlösen) oder
+/// `auth` (Token) authentifiziert (`authed` = deviceId). Vorher werden `command`/`file-rpc`
+/// abgelehnt und der Event-Tee NICHT ausgeliefert (siehe `handle_conn`). Gibt die optionale
 /// Antwort zurück, die der Aufrufer über den WS-Sink schickt.
-fn process_client_frame(frame: &str, conn_fs: &files::FsScope, forward: &CommandSink) -> Option<String> {
+fn process_client_frame(
+    frame: &str,
+    authed: &mut Option<String>,
+    conn_fs: &files::FsScope,
+    forward: &CommandSink,
+    auth: &AuthState,
+) -> Option<String> {
     let env: serde_json::Value = match serde_json::from_str(frame) {
         Ok(v) => v,
         Err(_) => {
@@ -116,6 +123,36 @@ fn process_client_frame(frame: &str, conn_fs: &files::FsScope, forward: &Command
         }
     };
     match env.get("channel").and_then(|c| c.as_str()).unwrap_or("") {
+        // ── Pairing: einmaligen PIN einlösen → Geräte-Token (nur hier im Klartext) ──
+        "pair" => {
+            let pin = env.get("pin").and_then(|v| v.as_str()).unwrap_or("");
+            let name = env.get("name").and_then(|v| v.as_str()).unwrap_or("Unbenanntes Gerät");
+            match auth.redeem_pin(pin, name) {
+                Ok(token) => {
+                    let device_id = token.split_once('.').map(|(a, _)| a.to_string()).unwrap_or_default();
+                    eprintln!("[mads:bridge] Gerät gekoppelt: {name} ({device_id})");
+                    *authed = Some(device_id.clone());
+                    Some(serde_json::json!({ "channel": "pair-reply", "ok": true, "token": token, "deviceId": device_id }).to_string())
+                }
+                Err(e) => Some(serde_json::json!({ "channel": "pair-reply", "ok": false, "error": e }).to_string()),
+            }
+        }
+        // ── Re-Auth mit bestehendem Token ──
+        "auth" => {
+            let token = env.get("token").and_then(|v| v.as_str()).unwrap_or("");
+            match auth.verify_token(token) {
+                Ok(device_id) => {
+                    *authed = Some(device_id.clone());
+                    Some(serde_json::json!({ "channel": "auth-reply", "ok": true, "deviceId": device_id }).to_string())
+                }
+                Err(e) => Some(serde_json::json!({ "channel": "auth-reply", "ok": false, "error": e }).to_string()),
+            }
+        }
+        // ── Privilegierte Kanäle: erst nach Auth ──
+        ch @ ("command" | "file-rpc") if authed.is_none() => {
+            eprintln!("[mads:bridge] '{ch}' vor Auth abgelehnt");
+            Some(serde_json::json!({ "channel": "error", "error": "nicht authentifiziert" }).to_string())
+        }
         "command" => {
             match validate_command_value(&env) {
                 Ok(line) => {
@@ -190,15 +227,53 @@ impl Drop for Bridge {
     }
 }
 
+/// Laufzeit-Info der gestarteten Bridge (für die Pairing-UI).
+pub struct BridgeRuntimeInfo {
+    pub port: u16,
+    pub spki_fp_hex: String,
+}
+
+/// In Tauri gemanagter Zustand: Auth-DB + Laufzeit-Info. Die Pairing-Commands (lib.rs) lesen ihn;
+/// der Bridge-Thread setzt die Info beim Start. Auth-DB existiert auch, wenn die Bridge (WSS/mDNS)
+/// per `MADS_REMOTE_BRIDGE` gegated ist.
+pub struct RemoteBridgeState {
+    pub auth: Arc<AuthState>,
+    pub info: std::sync::Mutex<Option<BridgeRuntimeInfo>>,
+}
+
+impl RemoteBridgeState {
+    pub fn new(auth: Arc<AuthState>) -> Self {
+        Self { auth, info: std::sync::Mutex::new(None) }
+    }
+    pub fn set_info(&self, port: u16, spki_fp_hex: String) {
+        *self.info.lock().unwrap() = Some(BridgeRuntimeInfo { port, spki_fp_hex });
+    }
+}
+
+/// QR-Payload fürs Pairing als SVG. Trägt `fp` (SPKI-Pin) + einmaligen `pin` — Host/Port kommen über
+/// mDNS (Bonjour), müssen also nicht im QR stehen. Die iOS-App scannt das, matcht den mDNS-Service
+/// per fp und löst den PIN ein.
+pub fn pairing_qr_svg(fp: &str, pin: &str) -> Result<String, String> {
+    use qrcode::render::svg;
+    use qrcode::QrCode;
+    let payload = format!("mads-remote://pair?pv={PROTOCOL_VERSION}&fp={fp}&pin={pin}");
+    let code = QrCode::new(payload.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(code
+        .render::<svg::Color>()
+        .min_dimensions(220, 220)
+        .quiet_zone(true)
+        .build())
+}
+
 /// Bridge starten: Zert laden/erzeugen (persistiert → stabiler Pin über Neustarts), TCP auf einem
 /// ephemeren Port binden (Multi-Instanz-freundlich), mDNS advertisen, Accept-Loop spawnen.
 /// `tee` = Sender des Sidecar-stdout-Broadcasts; pro Client wird `tee.subscribe()` aufgerufen.
-pub async fn start(tee: broadcast::Sender<String>, forward: CommandSink, cert_dir: PathBuf, project: String) -> BridgeResult<Bridge> {
+pub async fn start(tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>, cert_dir: PathBuf, project: String) -> BridgeResult<Bridge> {
     let cert = load_or_generate_cert(&cert_dir)?;
     let spki_fp_hex = hex_lower(&cert.spki_fp);
     let tls_config = make_server_config(cert.cert_der, cert.key_der)?;
 
-    let (port, accept) = bind_and_serve(tls_config, tee, forward).await?;
+    let (port, accept) = bind_and_serve(tls_config, tee, forward, auth).await?;
     let mdns = advertise(port, &spki_fp_hex, &project)?;
 
     Ok(Bridge { port, spki_fp_hex, accept, mdns })
@@ -207,11 +282,11 @@ pub async fn start(tee: broadcast::Sender<String>, forward: CommandSink, cert_di
 /// Testbarer Kern OHNE mDNS: auf allen Interfaces binden (der iPad im LAN muss uns erreichen;
 /// ephemerer Port = Multi-Instanz-freundlich), Accept-Loop spawnen. Gibt (Port, Accept-Handle)
 /// zurück.
-async fn bind_and_serve(tls_config: Arc<ServerConfig>, tee: broadcast::Sender<String>, forward: CommandSink) -> BridgeResult<(u16, tokio::task::JoinHandle<()>)> {
+async fn bind_and_serve(tls_config: Arc<ServerConfig>, tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>) -> BridgeResult<(u16, tokio::task::JoinHandle<()>)> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     let port = listener.local_addr()?.port();
     let acceptor = TlsAcceptor::from(tls_config);
-    let accept = tokio::spawn(accept_loop(listener, acceptor, tee, forward));
+    let accept = tokio::spawn(accept_loop(listener, acceptor, tee, forward, auth));
     Ok((port, accept))
 }
 
@@ -318,7 +393,7 @@ fn advertise(port: u16, fp_hex: &str, project: &str) -> BridgeResult<mdns_sd::Se
 
 // ─────────────────────────────────────────────────────────────── Accept-Loop
 
-async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcast::Sender<String>, forward: CommandSink) {
+async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>) {
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -331,8 +406,9 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcas
         let rx = tee.subscribe();
         let acceptor = acceptor.clone();
         let forward = forward.clone();
+        let auth = auth.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(tcp, acceptor, rx, forward).await {
+            if let Err(e) = handle_conn(tcp, acceptor, rx, forward, auth).await {
                 eprintln!("[mads:bridge] Verbindung {peer} beendet: {e}");
             }
         });
@@ -346,7 +422,7 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcas
 ///
 /// P0.3 hat NOCH keine Auth (kommt P1.2, hinter dem MADS_REMOTE_BRIDGE-Gate); ein verbundener
 /// Client darf also bereits Befehle senden — außer den per Deny-Liste gesperrten permissionMode.
-async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::Receiver<String>, forward: CommandSink) -> BridgeResult<()> {
+async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::Receiver<String>, forward: CommandSink, auth: Arc<AuthState>) -> BridgeResult<()> {
     let tls = acceptor.accept(tcp).await?;
 
     // Anti-CSWSH: ein nativer Client sendet KEINEN Origin-Header; ein Browser schon → ablehnen.
@@ -366,6 +442,9 @@ async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::R
     // PRO-VERBINDUNGS-Scope (§9.5): startet leer, wird nur durch `register_root` dieser Verbindung
     // gefüllt und verschwindet beim Disconnect. Kein anderer Socket sieht diese Roots.
     let conn_fs = files::FsScope::default();
+    // Auth-Zustand DIESER Verbindung: None bis `pair`/`auth` erfolgreich (dann die deviceId).
+    // Vor Auth wird der Event-Tee NICHT ausgeliefert und command/file-rpc abgelehnt.
+    let mut authed: Option<String> = None;
 
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     heartbeat.tick().await; // erster Tick feuert sofort — überspringen
@@ -373,18 +452,32 @@ async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::R
     loop {
         tokio::select! {
             tee_line = rx.recv() => match tee_line {
-                Ok(line) => sink.send(Message::text(line)).await?,
+                // Tee NUR an authentifizierte Clients (Events sind sensibel). Vor Auth: verwerfen
+                // (recv leert den Puffer → kein Lag; der Client re-synct nach Auth via request_snapshot).
+                Ok(line) => {
+                    if authed.is_some() {
+                        sink.send(Message::text(line)).await?;
+                    }
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    // Client zu langsam → n Zeilen verworfen; der Client re-synct später via request_snapshot.
                     eprintln!("[mads:bridge] Client hinkt {n} Zeilen hinterher (verworfen)");
                 }
                 Err(broadcast::error::RecvError::Closed) => break, // Sidecar-stdout endete
             },
-            _ = heartbeat.tick() => sink.send(Message::Ping(Vec::<u8>::new().into())).await?,
+            _ = heartbeat.tick() => {
+                // Widerruf trennt laufende Verbindungen (spätestens beim nächsten Tick, ~15 s).
+                if let Some(dev) = &authed {
+                    if auth.is_revoked(dev) {
+                        eprintln!("[mads:bridge] Gerät {dev} widerrufen → trenne");
+                        break;
+                    }
+                }
+                sink.send(Message::Ping(Vec::<u8>::new().into())).await?;
+            }
             incoming = source.next() => match incoming {
                 Some(Ok(Message::Text(t))) => {
-                    if let Some(reply) = process_client_frame(t.as_str(), &conn_fs, &forward) {
-                        sink.send(Message::text(reply)).await?; // file-rpc-reply
+                    if let Some(reply) = process_client_frame(t.as_str(), &mut authed, &conn_fs, &forward, &auth) {
+                        sink.send(Message::text(reply)).await?;
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
@@ -496,13 +589,41 @@ mod tests {
         ws
     }
 
-    /// P0.2: der stdout-Tee erreicht einen TLS-WSS-Client end-to-end (Zert + Handshake + Broadcast).
+    /// In-Memory-Auth für Tests.
+    fn test_auth() -> Arc<AuthState> {
+        Arc::new(AuthState::in_memory())
+    }
+
+    /// Verbinden UND koppeln (PIN aus `auth` ziehen, `pair` senden, `pair-reply` ok abwarten).
+    async fn connect_and_pair(
+        port: u16,
+        auth: &AuthState,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>> {
+        let mut ws = connect_ws_client(port).await;
+        let pin = auth.issue_pin();
+        ws.send(Message::text(serde_json::json!({"channel":"pair","pin":pin,"name":"test"}).to_string()))
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout")
+            .expect("stream")
+            .expect("ws");
+        match reply {
+            Message::Text(t) => assert!(t.as_str().contains(r#""ok":true"#), "pair fehlgeschlagen: {t}"),
+            other => panic!("unerwartete pair-Antwort: {other:?}"),
+        }
+        ws
+    }
+
+    /// P0.2: der stdout-Tee erreicht einen (gepaarten) TLS-WSS-Client end-to-end.
     #[tokio::test]
     async fn tee_reaches_tls_ws_client() {
+        let auth = test_auth();
         let (tee, _keep) = broadcast::channel::<String>(64);
-        let (port, accept) = bind_and_serve(test_config(), tee.clone(), noop_sink()).await.expect("bind_and_serve");
+        let (port, accept) = bind_and_serve(test_config(), tee.clone(), noop_sink(), auth.clone()).await.expect("bind_and_serve");
 
-        let ws = connect_ws_client(port).await;
+        let ws = connect_and_pair(port, &auth).await;
         let (mut _sink, mut source) = ws.split();
 
         let payload = r#"{"v":1,"type":"agent_event","hello":42}"#;
@@ -525,12 +646,13 @@ mod tests {
     /// verarbeitet, also muss der nächste Forward NACH dem bypass das FOLGENDE gültige Command sein.
     #[tokio::test]
     async fn command_forwards_but_bypass_permissions_is_blocked() {
+        let auth = test_auth();
         let (tee, _keep) = broadcast::channel::<String>(64);
         let (fwd_tx, mut fwd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let forward: CommandSink = Arc::new(move |line: &str| fwd_tx.send(line.to_string()).map_err(|e| e.to_string()));
-        let (port, accept) = bind_and_serve(test_config(), tee, forward).await.expect("bind_and_serve");
+        let (port, accept) = bind_and_serve(test_config(), tee, forward, auth.clone()).await.expect("bind_and_serve");
 
-        let ws = connect_ws_client(port).await;
+        let ws = connect_and_pair(port, &auth).await;
         let (mut sink, mut _source) = ws.split();
 
         // (1) gültiges Command → wird geforwardet, kanonisch, OHNE Envelope.
@@ -548,6 +670,35 @@ mod tests {
         assert!(next.contains("interrupt_agent") && next.contains("z9"), "nächster Forward ist (3): {next}");
         assert!(!next.contains("bypassPermissions"), "bypassPermissions durfte nicht an stdin");
 
+        accept.abort();
+    }
+
+    /// P1.2: eine NICHT gepaarte Verbindung darf keine Commands absetzen (Auth-Gate).
+    #[tokio::test]
+    async fn unauthenticated_command_is_rejected() {
+        let auth = test_auth();
+        let (tee, _keep) = broadcast::channel::<String>(64);
+        let (fwd_tx, mut fwd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let forward: CommandSink = Arc::new(move |line: &str| fwd_tx.send(line.to_string()).map_err(|e| e.to_string()));
+        let (port, accept) = bind_and_serve(test_config(), tee, forward, auth).await.expect("bind_and_serve");
+
+        let mut ws = connect_ws_client(port).await; // NICHT gepaart
+        ws.send(Message::text(r#"{"channel":"command","msg":{"type":"poll_project"}}"#)).await.unwrap();
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout")
+            .expect("stream")
+            .expect("ws");
+        match reply {
+            Message::Text(t) => assert!(t.as_str().contains("nicht authentifiziert"), "{t}"),
+            other => panic!("erwartete Fehler-Reply, bekam {other:?}"),
+        }
+        // Nichts durfte an die stdin-Senke gehen.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), fwd_rx.recv()).await.is_err(),
+            "vor Auth durfte nichts geforwardet werden"
+        );
         accept.abort();
     }
 

@@ -1,8 +1,9 @@
 import { useStore } from "../store";
+import { RemotePairing } from "./RemotePairing";
 
 /**
  * Primary-Panel für activeView === "settings" (docs/design/10-navigation-toolbar.md §2.1).
- * Platzhalter: konsolidiert die Autonomie-Toggles aus der Titlebar (OE-52). Erweiterbar
+ * Konsolidiert die Autonomie-Toggles (OE-52) + das Remote-Pairing (iOS-App). Erweiterbar
  * um Permission-Defaults/Modelle (Post-MVP).
  */
 export function SettingsPanel() {
@@ -42,6 +43,7 @@ export function SettingsPanel() {
             </span>
           </label>
         </div>
+        <RemotePairing />
         {/* TODO(Post-MVP): Permission-Defaults, Modell-Auswahl, Update-Kanal (doc 10 §10). */}
       </div>
     </section>
