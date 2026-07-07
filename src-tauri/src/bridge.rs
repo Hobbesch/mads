@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::files;
 use futures_util::{SinkExt, StreamExt};
 use rcgen::{CertifiedKey, PublicKeyData};
 use rustls::version::TLS13;
@@ -67,9 +68,17 @@ const FORBIDDEN_PERMISSION_MODES: &[&str] = &["bypassPermissions", "dontAsk"];
 /// Allowlist; (3) `permissionMode`/`mode` nicht in der Deny-Liste. Die Re-Serialisierung
 /// normalisiert das JSON — u. a. keine eingebetteten rohen Newlines → keine NDJSON-Injection
 /// (ein Frame == genau eine stdin-Zeile).
+/// Test-Convenience (parst + validiert). Der Laufzeit-Pfad nutzt `validate_command_value` auf dem
+/// bereits geparsten Envelope (siehe `process_client_frame`).
+#[cfg(test)]
 fn validate_command(frame: &str) -> Result<String, String> {
     let env: serde_json::Value = serde_json::from_str(frame).map_err(|_| "kein gültiges JSON".to_string())?;
+    validate_command_value(&env)
+}
 
+/// Wie `validate_command`, aber auf einem BEREITS geparsten Envelope (spart den Doppel-Parse im
+/// Client-Frame-Dispatch).
+fn validate_command_value(env: &serde_json::Value) -> Result<String, String> {
     let channel = env.get("channel").and_then(|c| c.as_str()).unwrap_or("");
     if channel != "command" {
         return Err(format!("Kanal '{channel}' nicht erlaubt (nur 'command' geht an stdin)"));
@@ -92,6 +101,75 @@ fn validate_command(frame: &str) -> Result<String, String> {
 
     // Kanonisch re-serialisieren (nur die HostMessage) → normalisiert, kein Newline-Smuggling.
     serde_json::to_string(msg).map_err(|e| e.to_string())
+}
+
+/// Ein rohes Client-Text-Frame verarbeiten. `command` → validieren + an stdin forwarden (keine
+/// Sofort-Antwort; Ergebnisse kommen über den Event-Tee). `file-rpc` → gegen den PRO-VERBINDUNGS-
+/// Scope dispatchen und eine `file-rpc-reply` bauen. Anderes → verwerfen. Gibt die optionale
+/// Antwort zurück, die der Aufrufer über den WS-Sink schickt.
+fn process_client_frame(frame: &str, conn_fs: &files::FsScope, forward: &CommandSink) -> Option<String> {
+    let env: serde_json::Value = match serde_json::from_str(frame) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("[mads:bridge] Frame kein JSON — verworfen");
+            return None;
+        }
+    };
+    match env.get("channel").and_then(|c| c.as_str()).unwrap_or("") {
+        "command" => {
+            match validate_command_value(&env) {
+                Ok(line) => {
+                    if let Err(e) = forward(&line) {
+                        eprintln!("[mads:bridge] Forward an Sidecar fehlgeschlagen: {e}");
+                    }
+                }
+                Err(reason) => eprintln!("[mads:bridge] Command abgelehnt: {reason}"),
+            }
+            None
+        }
+        "file-rpc" => Some(file_rpc_reply(&env, conn_fs)),
+        other => {
+            eprintln!("[mads:bridge] unbekannter Kanal '{other}' — verworfen");
+            None
+        }
+    }
+}
+
+/// File-RPC gegen den PRO-VERBINDUNGS-Scope ausführen und die `file-rpc-reply`-Hülle bauen
+/// (korreliert über `id`). Der Scope startet LEER — ein Client muss erst `register_root`.
+fn file_rpc_reply(env: &serde_json::Value, conn_fs: &files::FsScope) -> String {
+    let id = env.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let op = env.get("op").and_then(|v| v.as_str()).unwrap_or("");
+    let args = env.get("args").cloned().unwrap_or(serde_json::Value::Null);
+    match dispatch_file_rpc(op, &args, conn_fs) {
+        Ok(result) => serde_json::json!({ "v": 1, "id": id, "channel": "file-rpc-reply", "ok": true, "result": result }).to_string(),
+        Err(error) => serde_json::json!({ "v": 1, "id": id, "channel": "file-rpc-reply", "ok": false, "error": error }).to_string(),
+    }
+}
+
+/// Die (read-only) file-rpc-Ops von P1.1 gegen den übergebenen Scope. Schreib-Ops kommen mit dem
+/// Editor (P3.2). Jeder Pfad läuft durch `ensure_in_scope` (Deny-First/Canonicalize/Prefix) im
+/// PRO-VERBINDUNGS-Scope — ein Client kann den Scope eines anderen nicht sehen (§9.5).
+fn dispatch_file_rpc(op: &str, args: &serde_json::Value, conn_fs: &files::FsScope) -> Result<serde_json::Value, String> {
+    let arg = |key: &str| args.get(key).and_then(|v| v.as_str()).ok_or_else(|| format!("arg '{key}' fehlt"));
+    match op {
+        "register_root" => {
+            files::register_root_inner(conn_fs, arg("path")?)?;
+            Ok(serde_json::json!({ "registered": true }))
+        }
+        "read_dir" => {
+            let nodes = files::read_dir_inner(conn_fs, arg("path")?)?;
+            serde_json::to_value(nodes).map_err(|e| e.to_string())
+        }
+        "read_file" => {
+            let fr = files::read_file_inner(conn_fs, arg("path")?)?;
+            serde_json::to_value(fr).map_err(|e| e.to_string())
+        }
+        "write_file" | "write_file_bytes" | "save_transcript" | "load_transcript" => {
+            Err(format!("file-rpc op '{op}' noch nicht implementiert (P3)"))
+        }
+        other => Err(format!("unbekannte file-rpc op '{other}'")),
+    }
 }
 
 /// Ein laufender Bridge-Dienst. Solange dieser Handle lebt, laufen Accept-Loop und
@@ -285,6 +363,10 @@ async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::R
     let ws = accept_hdr_async(tls, origin_guard).await?;
     let (mut sink, mut source) = ws.split();
 
+    // PRO-VERBINDUNGS-Scope (§9.5): startet leer, wird nur durch `register_root` dieser Verbindung
+    // gefüllt und verschwindet beim Disconnect. Kein anderer Socket sieht diese Roots.
+    let conn_fs = files::FsScope::default();
+
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     heartbeat.tick().await; // erster Tick feuert sofort — überspringen
 
@@ -300,16 +382,13 @@ async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::R
             },
             _ = heartbeat.tick() => sink.send(Message::Ping(Vec::<u8>::new().into())).await?,
             incoming = source.next() => match incoming {
-                Some(Ok(Message::Text(t))) => match validate_command(t.as_str()) {
-                    Ok(line) => {
-                        if let Err(e) = forward(&line) {
-                            eprintln!("[mads:bridge] Forward an Sidecar fehlgeschlagen: {e}");
-                        }
+                Some(Ok(Message::Text(t))) => {
+                    if let Some(reply) = process_client_frame(t.as_str(), &conn_fs, &forward) {
+                        sink.send(Message::text(reply)).await?; // file-rpc-reply
                     }
-                    Err(reason) => eprintln!("[mads:bridge] Command abgelehnt: {reason}"),
-                },
+                }
                 Some(Ok(Message::Close(_))) | None => break,
-                Some(Ok(_)) => { /* Ping/Pong/Binary: in P0.3 ignorieren (Binär-Frames erst OE-R6) */ }
+                Some(Ok(_)) => { /* Ping/Pong/Binary: ignorieren (Binär-Frames erst OE-R6) */ }
                 Some(Err(e)) => return Err(e.into()),
             },
         }
@@ -521,6 +600,46 @@ mod tests {
     #[test]
     fn validate_rejects_malformed_json() {
         assert!(validate_command("nicht json").is_err());
+    }
+
+    // ── file-rpc (P1.1) ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn file_rpc_read_dir_without_root_is_error_reply() {
+        let fs = files::FsScope::default();
+        let reply = file_rpc_reply(
+            &serde_json::json!({"id":"r1","channel":"file-rpc","op":"read_dir","args":{"path":"/tmp"}}),
+            &fs,
+        );
+        assert!(reply.contains(r#""ok":false"#), "{reply}");
+        assert!(reply.contains(r#""id":"r1""#));
+        assert!(reply.contains(r#""channel":"file-rpc-reply""#));
+    }
+
+    #[test]
+    fn file_rpc_unknown_op_is_error_reply() {
+        let fs = files::FsScope::default();
+        let reply = file_rpc_reply(&serde_json::json!({"id":"r2","op":"delete_everything","args":{}}), &fs);
+        assert!(reply.contains(r#""ok":false"#), "{reply}");
+    }
+
+    #[test]
+    fn file_rpc_register_then_read_dir_in_scope() {
+        // Das Crate-Verzeichnis ist ein echter, valider, registrierbarer Root (kein Deny/System).
+        let root = env!("CARGO_MANIFEST_DIR");
+        let fs = files::FsScope::default();
+
+        // (1) read_dir VOR register_root → Fehler (leerer Scope = §9.5-Default).
+        let pre = file_rpc_reply(&serde_json::json!({"id":"0","op":"read_dir","args":{"path":root}}), &fs);
+        assert!(pre.contains(r#""ok":false"#), "{pre}");
+
+        // (2) register_root → ok.
+        let reg = file_rpc_reply(&serde_json::json!({"id":"1","op":"register_root","args":{"path":root}}), &fs);
+        assert!(reg.contains(r#""ok":true"#), "{reg}");
+
+        // (3) read_dir → jetzt in-scope, sieht Cargo.toml.
+        let ls = file_rpc_reply(&serde_json::json!({"id":"2","op":"read_dir","args":{"path":root}}), &fs);
+        assert!(ls.contains(r#""ok":true"#) && ls.contains("Cargo.toml"), "{ls}");
     }
 
     /// mDNS-Advertise startet ohne Fehler und registriert den Service. Multicast ist in manchen

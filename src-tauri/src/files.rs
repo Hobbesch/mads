@@ -211,7 +211,14 @@ fn is_image_ext(ext: &str) -> bool {
 
 #[tauri::command]
 pub fn mads_read_dir(scope: State<'_, FsScope>, path: String) -> Result<Vec<DirNode>, String> {
-    let dir = ensure_in_scope(&scope, &path)?;
+    read_dir_inner(&scope, &path)
+}
+
+/// Scope-parametrisierter Kern (für die Remote-Bridge — PRO-VERBINDUNGS-Scope, §9.5). Identische
+/// Logik wie der lokale Command, nur `&FsScope` statt Tauri-`State`; der Sicherheitskern
+/// (`ensure_in_scope`: Deny-First → Canonicalize → Prefix-Assertion) bleibt UNVERÄNDERT.
+pub(crate) fn read_dir_inner(scope: &FsScope, path: &str) -> Result<Vec<DirNode>, String> {
+    let dir = ensure_in_scope(scope, path)?;
     let mut out: Vec<DirNode> = Vec::new();
     let mut count = 0usize;
 
@@ -233,7 +240,7 @@ pub fn mads_read_dir(scope: State<'_, FsScope>, path: String) -> Result<Vec<DirN
         let is_symlink = file_type.is_symlink();
         let is_dir = if is_symlink {
             // Symlink: nur als Verzeichnis behandeln, wenn das Ziel in-scope ist (§7).
-            entry.path().is_dir() && ensure_in_scope(&scope, &entry.path().to_string_lossy()).is_ok()
+            entry.path().is_dir() && ensure_in_scope(scope, &entry.path().to_string_lossy()).is_ok()
         } else {
             file_type.is_dir()
         };
@@ -268,7 +275,13 @@ pub fn mads_read_dir(scope: State<'_, FsScope>, path: String) -> Result<Vec<DirN
 
 #[tauri::command]
 pub fn mads_read_file(scope: State<'_, FsScope>, path: String) -> Result<FileRead, String> {
-    let p = ensure_in_scope(&scope, &path)?;
+    read_file_inner(&scope, &path)
+}
+
+/// Scope-parametrisierter Kern (Remote-Bridge — PRO-VERBINDUNGS-Scope). Wie `mads_read_file`, nur
+/// `&FsScope`; der Sicherheitskern bleibt unverändert.
+pub(crate) fn read_file_inner(scope: &FsScope, path: &str) -> Result<FileRead, String> {
+    let p = ensure_in_scope(scope, path)?;
     let st = stat(&p)?;
     let ext = ext_lower(&p);
 
@@ -424,9 +437,22 @@ pub fn mads_register_root(
     scope: State<'_, FsScope>,
     path: String,
 ) -> Result<(), String> {
-    let root = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
-    // Validierung: ein Root gewährt Lesen+Schreiben unter sich — zu breite Roots ablehnen,
-    // damit ein Aufruf mit `/`, `$HOME` o. Ä. nicht das halbe Dateisystem freischaltet.
+    register_root_inner(&scope, &path)?; // Validierung + Aufnahme in die mads-eigene Allow-Liste
+    // ZUSÄTZLICH den prozessglobalen tauri-plugin-fs-Scope weiten — NUR für den lokalen
+    // Webview-Watch (Live-Reload). Die Remote-Bridge ruft `register_root_inner` OHNE diesen Schritt,
+    // damit ein Netz-Client den globalen Watch-Scope nicht aufweiten kann.
+    if let Ok(root) = std::fs::canonicalize(&path) {
+        let _ = app.fs_scope().allow_directory(&root, true); // tauri-plugin-fs FsExt (für watch)
+    }
+    Ok(())
+}
+
+/// Scope-parametrisierter Kern (Remote-Bridge — PRO-VERBINDUNGS-Scope, §9.5). Validiert die
+/// Root-Breite (lehnt `/`, `$HOME`, System-Pfade und <2-Segment-Pfade ab — ein Root gewährt
+/// Lesen+Schreiben unter sich) und nimmt sie in den ÜBERGEBENEN Scope auf. Weitet BEWUSST NICHT den
+/// prozessglobalen tauri-plugin-fs-Watch-Scope (das ist allein Sache des lokalen Webview).
+pub(crate) fn register_root_inner(scope: &FsScope, path: &str) -> Result<(), String> {
+    let root = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
     if !root.is_dir() {
         return Err("Root muss ein existierendes Verzeichnis sein".into());
     }
@@ -438,7 +464,6 @@ pub fn mads_register_root(
     if root == Path::new("/") || comps < 2 || Some(&root) == home.as_ref() || is_system {
         return Err("Root zu weit gefasst (Filesystem-Root/Home/System nicht erlaubt)".into());
     }
-    let _ = app.fs_scope().allow_directory(&root, true); // tauri-plugin-fs FsExt (für watch)
     scope.add_root(root); // mads-eigene Allow-Liste (der eigentliche Gate)
     Ok(())
 }
@@ -574,5 +599,31 @@ mod tests {
         assert!(matches!(res, Ok(WriteResult::Saved { .. })));
         assert!(target.exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn per_scope_isolation() {
+        // §9.5: zwei Verbindungen == zwei FsScopes. Ein in A registrierter Root ist in B UNSICHTBAR
+        // (leerer Root-Set → harter Fehler). So kann kein Client den Scope eines anderen aufweiten.
+        let dir = std::env::temp_dir().join(format!("mads-iso-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("note.txt"), "x").unwrap();
+        let scope_a = tmp_scope(&dir); // hat den Root
+        let scope_b = FsScope::default(); // leer
+
+        let target = dir.join("note.txt");
+        assert!(read_file_inner(&scope_a, &target.to_string_lossy()).is_ok());
+        assert!(read_file_inner(&scope_b, &target.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn register_root_inner_rejects_broad_roots() {
+        let scope = FsScope::default();
+        assert!(register_root_inner(&scope, "/").is_err()); // Filesystem-Root
+        assert!(register_root_inner(&scope, "/usr").is_err()); // System-Pfad
+        if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok()) {
+            assert!(register_root_inner(&scope, &home).is_err()); // $HOME
+        }
     }
 }
