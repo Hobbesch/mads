@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import { Elapsed } from "./Elapsed";
 import { MarkdownView } from "../mdPipeline";
@@ -131,34 +131,63 @@ export const MessageTimeline = memo(function MessageTimeline({ agentId }: { agen
   const status = useStore((s) => s.agents[agentId]?.status);
   const currentStep = useStore((s) => s.agents[agentId]?.currentStep);
   const workStartedAt = useStore((s) => s.agents[agentId]?.workStartedAt);
-  const endRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
+  const pinRef = useRef(true); // am Ende „kleben"? — überlebt Re-Layouts ohne Re-Render
 
-  // Den scrollenden Eltern-Container (.timeline-wrap) beobachten: sind wir am Ende?
+  // Verlässlich ans Ende scrollen — DIREKT am scrollenden Eltern-Container (.timeline-wrap), statt
+  // scrollIntoView (das rät den scrollbaren Ahnen und kann bei noch wachsendem Inhalt danebenliegen).
+  const stickToEnd = () => {
+    const el = rootRef.current?.parentElement;
+    if (el) el.scrollTop = el.scrollHeight;
+  };
+
+  // Scroll-Position beobachten → „pin" an/aus (löst sich, sobald der Nutzer hochscrollt).
   useEffect(() => {
     const el = rootRef.current?.parentElement;
     if (!el) return;
-    const onScroll = () => setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+    const onScroll = () => {
+      const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      pinRef.current = bottom;
+      setAtBottom(bottom);
+    };
     el.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Beim Wechsel des Agenten ans Ende springen.
-  useEffect(() => {
+  // Agentenwechsel → wieder ans Ende kleben und SOFORT (vor dem Paint) dorthin scrollen.
+  useLayoutEffect(() => {
+    pinRef.current = true;
     setAtBottom(true);
-    endRef.current?.scrollIntoView({ block: "end" });
+    stickToEnd();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
 
-  // Auto-Scroll nur, wenn der Nutzer ohnehin am Ende ist (sonst Lese-Position halten).
-  useEffect(() => {
-    if (atBottom) endRef.current?.scrollIntoView({ block: "end" });
-  }, [events.length, atBottom]);
+  // Inhalts-/Größenänderungen folgen, solange gepinnt: Markdown/Bilder layouten ASYNC und das
+  // Transcript eines wiederhergestellten Streams trifft erst NACH dem ersten Render ein → sonst
+  // stünde die Ansicht am falschen Ende (leer / mittendrin). Ein ResizeObserver hält uns unten.
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (pinRef.current) stickToEnd();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Zusätzlich bei neuen Events folgen (Doppelsicherung neben dem Observer).
+  useLayoutEffect(() => {
+    if (pinRef.current) stickToEnd();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events.length]);
 
   const scrollToEnd = () => {
+    pinRef.current = true;
     setAtBottom(true);
-    endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+    const el = rootRef.current?.parentElement;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   };
 
   const active = status === "running" || status === "starting";
@@ -180,7 +209,6 @@ export const MessageTimeline = memo(function MessageTimeline({ agentId }: { agen
           </div>
         </div>
       )}
-      <div ref={endRef} />
       {!atBottom && (
         <button className="tl-jump" onClick={scrollToEnd} title="Zum Ende springen" aria-label="Zum Ende springen">
           ↓
