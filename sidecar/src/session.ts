@@ -712,7 +712,7 @@ export class AgentSession {
   }
   private setStatus(status: AgentStatus, currentStep?: string): void {
     this.status = status;
-    this.emit({ ...envelope(), type: "status_update", agentId: this.agentId, status, currentStep });
+    this.emit({ ...envelope(), type: "status_update", agentId: this.agentId, status, currentStep, label: this.label, role: this.role });
     this.onChange?.();
   }
   private fail(code: string, message: string, recoverable: boolean): void {

@@ -425,6 +425,9 @@ export interface StatusUpdateMsg extends BaseMsg {
   agentId: string;
   status: AgentStatus;
   currentStep?: string;
+  /** Menschlicher Stream-Name + Rolle — für Remote-Clients (iOS zeigt sonst nur die UUID). */
+  label?: string;
+  role?: "integrator" | "sub";
 }
 
 export interface CostUpdateMsg extends BaseMsg {
