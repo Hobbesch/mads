@@ -8,7 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
  * Schnittstellen-Vertrag: mads-remote/docs/mads-bridge.md.
  */
 type Device = { id: string; name: string; createdAt: number; lastSeen: number | null };
-type Status = { running: boolean; port?: number; spkiFp?: string };
+type Status = { running: boolean; enabled?: boolean; port?: number; spkiFp?: string; project?: string };
 type Pairing = { pin: string; qrSvg: string };
 
 export function RemotePairing() {
@@ -25,6 +25,16 @@ export function RemotePairing() {
       setError(String(e));
     }
   }, []);
+
+  const toggleEnabled = async (on: boolean) => {
+    setError(null);
+    try {
+      await invoke<boolean>("remote_set_enabled", { on });
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   useEffect(() => {
     void refresh();
@@ -54,10 +64,22 @@ export function RemotePairing() {
   return (
     <div className="settings-group">
       <div className="settings-group-title">Remote (iOS-App)</div>
+
+      <label className="settings-row" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+        <input
+          type="checkbox"
+          checked={status.enabled ?? false}
+          onChange={(e) => void toggleEnabled(e.target.checked)}
+        />
+        <span>Remote aktivieren</span>
+      </label>
+
       <div className="settings-hint">
-        {status.running
-          ? `Bridge aktiv (Port ${status.port}). Geräte im selben WLAN können koppeln.`
-          : "Bridge nicht aktiv. Zum Aktivieren mads mit MADS_REMOTE_BRIDGE=1 starten."}
+        {!status.enabled
+          ? "Aus. Aktivieren, damit die iOS-App dieses Projekt im WLAN spiegeln/fernsteuern kann."
+          : status.running
+            ? `Aktiv für ${status.project ?? "dieses Projekt"} (Port ${status.port}). Jede Instanz hat eine eigene Identität — mehrere Projekte parallel möglich.`
+            : "Aktiviert, aber noch kein Projekt offen. Öffne ein Projekt, dann läuft die Bridge dafür."}
       </div>
 
       {error && <div className="settings-hint remote-pair-error">{error}</div>}

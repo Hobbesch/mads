@@ -110,7 +110,9 @@ pub fn run() {
             remote_bridge_status,
             remote_bridge_issue_pin,
             remote_bridge_list_devices,
-            remote_bridge_revoke_device
+            remote_bridge_revoke_device,
+            remote_set_enabled,
+            remote_set_project
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -131,26 +133,20 @@ pub fn run() {
 fn start_remote_bridge(app: &tauri::App) {
     use tauri::Manager;
 
-    let data_dir = app
+    let app_data = app
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
-        .join("mads")
-        .join("remote-bridge");
+        .join("mads");
+    let flag_path = app_data.join("remote-enabled");
 
-    // Auth-DB immer öffnen (Pairing-Commands brauchen sie, auch bevor die Bridge läuft).
-    let auth = match auth::AuthState::open(&data_dir.join("devices.sqlite")) {
-        Ok(a) => std::sync::Arc::new(a),
-        Err(e) => {
-            eprintln!("[mads:bridge] Auth-DB konnte nicht geöffnet werden: {e}");
-            return;
-        }
+    // Toggle-Zustand: die persistierte Flag-Datei hat Vorrang; existiert keine, gilt der
+    // Env-Var-Default `MADS_REMOTE_BRIDGE=1` (Dev/CI). So respektiert der UI-Schalter die Wahl,
+    // ohne den Env-Weg zu brechen.
+    let enabled = match std::fs::read_to_string(&flag_path) {
+        Ok(s) => s.trim() == "1",
+        Err(_) => std::env::var("MADS_REMOTE_BRIDGE").as_deref() == Ok("1"),
     };
-    app.manage(bridge::RemoteBridgeState::new(auth.clone()));
-
-    if std::env::var("MADS_REMOTE_BRIDGE").as_deref() != Ok("1") {
-        return; // WSS/mDNS gegated; die Auth-State ist trotzdem gemanagt.
-    }
 
     let tee = app.state::<SidecarState>().tee();
     let app_handle = app.handle().clone();
@@ -161,54 +157,52 @@ fn start_remote_bridge(app: &tauri::App) {
         std::sync::Arc::new(move |line: &str| ah.state::<SidecarState>().send_line(line))
     };
 
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(e) => {
-                eprintln!("[mads:bridge] Runtime-Build fehlgeschlagen: {e}");
-                return;
-            }
-        };
-        rt.block_on(async move {
-            match bridge::start(tee, forward, auth, data_dir, "mads".to_string()).await {
-                Ok(b) => {
-                    eprintln!("[mads:bridge] läuft auf Port {} (SPKI-fp {})", b.port, b.spki_fp_hex);
-                    app_handle.state::<bridge::RemoteBridgeState>().set_info(b.port, b.spki_fp_hex.clone());
-                    let _keep = b; // Handle im Scope halten → Accept-Task + mDNS bleiben aktiv
-                    futures_util::future::pending::<()>().await; // Thread/Runtime am Leben halten
-                }
-                Err(e) => eprintln!("[mads:bridge] Start fehlgeschlagen: {e}"),
-            }
-        });
-    });
+    // Manager managen — die Bridge selbst startet ERST, wenn das Frontend via `remote_set_project`
+    // ein Projekt meldet (und Remote aktiv ist); dann mit dem per-Projekt-Zertifikat in
+    // `<repoRoot>/.mads/remote-bridge/` → eindeutige, stabile Instanz-Identität (Multi-Instanz).
+    match bridge::RemoteBridgeState::new(tee, forward, flag_path, enabled) {
+        Ok(state) => {
+            app.manage(state);
+        }
+        Err(e) => eprintln!("[mads:bridge] Manager-Init fehlgeschlagen: {e}"),
+    }
 }
 
 // ── Pairing-/Geräte-Commands (Frontend → Rust) für das mads-Pairing-Panel ──────────────────────
 
 #[tauri::command]
 fn remote_bridge_status(state: tauri::State<'_, bridge::RemoteBridgeState>) -> serde_json::Value {
-    match state.info.lock().unwrap().as_ref() {
-        Some(i) => serde_json::json!({ "running": true, "port": i.port, "spkiFp": i.spki_fp_hex }),
-        None => serde_json::json!({ "running": false }),
-    }
+    state.status()
 }
 
 #[tauri::command]
 fn remote_bridge_issue_pin(state: tauri::State<'_, bridge::RemoteBridgeState>) -> Result<serde_json::Value, String> {
-    let pin = state.auth.issue_pin();
-    let fp = state.info.lock().unwrap().as_ref().map(|i| i.spki_fp_hex.clone()).unwrap_or_default();
-    let qr = bridge::pairing_qr_svg(&fp, &pin)?;
-    Ok(serde_json::json!({ "pin": pin, "qrSvg": qr }))
+    state.issue_pin()
 }
 
 #[tauri::command]
 fn remote_bridge_list_devices(state: tauri::State<'_, bridge::RemoteBridgeState>) -> Result<Vec<auth::DeviceInfo>, String> {
-    state.auth.list_devices()
+    state.list_devices()
 }
 
 #[tauri::command]
 fn remote_bridge_revoke_device(state: tauri::State<'_, bridge::RemoteBridgeState>, id: String) -> Result<(), String> {
-    state.auth.revoke_device(&id)
+    state.revoke_device(&id)
+}
+
+/// „Remote aktivieren"-Schalter (persistiert). Startet/stoppt die Bridge sofort und gibt den
+/// tatsächlichen Zustand zurück.
+#[tauri::command]
+fn remote_set_enabled(state: tauri::State<'_, bridge::RemoteBridgeState>, on: bool) -> bool {
+    state.set_enabled(on);
+    state.is_enabled()
+}
+
+/// Das aktuell offene Projekt melden (repoRoot + Anzeigename). (Re)startet die Bridge auf dem
+/// per-Projekt-Zertifikat, wenn Remote aktiv ist. Vom Frontend bei jedem Projekt-Öffnen aufgerufen.
+#[tauri::command]
+fn remote_set_project(state: tauri::State<'_, bridge::RemoteBridgeState>, repo_root: String, label: String) {
+    state.set_project(std::path::PathBuf::from(repo_root), label);
 }
 
 /// Startet eine ZWEITE mads-Instanz (eigener Prozess → eigener Sidecar) via `open -n`, damit man

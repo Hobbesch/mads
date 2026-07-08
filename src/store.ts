@@ -627,6 +627,12 @@ export const useStore = create<MadsState>((set) => {
         // repoRoot im Core registrieren + als Default-Explorer-Root setzen (doc 07 §4.2:
         // „aufgerufen direkt nachdem project gesetzt ist"). Erst bei aktiver Files-View geladen.
         void useStore.getState().setActiveRoot({ kind: "project", path: msg.project.repoRoot });
+        // Remote-Bridge (falls aktiviert) auf DIESES Projekt umschalten → per-Projekt-Zertifikat/
+        // -Identität in <repoRoot>/.mads/remote-bridge/ (Multi-Instanz: jede Instanz eindeutig).
+        void invoke("remote_set_project", {
+          repoRoot: msg.project.repoRoot,
+          label: `${msg.project.owner}/${msg.project.repo}`,
+        }).catch(() => {});
         break;
 
       case "status_update":
