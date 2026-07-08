@@ -199,6 +199,9 @@ const MAX_LINE = 2000; // eine Zeile deckeln (schützt die NDJSON-Pipe vor Riese
  * Ein laufender Stream-Dev-Server (ein oder mehrere Services). Vom Orchestrator gehalten;
  * es existiert immer höchstens einer. Emittiert `devserver_status`/`devserver_log` an die UI.
  */
+/** Callback bei UNERWARTETEM Absturz eines Service (für die Selbstheilung im Orchestrator). */
+export type DevCrashHandler = (service: string, exitCode: number | null, recentLog: string[]) => void;
+
 export class DevServerRun {
   readonly agentId: string;
   private readonly worktree: string;
@@ -207,15 +210,24 @@ export class DevServerRun {
   private state: DevState = "starting";
   private stopping = false;
   private readyTimer?: ReturnType<typeof setTimeout>;
+  private readonly onCrash?: DevCrashHandler;
+  private crashReported = false;
+  private readonly recentLogs = new Map<string, string[]>(); // pro Service, für die Crash-Diagnose
 
-  constructor(agentId: string, worktree: string, manifest: RunManifest) {
+  constructor(agentId: string, worktree: string, manifest: RunManifest, onCrash?: DevCrashHandler) {
     this.agentId = agentId;
     this.worktree = worktree;
     this.procs = manifest.services.map((spec) => ({ spec, ready: false, url: spec.url }));
+    this.onCrash = onCrash;
   }
 
   private emitLog(service: string, stream: "stdout" | "stderr", line: string): void {
     const capped = line.length > MAX_LINE ? line.slice(0, MAX_LINE) + "…" : line;
+    // Kleiner Ringpuffer pro Service — die letzten Zeilen liefern der Selbstheilung den Kontext.
+    const buf = this.recentLogs.get(service) ?? [];
+    buf.push(`[${stream}] ${capped}`);
+    if (buf.length > 40) buf.splice(0, buf.length - 40);
+    this.recentLogs.set(service, buf);
     send({ ...envelope(), type: "devserver_log", agentId: this.agentId, service, stream, line: capped });
   }
 
@@ -338,7 +350,11 @@ export class DevServerRun {
       this.emitLog(p.spec.name, "stderr", `⚠ Prozess beendet (exit ${code ?? "?"}${signal ? `, ${signal}` : ""}).`);
       this.state = "error";
       this.emitStatus(`Service „${p.spec.name}" unerwartet beendet — siehe Log.`);
+      const crashLog = [...(this.recentLogs.get(p.spec.name) ?? [])];
+      const firstCrash = !this.crashReported; // nur EINMAL heilen (Kaskaden nicht doppelt anstoßen)
+      this.crashReported = true;
       void this.stop();
+      if (firstCrash) this.onCrash?.(p.spec.name, code, crashLog);
     });
   }
 
@@ -350,6 +366,7 @@ export class DevServerRun {
 
   async start(): Promise<void> {
     this.state = "starting";
+    this.crashReported = false; // frischer Start → Selbstheilung wieder scharf
     this.emitStatus();
     for (const p of this.procs) {
       if (this.stopping) return;
