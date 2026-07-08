@@ -362,7 +362,7 @@ export class Orchestrator {
   private emitSnapshot(): void {
     if (this.project) this.emit({ ...envelope(), type: "project_resolved", project: this.project });
     for (const s of this.pool.values()) {
-      this.emit({ ...envelope(), type: "status_update", agentId: s.agentId, status: s.status });
+      this.emit({ ...envelope(), type: "status_update", agentId: s.agentId, status: s.status, label: s.label, role: s.role });
       this.emit({
         ...envelope(),
         type: "cost_update",
