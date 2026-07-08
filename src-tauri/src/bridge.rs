@@ -243,20 +243,178 @@ pub struct BridgeRuntimeInfo {
     pub spki_fp_hex: String,
 }
 
-/// In Tauri gemanagter Zustand: Auth-DB + Laufzeit-Info. Die Pairing-Commands (lib.rs) lesen ihn;
-/// der Bridge-Thread setzt die Info beim Start. Auth-DB existiert auch, wenn die Bridge (WSS/mDNS)
-/// per `MADS_REMOTE_BRIDGE` gegated ist.
+/// In Tauri gemanagter Bridge-MANAGER: startet/stoppt die Bridge zur LAUFZEIT, getrieben vom
+/// „Remote aktivieren"-Schalter UND dem aktuell offenen Projekt. Zertifikat, Port und Auth-DB liegen
+/// PRO PROJEKT in `<repoRoot>/.mads/remote-bridge/` (git-ignoriert) → jede Instanz hat einen
+/// eindeutigen, über Neustarts STABILEN SPKI-fp = die Multi-Instanz-Identität auf dem iPad.
 pub struct RemoteBridgeState {
-    pub auth: Arc<AuthState>,
-    pub info: std::sync::Mutex<Option<BridgeRuntimeInfo>>,
+    // mpsc::Sender ist Send aber !Sync → in Mutex wickeln, damit RemoteBridgeState als Tauri-State
+    // Send+Sync ist. Steuerbefehle sind selten (Toggle/Projektwechsel), Lock-Contention irrelevant.
+    ctrl_tx: std::sync::Mutex<std::sync::mpsc::Sender<Ctrl>>,
+    shared: Arc<std::sync::Mutex<Shared>>, // vom Bridge-Thread befüllt, von den Commands gelesen
+    enabled_flag_path: PathBuf,            // persistierter Toggle (app_data_dir)
+}
+
+enum Ctrl {
+    SetEnabled(bool),
+    SetProject(PathBuf, String),
+}
+
+#[derive(Default)]
+struct Shared {
+    enabled: bool,
+    project_label: Option<String>,
+    info: Option<BridgeRuntimeInfo>,
+    auth: Option<Arc<AuthState>>, // Auth-DB DES aktuellen Projekts (für die Pairing-Commands)
 }
 
 impl RemoteBridgeState {
-    pub fn new(auth: Arc<AuthState>) -> Self {
-        Self { auth, info: std::sync::Mutex::new(None) }
+    pub fn new(
+        tee: broadcast::Sender<String>,
+        forward: CommandSink,
+        enabled_flag_path: PathBuf,
+        enabled: bool,
+    ) -> BridgeResult<Self> {
+        let shared = Arc::new(std::sync::Mutex::new(Shared { enabled, ..Default::default() }));
+        let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<Ctrl>();
+        let shared_bg = shared.clone();
+        // Dedizierter Thread mit EIGENER tokio-Runtime: er allein ruft `block_on(start(..))` (nie der
+        // Tauri-Command-Thread → kein „runtime within runtime"-Panic) und HÄLT die lebende Bridge.
+        // Die Multi-Thread-Runtime treibt den Accept-Task im Hintergrund, während der Thread auf dem
+        // Control-Channel parkt.
+        std::thread::Builder::new()
+            .name("mads-remote-bridge".into())
+            .spawn(move || bridge_control_loop(ctrl_rx, shared_bg, tee, forward, enabled))
+            .map_err(|e| e.to_string())?;
+        Ok(Self { ctrl_tx: std::sync::Mutex::new(ctrl_tx), shared, enabled_flag_path })
     }
-    pub fn set_info(&self, port: u16, spki_fp_hex: String) {
-        *self.info.lock().unwrap() = Some(BridgeRuntimeInfo { port, spki_fp_hex });
+
+    pub fn is_enabled(&self) -> bool {
+        self.shared.lock().unwrap().enabled
+    }
+
+    fn send(&self, msg: Ctrl) {
+        let _ = self.ctrl_tx.lock().unwrap().send(msg);
+    }
+
+    /// „Remote aktivieren"-Schalter (persistiert). Startet/stoppt die Bridge (asynchron im Thread).
+    pub fn set_enabled(&self, on: bool) {
+        if let Some(parent) = self.enabled_flag_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&self.enabled_flag_path, if on { "1" } else { "0" });
+        self.shared.lock().unwrap().enabled = on; // sofort für status() sichtbar
+        self.send(Ctrl::SetEnabled(on));
+    }
+
+    /// Aktuell offenes Projekt melden (repoRoot + Anzeigename). (Re)startet die Bridge auf dem
+    /// per-Projekt-Zertifikat, wenn Remote aktiv ist.
+    pub fn set_project(&self, root: PathBuf, label: String) {
+        self.send(Ctrl::SetProject(root, label));
+    }
+
+    // ── Accessoren für die Pairing-Commands (Auth-DB des aktuellen Projekts) ──
+
+    pub fn status(&self) -> serde_json::Value {
+        let s = self.shared.lock().unwrap();
+        match &s.info {
+            Some(i) => serde_json::json!({
+                "running": true, "enabled": s.enabled, "port": i.port,
+                "spkiFp": i.spki_fp_hex, "project": s.project_label,
+            }),
+            None => serde_json::json!({ "running": false, "enabled": s.enabled }),
+        }
+    }
+
+    pub fn issue_pin(&self) -> Result<serde_json::Value, String> {
+        let s = self.shared.lock().unwrap();
+        let auth = s.auth.as_ref().ok_or("Remote nicht aktiv (Schalter aus oder kein Projekt offen)")?;
+        let pin = auth.issue_pin();
+        let fp = s.info.as_ref().map(|i| i.spki_fp_hex.clone()).unwrap_or_default();
+        let qr = pairing_qr_svg(&fp, &pin)?;
+        Ok(serde_json::json!({ "pin": pin, "qrSvg": qr }))
+    }
+
+    pub fn list_devices(&self) -> Result<Vec<crate::auth::DeviceInfo>, String> {
+        self.shared.lock().unwrap().auth.as_ref().ok_or("Remote nicht aktiv")?.list_devices()
+    }
+
+    pub fn revoke_device(&self, id: &str) -> Result<(), String> {
+        self.shared.lock().unwrap().auth.as_ref().ok_or("Remote nicht aktiv")?.revoke_device(id)
+    }
+}
+
+/// Der Bridge-Steuer-Loop (eigener Thread). Hält die lebende `Bridge` + das aktuelle Projekt und
+/// gleicht bei jedem Steuerbefehl (enabled × project) ab: erst stoppen (Drop = Accept-Abort +
+/// mDNS-Shutdown), dann ggf. mit dem per-Projekt-Zertifikat neu starten.
+fn bridge_control_loop(
+    rx: std::sync::mpsc::Receiver<Ctrl>,
+    shared: Arc<std::sync::Mutex<Shared>>,
+    tee: broadcast::Sender<String>,
+    forward: CommandSink,
+    mut enabled: bool,
+) {
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("[mads:bridge] Runtime-Build fehlgeschlagen: {e}");
+            return;
+        }
+    };
+    let mut running: Option<Bridge> = None;
+    let mut project: Option<(PathBuf, String)> = None;
+
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            Ctrl::SetEnabled(on) => enabled = on,
+            Ctrl::SetProject(root, label) => {
+                let same = running.is_some()
+                    && project.as_ref().map(|(r, _)| r.as_path()) == Some(root.as_path());
+                project = Some((root, label.clone()));
+                if same {
+                    shared.lock().unwrap().project_label = Some(label); // nur Label, Bridge bleibt
+                    continue;
+                }
+            }
+        }
+
+        // Reevaluate: erst stoppen …
+        running = None;
+        {
+            let mut s = shared.lock().unwrap();
+            s.info = None;
+            s.auth = None;
+            s.enabled = enabled;
+            s.project_label = project.as_ref().map(|(_, l)| l.clone());
+        }
+        if !enabled {
+            continue;
+        }
+        let Some((root, label)) = project.clone() else { continue };
+
+        // … dann per-Projekt neu starten.
+        let dir = root.join(".mads").join("remote-bridge");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("[mads:bridge] .mads/remote-bridge anlegen fehlgeschlagen: {e}");
+            continue;
+        }
+        let auth = match AuthState::open(&dir.join("devices.sqlite")) {
+            Ok(a) => Arc::new(a),
+            Err(e) => {
+                eprintln!("[mads:bridge] Auth-DB konnte nicht geöffnet werden: {e}");
+                continue;
+            }
+        };
+        match rt.block_on(start(tee.clone(), forward.clone(), auth.clone(), dir, label)) {
+            Ok(b) => {
+                eprintln!("[mads:bridge] läuft auf Port {} (SPKI-fp {}) für {:?}", b.port, b.spki_fp_hex, root);
+                let mut s = shared.lock().unwrap();
+                s.info = Some(BridgeRuntimeInfo { port: b.port, spki_fp_hex: b.spki_fp_hex.clone() });
+                s.auth = Some(auth);
+                running = Some(b);
+            }
+            Err(e) => eprintln!("[mads:bridge] Start fehlgeschlagen: {e}"),
+        }
     }
 }
 
