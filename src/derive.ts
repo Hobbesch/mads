@@ -88,6 +88,13 @@ export interface NextStep {
  *  verschwindet sie beim nächsten PR-Poll (der den alten MERGED-Zustand refresht), obwohl es
  *  ungemergte Arbeit gibt. Genutzt vom aktiven Grid (AgentGrid) UND vom geführten nextStep. */
 export function isMergedDone(a: AgentVM): boolean {
+  // Ein AKTIVER/fortgesetzter Stream (Nutzer hat ihn resumt oder eine Nachricht geschickt → live=true,
+  // bleibt es über running/waiting_input hinweg; nur der passive Restore setzt false) ist NIE
+  // „erledigt". Sonst rutscht er beim nächsten PR-Poll aus dem aktiven Grid in die zugeklappte
+  // „Erledigt"-Sektion — genau der Bug, dass ein Stream nach dem Absenden eines Prompts „verschwindet",
+  // obwohl er gerade arbeitet oder auf eine Rückfrage wartet. Nur ein passiver, gemergter Stream ohne
+  // offene Arbeit ist wirklich erledigt.
+  if (a.live === true) return false;
   return a.pr?.state === "MERGED" && a.ahead === 0 && !a.dirty;
 }
 
