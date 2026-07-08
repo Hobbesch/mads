@@ -283,17 +283,44 @@ pub async fn start(tee: broadcast::Sender<String>, forward: CommandSink, auth: A
     let spki_fp_hex = hex_lower(&cert.spki_fp);
     let tls_config = make_server_config(cert.cert_der, cert.key_der)?;
 
-    let (port, accept) = bind_and_serve(tls_config, tee, forward, auth).await?;
+    // Persistierter Port → über Neustarts STABIL. Damit zeigen auch veraltete Bonjour-Einträge (die
+    // ein hart beendeter Vorgänger nicht abmelden konnte) weiter auf einen LEBENDEN Port, statt in
+    // einen toten ephemeren zu laufen (→ 60-s-Timeout hinter der macOS-Stealth-Firewall, die kein
+    // RST schickt). Ist der Wunschport belegt, fällt `bind_and_serve` auf ephemer zurück.
+    let desired_port = read_persisted_port(&cert_dir);
+    let (port, accept) = bind_and_serve(tls_config, tee, forward, auth, desired_port).await?;
+    persist_port(&cert_dir, port);
     let mdns = advertise(port, &spki_fp_hex, &project)?;
 
     Ok(Bridge { port, spki_fp_hex, accept, mdns })
 }
 
+/// Zuletzt gebundenen Port aus `dir/port` lesen (0 = keiner/Parsefehler → ephemer wählen).
+fn read_persisted_port(dir: &Path) -> u16 {
+    std::fs::read_to_string(dir.join("port"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .unwrap_or(0)
+}
+
+/// Tatsächlich gebundenen Port nach `dir/port` schreiben (best effort; Fehler sind unkritisch).
+fn persist_port(dir: &Path, port: u16) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join("port"), port.to_string());
+}
+
 /// Testbarer Kern OHNE mDNS: auf allen Interfaces binden (der iPad im LAN muss uns erreichen;
 /// ephemerer Port = Multi-Instanz-freundlich), Accept-Loop spawnen. Gibt (Port, Accept-Handle)
 /// zurück.
-async fn bind_and_serve(tls_config: Arc<ServerConfig>, tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>) -> BridgeResult<(u16, tokio::task::JoinHandle<()>)> {
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+async fn bind_and_serve(tls_config: Arc<ServerConfig>, tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>, desired_port: u16) -> BridgeResult<(u16, tokio::task::JoinHandle<()>)> {
+    let listener = if desired_port != 0 {
+        match TcpListener::bind((Ipv4Addr::UNSPECIFIED, desired_port)).await {
+            Ok(l) => l,
+            Err(_) => TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?, // Wunschport belegt → ephemer
+        }
+    } else {
+        TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?
+    };
     let port = listener.local_addr()?.port();
     let acceptor = TlsAcceptor::from(tls_config);
     let accept = tokio::spawn(accept_loop(listener, acceptor, tee, forward, auth));
@@ -404,7 +431,10 @@ fn advertise(port: u16, fp_hex: &str, project: &str) -> BridgeResult<mdns_sd::Se
         props.insert("addr".into(), ip);
     }
 
-    let instance = format!("mads-{pid}");
+    // Stabiler Instanzname aus dem SPKI-Fingerprint (NICHT der pid): mads ist Single-Instance, der fp
+    // überlebt Neustarts → ein Neustart AKTUALISIERT denselben mDNS-Eintrag statt einen neuen
+    // anzulegen. So sammeln sich keine Karteileichen (`mads-<altepid>`) mit toten Ports mehr an.
+    let instance = format!("mads-{}", &fp_hex[..12.min(fp_hex.len())]);
     let service = ServiceInfo::new(
         SERVICE_TYPE,
         &instance,
@@ -651,7 +681,7 @@ mod tests {
     async fn tee_reaches_tls_ws_client() {
         let auth = test_auth();
         let (tee, _keep) = broadcast::channel::<String>(64);
-        let (port, accept) = bind_and_serve(test_config(), tee.clone(), noop_sink(), auth.clone()).await.expect("bind_and_serve");
+        let (port, accept) = bind_and_serve(test_config(), tee.clone(), noop_sink(), auth.clone(), 0).await.expect("bind_and_serve");
 
         let ws = connect_and_pair(port, &auth).await;
         let (mut _sink, mut source) = ws.split();
@@ -683,7 +713,7 @@ mod tests {
         let (tee, _keep) = broadcast::channel::<String>(64);
         let (fwd_tx, mut fwd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let forward: CommandSink = Arc::new(move |line: &str| fwd_tx.send(line.to_string()).map_err(|e| e.to_string()));
-        let (port, accept) = bind_and_serve(test_config(), tee, forward, auth.clone()).await.expect("bind_and_serve");
+        let (port, accept) = bind_and_serve(test_config(), tee, forward, auth.clone(), 0).await.expect("bind_and_serve");
 
         let ws = connect_and_pair(port, &auth).await;
         let (mut sink, mut _source) = ws.split();
@@ -713,7 +743,7 @@ mod tests {
         let (tee, _keep) = broadcast::channel::<String>(64);
         let (fwd_tx, mut fwd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let forward: CommandSink = Arc::new(move |line: &str| fwd_tx.send(line.to_string()).map_err(|e| e.to_string()));
-        let (port, accept) = bind_and_serve(test_config(), tee, forward, auth).await.expect("bind_and_serve");
+        let (port, accept) = bind_and_serve(test_config(), tee, forward, auth, 0).await.expect("bind_and_serve");
 
         let mut ws = connect_ws_client(port).await; // NICHT gepaart
         ws.send(Message::text(r#"{"channel":"command","msg":{"type":"poll_project"}}"#)).await.unwrap();
