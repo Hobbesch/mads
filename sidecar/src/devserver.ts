@@ -15,7 +15,7 @@
  * Gruppen-Leader; Kill via `process.kill(-pid, …)` beendet auch geforkte Kinder (Vite→esbuild,
  * `dotnet run`→Host). Ausgabe wird zeilenweise (readline) als NDJSON an die UI weitergereicht.
  */
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import readline from "node:readline";
@@ -41,6 +41,29 @@ type DevState = "installing" | "starting" | "running" | "stopped" | "error";
 /** ${VAR}-Referenzen aus process.env auflösen (z. B. "${HOME}/.dotnet:${PATH}"). */
 function expandEnv(v: string): string {
   return v.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, k: string) => process.env[k] ?? "");
+}
+
+/** Den TCP-Port eines Service ableiten — aus `url` (http://host:PORT) oder `ASPNETCORE_URLS`. */
+function portOf(spec: ServiceSpec): number | undefined {
+  const candidates = [spec.url, spec.env?.ASPNETCORE_URLS].filter((s): s is string => !!s);
+  for (const c of candidates) {
+    const m = /:(\d{2,5})(?:\/|$)/.exec(expandEnv(c));
+    if (m) return parseInt(m[1], 10);
+  }
+  return undefined;
+}
+
+/** PIDs, die auf `port` lauschen (macOS `lsof`). Leer, wenn frei / lsof fehlt. */
+function pidsOnPort(port: number): Promise<number[]> {
+  return new Promise((resolve) => {
+    execFile("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { timeout: 3000 }, (_err, stdout) => {
+      const pids = String(stdout)
+        .split(/\s+/)
+        .map((s) => parseInt(s, 10))
+        .filter((n) => Number.isInteger(n) && n > 0);
+      resolve([...new Set(pids)]);
+    });
+  });
 }
 
 const RUN_PATH = (repoRoot: string): string => join(repoRoot, ".mads", "run.json");
@@ -249,6 +272,29 @@ export class DevServerRun {
     });
   }
 
+  /**
+   * PRE-FLIGHT: den Service-Port freiräumen, falls ihn ein VERWAISTER Vorgänger hält (typisch nach
+   * Force-Quit/Crash von mads oder einem manuell im Terminal gestarteten Server) — sonst bricht z. B.
+   * Kestrel/.NET mit „address already in use" ab (exit 134/SIGABRT beim ERSTEN Start). mads besitzt
+   * die Stream-Dev-Server-Ports (run.json), darf den Blockierer also beenden. Transparent geloggt.
+   */
+  private async freePort(spec: ServiceSpec): Promise<void> {
+    const port = portOf(spec);
+    if (!port) return;
+    let pids = (await pidsOnPort(port)).filter((pid) => pid !== process.pid);
+    if (!pids.length) return;
+    this.emitLog(spec.name, "stderr", `Port ${port} noch belegt (pid ${pids.join(", ")}) — beende verwaisten Vorgänger.`);
+    for (const pid of pids) {
+      try { process.kill(pid, "SIGTERM"); } catch { /* schon weg */ }
+    }
+    await new Promise((r) => setTimeout(r, 600));
+    pids = (await pidsOnPort(port)).filter((pid) => pid !== process.pid);
+    for (const pid of pids) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* schon weg */ }
+    }
+    if (pids.length) await new Promise((r) => setTimeout(r, 300)); // kurz aufs Freigeben warten
+  }
+
   private spawnService(p: ServiceProc): void {
     const cwd = join(this.worktree, p.spec.cwd ?? ".");
     const child = spawn("/bin/sh", ["-c", p.spec.command], {
@@ -322,6 +368,8 @@ export class DevServerRun {
           }
         }
       }
+      if (this.stopping) return;
+      await this.freePort(p.spec); // verwaisten Vorgänger auf dem Service-Port freiräumen
       if (this.stopping) return;
       this.spawnService(p);
     }
