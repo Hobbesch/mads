@@ -300,6 +300,7 @@ export type SidecarMessage =
   | SidecarReadyMsg
   | ProjectResolvedMsg
   | AgentEventMsg
+  | AgentTimelineMsg
   | NeedsInputMsg
   | PermissionRequestMsg
   | StatusUpdateMsg
@@ -377,6 +378,19 @@ export interface AgentEventMsg extends BaseMsg {
   type: "agent_event";
   agentId: string;
   event: AgentEvent;
+}
+
+/**
+ * Timeline-VERLAUF eines Agenten für einen SNAPSHOT (emitSnapshot) — spielt einem Client, der
+ * MITTEN in einen Lauf verbindet (z. B. der iOS-Mirror), die bereits gestreamten `agent_event`s
+ * zurück. Das mads-Frontend baut seine Timeline aus dem Live-Strom und IGNORIERT diese Nachricht
+ * (kein Case im Reducer). Der iOS-Client ERSETZT damit die Timeline des Agenten (idempotent: die
+ * Events sind wireserialisiert und in Reihenfolge, ein späterer Live-Event hängt strikt danach an).
+ */
+export interface AgentTimelineMsg extends BaseMsg {
+  type: "agent_timeline";
+  agentId: string;
+  events: AgentEvent[];
 }
 
 export interface NeedsInputMsg extends BaseMsg {
