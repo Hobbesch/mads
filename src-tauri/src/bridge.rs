@@ -373,6 +373,18 @@ fn make_server_config(cert_der: CertificateDer<'static>, key_der: PrivateKeyDer<
 /// `_mads-remote._tcp` advertisen; TXT trägt name/host/pid/project/pv/fp (fp = SPKI-Pin, nur Hinweis
 /// — autoritativ ist der beim Pairing gepinnte fp). IPs werden per `enable_addr_auto()` automatisch
 /// erkannt und aktuell gehalten.
+/// Primäre LAN-IPv4 (die des Default-Route-Interfaces) — die IP, die ein LAN-Client tatsächlich
+/// erreicht. Der UDP-„connect" sendet KEIN Paket, setzt nur die Route; `local_addr()` liefert dann
+/// die Quell-IP. Link-local/Loopback werden verworfen.
+fn primary_lan_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    sock.connect(("8.8.8.8", 80)).ok()?;
+    match sock.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => Some(v4.to_string()),
+        _ => None,
+    }
+}
+
 fn advertise(port: u16, fp_hex: &str, project: &str) -> BridgeResult<mdns_sd::ServiceDaemon> {
     use mdns_sd::{ServiceDaemon, ServiceInfo};
 
@@ -385,6 +397,12 @@ fn advertise(port: u16, fp_hex: &str, project: &str) -> BridgeResult<mdns_sd::Se
     props.insert("project".into(), project.to_string());
     props.insert("pv".into(), PROTOCOL_VERSION.into());
     props.insert("fp".into(), fp_hex.to_string());
+    // LAN-IP + Port direkt annoncieren, damit der Client OHNE fragile Bonjour-Auflösung verbindet
+    // (die auf einem USB-verbundenen iPad die unbrauchbare link-local Adresse liefert).
+    props.insert("port".into(), port.to_string());
+    if let Some(ip) = primary_lan_ip() {
+        props.insert("addr".into(), ip);
+    }
 
     let instance = format!("mads-{pid}");
     let service = ServiceInfo::new(
