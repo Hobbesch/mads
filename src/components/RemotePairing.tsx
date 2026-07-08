@@ -38,6 +38,10 @@ export function RemotePairing() {
 
   useEffect(() => {
     void refresh();
+    // Periodisch nachziehen: die Bridge startet/stoppt ASYNCHRON (Bridge-Thread) — so erscheint der
+    // Koppeln-Knopf, sobald sie wirklich läuft, ohne dass man das Menü neu öffnen muss.
+    const id = window.setInterval(() => void refresh(), 1500);
+    return () => window.clearInterval(id);
   }, [refresh]);
 
   const issuePin = async () => {
@@ -79,7 +83,9 @@ export function RemotePairing() {
           ? "Aus. Aktivieren, damit die iOS-App dieses Projekt im WLAN spiegeln/fernsteuern kann."
           : status.running
             ? `Aktiv für ${status.project ?? "dieses Projekt"} (Port ${status.port}). Jede Instanz hat eine eigene Identität — mehrere Projekte parallel möglich.`
-            : "Aktiviert, aber noch kein Projekt offen. Öffne ein Projekt, dann läuft die Bridge dafür."}
+            : status.project
+              ? `Bridge startet für ${status.project} …`
+              : "Aktiviert, aber noch kein Projekt offen. Öffne ein Projekt, dann läuft die Bridge dafür."}
       </div>
 
       {error && <div className="settings-hint remote-pair-error">{error}</div>}
