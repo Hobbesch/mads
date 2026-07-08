@@ -37,6 +37,10 @@ export class Orchestrator {
   private readonly pool = new Map<string, AgentSession>();
   private project?: ProjectInfo;
   private pollTimer?: ReturnType<typeof setInterval>;
+  // Re-Entrancy-Schutz: dauert ein Poll-Zyklus (fetch + Autopilot commit/push/PR) länger als das
+  // Intervall, würde `setInterval` einen ZWEITEN parallel starten → zwei Push-/Rebase-Zyklen kollidieren
+  // (force-with-lease „cannot lock ref … expected …"). Der Guard lässt immer nur EINEN Zyklus laufen.
+  private polling = false;
   // Halb-autonomer Integrator (P-Halb): Auto-Sync + Kollisions-Scan.
   private autonomy: AutonomyConfig = { autoSync: true, collisionScan: true };
   private readonly gitState = new Map<string, { behind: number; ahead: number; dirty: boolean }>();
@@ -848,13 +852,18 @@ export class Orchestrator {
   }
 
   private async pollAll(): Promise<void> {
-    if (!this.project) return;
-    // einmal pro Zyklus fetchen, dann pro Agent rev-list (spart Netz).
-    await run("git", ["-C", this.project.repoRoot, "fetch", "origin"], this.project.repoRoot);
-    for (const s of this.pool.values()) await this.pollAgent(s, true);
-    if (this.autonomy.autoSync) await this.autoSyncPass();
-    await this.autopilotPass();
-    if (this.autonomy.collisionScan) await this.collisionPass();
+    if (!this.project || this.polling) return; // nie zwei Zyklen parallel (Push-/Rebase-Race)
+    this.polling = true;
+    try {
+      // einmal pro Zyklus fetchen, dann pro Agent rev-list (spart Netz).
+      await run("git", ["-C", this.project.repoRoot, "fetch", "origin"], this.project.repoRoot);
+      for (const s of this.pool.values()) await this.pollAgent(s, true);
+      if (this.autonomy.autoSync) await this.autoSyncPass();
+      await this.autopilotPass();
+      if (this.autonomy.collisionScan) await this.collisionPass();
+    } finally {
+      this.polling = false;
+    }
   }
 
   /**
