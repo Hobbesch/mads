@@ -1170,7 +1170,11 @@ export class Orchestrator {
     }
     await this.stopDevServerIf(); // evtl. laufenden (anderen) Dev-Server zuerst stoppen — nur einer
     log(`[orchestrator] devserver start für ${agentId} (${manifest.services.length} service(s)) in ${worktree}`);
-    this.devServer = new DevServerRun(agentId, worktree, manifest);
+    // Frischer Start → Selbstheilungs-Versuche für diesen Stream zurücksetzen.
+    for (const k of [...this.devHealAttempts.keys()]) if (k.startsWith(`${agentId}:`)) this.devHealAttempts.delete(k);
+    this.devServer = new DevServerRun(agentId, worktree, manifest, (service, code, logLines) =>
+      this.handleDevServerCrash(agentId, service, code, logLines),
+    );
     await this.devServer.start();
   }
 
@@ -1181,5 +1185,51 @@ export class Orchestrator {
     if (agentId !== undefined && ds.agentId !== agentId) return;
     await ds.stop();
     this.devServer = undefined;
+  }
+
+  // Selbstheilungs-Versuche pro `${agentId}:${service}` (Deckel gegen Endlos-Schleifen).
+  private readonly devHealAttempts = new Map<string, number>();
+
+  /**
+   * Dev-Server-SELBSTHEILUNG bei unerwartetem Absturz:
+   *  - Port-Konflikt („address already in use") → deterministisch, `freePort` räumt beim nächsten
+   *    Start auf → nur ein Hinweis, KEIN Agent nötig.
+   *  - jeder andere Absturz → den Stream-Agenten mit dem Log zur Diagnose+Behebung anstoßen
+   *    (max. 2× pro Service; der Agent behebt es oder eskaliert klar an den Nutzer).
+   */
+  private handleDevServerCrash(agentId: string, service: string, code: number | null, logLines: string[]): void {
+    const text = logLines.join("\n");
+    if (/address already in use|EADDRINUSE/i.test(text)) {
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: { kind: "assistant_text", text: `⚠ Dev-Server „${service}" scheiterte an einem belegten Port — beim nächsten Start wird der Blockierer automatisch freigeräumt.` },
+      });
+      return;
+    }
+    const key = `${agentId}:${service}`;
+    const tries = (this.devHealAttempts.get(key) ?? 0) + 1;
+    this.devHealAttempts.set(key, tries);
+    if (tries > 2) {
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: { kind: "assistant_text", text: `⚠ Dev-Server „${service}" ist mehrfach abgestürzt — Selbstheilung pausiert. Bitte den Log prüfen.` },
+      });
+      return;
+    }
+    const s = this.pool.get(agentId);
+    if (!s) return; // kein aktiver KI-Stream (passiver Worktree) → nichts anzustoßen, Fehler steht im Log
+    this.emit({
+      ...envelope(),
+      type: "agent_event",
+      agentId,
+      event: { kind: "assistant_text", text: `🔧 Dev-Server-Selbstheilung: „${service}" ist abgestürzt (exit ${code ?? "?"}) — ich analysiere die Ursache …` },
+    });
+    s.sendInput(
+      `[Dev-Server-Selbstheilung] Der Dev-Server-Service „${service}" ist unerwartet abgestürzt (exit ${code ?? "?"}). Letzte Log-Zeilen:\n\n${text}\n\nAnalysiere die Ursache und behebe sie, wenn möglich (fehlende Dependency, Config, DB-Migration, Code-Fehler o. Ä.). Brauchst du dafür fundierten Input von mir, sag klar, WAS du brauchst. Sonst behebe es — ich starte den Dev-Server danach neu.`,
+    );
   }
 }
