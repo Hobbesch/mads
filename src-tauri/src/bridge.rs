@@ -484,7 +484,9 @@ async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::R
                 // (recv leert den Puffer → kein Lag; der Client re-synct nach Auth via request_snapshot).
                 Ok(line) => {
                     if authed.is_some() {
-                        sink.send(Message::text(line)).await?;
+                        // Rohe SidecarMessage in die Event-Envelope wickeln (Vertrag mads-bridge.md).
+                        // Reines String-Wrapping — kein NDJSON-Parsen (Rust bleibt protokoll-dünn).
+                        sink.send(Message::text(format!(r#"{{"channel":"event","msg":{line}}}"#))).await?;
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -663,7 +665,10 @@ mod tests {
             .expect("Stream nicht beendet")
             .expect("kein WS-Fehler");
         match got {
-            Message::Text(t) => assert_eq!(t.as_str(), payload),
+            Message::Text(t) => {
+                assert!(t.as_str().contains(r#""channel":"event""#), "Event-Envelope fehlt: {t}");
+                assert!(t.as_str().contains(payload), "roher msg-Inhalt fehlt: {t}");
+            }
             other => panic!("unerwartete Nachricht: {other:?}"),
         }
         accept.abort();
