@@ -8,7 +8,7 @@
  */
 import { existsSync } from "node:fs";
 import { AgentSession } from "./session.js";
-import { send, log, envelope } from "./io.js";
+import { send, log, envelope, timelineSnapshot } from "./io.js";
 import { autoCommit, createPr, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest } from "./devserver.js";
@@ -375,6 +375,10 @@ export class Orchestrator {
       const gs = this.gitState.get(s.agentId);
       if (gs) this.emitGitStatus(s.agentId, gs);
       if (s.lastPr) this.emit({ ...envelope(), type: "pr_update", agentId: s.agentId, pr: s.lastPr });
+      // Timeline-VERLAUF zurückspielen — sonst sieht ein mitten im Lauf verbundener Client (iOS)
+      // nur den Live-Rest ab jetzt, nicht die bereits gestreamten Schritte. Frontend ignoriert das.
+      const tl = timelineSnapshot(s.agentId);
+      if (tl.length) this.emit({ ...envelope(), type: "agent_timeline", agentId: s.agentId, events: tl });
     }
     // Live-Refresh (git/PR) asynchron nachschieben — blockiert den Snapshot nicht.
     void this.pollAll();
