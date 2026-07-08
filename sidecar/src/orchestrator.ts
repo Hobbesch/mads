@@ -811,19 +811,25 @@ export class Orchestrator {
         // ungemergter Arbeit (normal fortsetzbar), NICHT „erledigt". Kein merged-Flag.
         offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url });
         log(`[orchestrator] reconcile: ${c.branch} ${doneWord}, aber ${aheadOfMain} neue Commit(s) über ${db} → aktiver Stream (ungemergte Arbeit)`);
-      } else if (!res.dirty && res.unpushed === 0) {
-        // FRÜHER wurde hier AUTOMATISCH aufgeräumt (removeWorktree + aus der Registry) → das schloss
-        // gemergte, saubere Streams beim Neustart OHNE Zutun. Der Nutzer merged aber regelmäßig, um
-        // Streams aktuell zu halten, und will WEITERarbeiten. Jetzt: nur als FORTSETZBAR anbieten,
-        // NIE automatisch entfernen. Aufräumen ist ausschließlich ein EXPLIZITER Klick („Aufräumen ✓"
-        // im Stream / „Integrieren & beenden"). So schließt ein Neustart nie einen Stream.
+      } else if (!res.dirty) {
+        // Wir sind im else-Zweig NACH `aheadOfMain > 0`, hier gilt also IMMER aheadOfMain === 0:
+        // HEAD ⊆ origin/main → ALLE Commits des Branches sind bereits in main. Ein von
+        // worktreeResidue gemeldetes `unpushed > 0` (origin/<branch>..<branch>) ist dann KEIN echter
+        // Rest, sondern ein SQUASH-MERGE-ARTEFAKT: nach dem Merge wird der Branch auf main
+        // zurückgesetzt; der Squash-Commit steckt in main/HEAD, aber nicht im alten Feature-Branch auf
+        // origin → rev-list zählt ihn fälschlich als „unpushed". Solche Streams sind sauber gemergt und
+        // sollen NORMAL FORTSETZBAR sein (der Nutzer merged regelmäßig, um weiterzuarbeiten) — NICHT
+        // fälschlich als „erledigt mit lokalen Resten" ins Aufräum-Banner (wo sie ohne Kachel
+        // „verschwinden"). Nur ein wirklich schmutziger Worktree (uncommittete Änderungen, unten) ist
+        // ein echter Rest. FRÜHER wurde hier zudem AUTOMATISCH aufgeräumt — auch das ist weg:
+        // Aufräumen ist ausschließlich ein EXPLIZITER Klick. So schließt/versteckt ein Neustart nie einen Stream.
         offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url });
-        log(`[orchestrator] reconcile: ${c.branch} ${doneWord} + sauber → als fortsetzbar angeboten (KEIN Auto-Cleanup)`);
+        log(`[orchestrator] reconcile: ${c.branch} ${doneWord} + sauberer Worktree (unpushed=${res.unpushed} = Squash-Artefakt, ignoriert) → als fortsetzbar angeboten`);
       } else {
-        // gemergt + nur ungespeicherte/untracked Reste (keine neuen Commits) → Aufräum-Kandidat mit Warnung.
+        // gemergt + WIRKLICH schmutziger Worktree (uncommittete/untrackte Änderungen) → Aufräum-Kandidat mit Warnung.
         offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url, merged: true, localChanges: true });
         residue.push(c.label);
-        log(`[orchestrator] reconcile: ${c.branch} ${doneWord}, aber lokale Reste (dirty=${res.dirty} unpushed=${res.unpushed}) → zur Prüfung`);
+        log(`[orchestrator] reconcile: ${c.branch} ${doneWord}, aber schmutziger Worktree (dirty=${res.dirty} unpushed=${res.unpushed}) → zur Prüfung`);
       }
     }
 
