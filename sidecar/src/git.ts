@@ -116,7 +116,7 @@ export async function getRepoInfo(
 
 export function classifyGitError(text: string): EscalationKind | undefined {
   const t = text.toLowerCase();
-  if (/\[rejected\]|non-fast-forward|updates were rejected|failed to push/.test(t)) return "push_rejected";
+  if (/\[rejected\]|non-fast-forward|updates were rejected|failed to push|cannot lock ref|stale info|but expected/.test(t)) return "push_rejected";
   if (/conflict|could not apply|needs merge/.test(t)) return "merge_conflict";
   if (/protected branch|protection|not allowed to push/.test(t)) return "protection_blocked";
   if (/authentication|could not read username|permission denied/.test(t)) return "auth_broken";
@@ -721,6 +721,24 @@ function parseUntrackedObstacles(text: string): string {
   return [...new Set(cand)].slice(0, 5).join(", ");
 }
 
+/**
+ * force-with-lease-Push mit EINEM Retry. Scheitert der Lease, weil sich das Remote zwischen fetch
+ * und push bewegt hat („cannot lock ref … is at X but expected Y", „stale info", „[rejected]"),
+ * frisch fetchen (remote-tracking-Ref auffrischen → Lease wird korrekt) und EINMAL neu versuchen.
+ * mads-Branches sind single-owner → der lokale (neueste) Rebase überschreibt sicher. Fängt die
+ * Autopilot-Push-Race ab, falls sich doch zwei Zyklen ins Gehege kommen.
+ */
+async function pushForceWithLease(worktree: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  let push = await git(["-C", worktree, "push", "--force-with-lease", ...args], worktree);
+  const leaseFailed = (p: { stdout: string; stderr: string }) =>
+    /cannot lock ref|stale info|\[rejected\]|is at [0-9a-f]+ but expected|force[- ]with[- ]lease/i.test(`${p.stderr}\n${p.stdout}`);
+  if (push.code !== 0 && leaseFailed(push)) {
+    await run("git", ["-C", worktree, "fetch", "origin"], worktree);
+    push = await git(["-C", worktree, "push", "--force-with-lease", ...args], worktree);
+  }
+  return push;
+}
+
 export async function syncBranch(
   worktree: string,
   branch: string,
@@ -775,7 +793,7 @@ export async function syncBranch(
   if (adr.error) return { ok: false, kind: "push_rejected", error: `ADR-Kollisionsauflösung: ${adr.error}` };
   const gate = await secretGateBeforePush(worktree, defaultBranch);
   if (!gate.ok) return gate;
-  const push = await git(["-C", worktree, "push", "--force-with-lease", "origin", branch], worktree);
+  const push = await pushForceWithLease(worktree, ["origin", branch]);
   if (push.code !== 0) {
     return { ok: false, kind: classifyGitError(push.stderr) ?? "push_rejected", error: push.stderr };
   }
@@ -794,7 +812,7 @@ export async function pushBranch(
   // normaler Push als „non-fast-forward" ab. mads-Branches sind single-owner → sicher
   // per --force-with-lease nachziehen (clobbert nur, wenn das Remote unverändert ist).
   if (push.code !== 0 && /\[rejected\]|non-fast-forward|fetch first|tip of your current branch is behind/i.test(`${push.stderr}\n${push.stdout}`)) {
-    push = await git(["-C", worktree, "push", "--force-with-lease", "-u", "origin", branch], worktree);
+    push = await pushForceWithLease(worktree, ["-u", "origin", branch]);
   }
   if (push.code !== 0) return { ok: false, kind: classifyGitError(push.stderr) ?? "push_rejected", error: push.stderr };
   return { ok: true };
