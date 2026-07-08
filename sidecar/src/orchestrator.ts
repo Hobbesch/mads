@@ -812,11 +812,13 @@ export class Orchestrator {
         offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url });
         log(`[orchestrator] reconcile: ${c.branch} ${doneWord}, aber ${aheadOfMain} neue Commit(s) über ${db} → aktiver Stream (ungemergte Arbeit)`);
       } else if (!res.dirty && res.unpushed === 0) {
-        await this.stopDevServerIf(c.agentId); // (Sicherheit) Dev-Server vor Worktree-Entfernung killen
-        await removeWorktree(repoRoot, c.worktreePath, c.branch);
-        dropped.add(c.agentId);
-        cleaned.push(c.label);
-        log(`[orchestrator] reconcile: ${c.branch} ${doneWord} + sauber → aufgeräumt`);
+        // FRÜHER wurde hier AUTOMATISCH aufgeräumt (removeWorktree + aus der Registry) → das schloss
+        // gemergte, saubere Streams beim Neustart OHNE Zutun. Der Nutzer merged aber regelmäßig, um
+        // Streams aktuell zu halten, und will WEITERarbeiten. Jetzt: nur als FORTSETZBAR anbieten,
+        // NIE automatisch entfernen. Aufräumen ist ausschließlich ein EXPLIZITER Klick („Aufräumen ✓"
+        // im Stream / „Integrieren & beenden"). So schließt ein Neustart nie einen Stream.
+        offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url });
+        log(`[orchestrator] reconcile: ${c.branch} ${doneWord} + sauber → als fortsetzbar angeboten (KEIN Auto-Cleanup)`);
       } else {
         // gemergt + nur ungespeicherte/untracked Reste (keine neuen Commits) → Aufräum-Kandidat mit Warnung.
         offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url, merged: true, localChanges: true });
