@@ -41,6 +41,10 @@ impl FsScope {
     fn roots(&self) -> Vec<PathBuf> {
         self.roots.lock().unwrap().clone()
     }
+    /// Liegt `p` (kanonisch) innerhalb eines bereits registrierten Roots?
+    fn contains(&self, p: &Path) -> bool {
+        self.roots.lock().unwrap().iter().any(|root| p.starts_with(root))
+    }
 }
 
 #[derive(Serialize)]
@@ -142,20 +146,48 @@ fn ensure_in_scope(scope: &FsScope, raw: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+/// Enthält der Pfad eine `.mads`-Komponente (ASCII-case-insensitiv)?
+fn has_mads_component(p: &Path) -> bool {
+    p.components()
+        .any(|c| matches!(c, Component::Normal(o) if o.to_string_lossy().eq_ignore_ascii_case(".mads")))
+}
+
+/// Liegt ein Pfad — NACH OS-Auflösung — im `.mads`-Verzeichnis? Nutzt die Bridge, um Remote-Zugriff
+/// aufs Metadaten-/Config-Verzeichnis zu sperren, in BEIDE Richtungen:
+///   • WRITE — `.mads/run.json` führt der Dev-Server als Shell aus (RCE), agents.json/Registry sind
+///     Host-State.
+///   • READ — `.mads/remote-bridge/key.pk8.der` (TLS-Server-Privatkey → Impersonation) und
+///     `devices.sqlite` (Auth-DB → Token-Diebstahl) dürfen NICHT über die Bridge exfiltriert werden.
+///
+/// WICHTIG (adversarial gehärtet): reiner String-Vergleich reicht NICHT. Das macOS-APFS-Volume ist
+/// case-/normalisierungs-insensitiv nach VOLLEM Unicode — `.mad\u{017f}` (langes s) faltet auf den
+/// echten Ordner `.mads`, `eq_ignore_ascii_case` sähe das nicht. Daher AUCH den kanonisierten Pfad
+/// prüfen: `canonicalize` lässt das OS die Komponente auf ihren echten on-disk-Namen (ASCII `.mads`)
+/// auflösen — deckt Unicode-Fold UND Symlinks in `.mads` ab. `is_denied` bleibt frei davon, damit der
+/// LOKALE Editor (vertrauenswürdiger Nutzer) run.json weiter bearbeiten darf.
+pub(crate) fn path_in_mads_dir(path: &str) -> bool {
+    let raw = Path::new(path);
+    // Roh-Pfad fängt den ASCII-Normalfall auch ohne existierendes Ziel.
+    if has_mads_component(raw) {
+        return true;
+    }
+    // Kanonisch (deepest-existing-ancestor) fängt Unicode-Fold/Symlink → echter `.mads`-Name.
+    matches!(canonicalize_allowing_missing(raw), Ok(canon) if has_mads_component(&canon))
+}
+
 /// Deny-Prüfung über alle Pfad-Komponenten (Vorrang vor Allow).
 fn is_denied(p: &Path) -> bool {
     for comp in p.components() {
         if let Component::Normal(os) = comp {
-            let name = os.to_string_lossy();
-            // geschützte Ordner
-            let dir = matches!(
-                name.as_ref(),
-                ".git" | ".ssh" | ".aws" | ".gnupg" | ".kube" | ".docker" | "node_modules" | "target"
-            );
-            // Credential-/Secret-Dateien (Name-basiert) — eine reine Ordner-Liste ließe
-            // .netrc/.npmrc/SSH-Keys/*.pem durch (INJ-3: Lese-Exfiltration von Zugangsdaten).
-            let file = matches!(
-                name.as_ref(),
+            let raw = os.to_string_lossy();
+            // Sicherheits-relevante Einträge case-INSENSITIV falten: das macOS-APFS-Default-Volume ist
+            // case-insensitive — `.ENV`/`Id_Rsa`/`.PEM`/`.SSH` dürfen die Secret-Sperre nicht per Groß-/
+            // Kleinschreibung umgehen (sonst Lese-Exfiltration von Credentials, INJ-3).
+            let name = raw.to_ascii_lowercase();
+            let name = name.as_str();
+            let secret_dir = matches!(name, ".git" | ".ssh" | ".aws" | ".gnupg" | ".kube" | ".docker");
+            let secret_file = matches!(
+                name,
                 ".env" | ".netrc" | ".npmrc" | ".pgpass" | ".gitconfig" | ".git-credentials" | ".pypirc"
             ) || name.starts_with(".env.")
                 || name.starts_with("id_rsa")
@@ -163,7 +195,11 @@ fn is_denied(p: &Path) -> bool {
                 || name.starts_with("id_ecdsa")
                 || name.starts_with("id_dsa")
                 || name.ends_with(".pem");
-            if dir || file {
+            // Rausch-/Performance-Ordner NUR case-SENSITIV sperren: `node_modules`/`target` sind
+            // Heuristik (kein Secret) — ein generischer Projektordner `Target`/`Node_Modules` soll
+            // dadurch nicht mitgesperrt werden.
+            let noise_dir = matches!(raw.as_ref(), "node_modules" | "target");
+            if secret_dir || secret_file || noise_dir {
                 return true;
             }
         }
@@ -188,9 +224,17 @@ fn canonicalize_allowing_missing(p: &Path) -> Result<PathBuf, String> {
         let parent = cur.parent().ok_or_else(|| "Ungültiger Pfad".to_string())?;
         if parent.exists() {
             let mut canon = std::fs::canonicalize(parent).map_err(|e| e.to_string())?;
-            // missing wurde von innen nach außen gesammelt → umgekehrt anhängen.
+            // missing wurde von innen nach außen gesammelt → umgekehrt anhängen. JEDE noch nicht als
+            // existent angenommene Komponente auf Symlink prüfen: ein DANGLING Symlink (Ziel fehlt)
+            // meldet `exists()==false` und käme sonst hier durch — der anschließende write würde ihm
+            // AUS DEM SCOPE folgen (TAU-1 / über file-rpc RB-FS-2). symlink_metadata folgt dem Link NICHT.
             for name in missing.iter().rev() {
                 canon.push(name);
+                if let Ok(meta) = std::fs::symlink_metadata(&canon) {
+                    if meta.file_type().is_symlink() {
+                        return Err("Pfad enthält einen Symlink (nicht erlaubt)".into());
+                    }
+                }
             }
             return Ok(canon);
         }
@@ -466,6 +510,48 @@ pub(crate) fn register_root_inner(scope: &FsScope, path: &str) -> Result<(), Str
         return Err("Root zu weit gefasst (Filesystem-Root/Home/System nicht erlaubt)".into());
     }
     scope.add_root(root); // mads-eigene Allow-Liste (der eigentliche Gate)
+    Ok(())
+}
+
+/// Remote-Bridge-Seed (RB-FS-1/TAU-2): den PRO-VERBINDUNGS-Scope host-seitig auf das AUTORITATIVE
+/// offene Projekt beschränken — `repoRoot` + NUR dessen Worktree-Unterordner `~/mads-worktrees/<slug>`.
+/// So wählt der Netzwerk-Peer NICHT selbst beliebige Roots (die Workspace-Trust-Grenze bleibt beim Host).
+pub(crate) fn seed_bridge_scope(scope: &FsScope, repo_root: Option<&Path>) {
+    if let Some(c) = repo_root.and_then(|r| std::fs::canonicalize(r).ok()) {
+        scope.add_root(c); // Schreibziele werden kanonisiert → der Repo-Root muss kanonisch sein.
+    }
+    // NUR den repo-spezifischen Unterordner seeden, NICHT die ganze `~/mads-worktrees`-Wurzel: die
+    // enthält die Worktrees ALLER Projekte → ein an Projekt A gepairtes Gerät könnte sonst B's
+    // (evtl. secret-haltige) Worktrees lesen/schreiben (RB-FS-1 Cross-Projekt-Leak).
+    // slug = ROHER basename(repoRoot) — exakt wie git.ts `repoSlug` (das den un-kanonisierten Pfad
+    // nimmt). NICHT canonicalize().file_name(): bei einem Symlink-Projektpfad (~/dev/current →
+    // …/mads-v2) legt git.ts Worktrees unter `current` an, der kanonische Name wäre `mads-v2` → der
+    // Remote käme nicht mehr an seine EIGENEN Worktrees (fail-closed-Regression).
+    if let (Some(home), Some(slug)) = (
+        std::env::var_os("HOME"),
+        repo_root.and_then(|r| r.file_name()),
+    ) {
+        // HOME (und die Worktree-Wurzel, falls vorhanden) kanonisieren → der Prefix matcht kanonisierte
+        // Schreibziele auch bei symlink-gemountetem HOME und bevor der <slug>-Ordner existiert.
+        let home_c = std::fs::canonicalize(&home).unwrap_or_else(|_| PathBuf::from(&home));
+        let base = home_c.join("mads-worktrees");
+        let base = std::fs::canonicalize(&base).unwrap_or(base);
+        scope.add_root(base.join(slug));
+    }
+}
+
+/// Bridge-`register_root`: akzeptiert NUR Pfade, die bereits INNERHALB des (via `seed_bridge_scope`
+/// gesetzten) Projekt-Scopes liegen. Ein Remote kann den Scope so nicht über Projekt/Worktrees
+/// hinaus ausweiten (RB-FS-1/TAU-2 über das Netz). Nicht die permissive `register_root_inner` nutzen!
+pub(crate) fn register_root_within(scope: &FsScope, path: &str) -> Result<(), String> {
+    let root = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    if !root.is_dir() {
+        return Err("Root muss ein existierendes Verzeichnis sein".into());
+    }
+    if !scope.contains(&root) {
+        return Err("Root außerhalb des Projekt-Scopes — nur Projekt/Worktrees registrierbar".into());
+    }
+    scope.add_root(root);
     Ok(())
 }
 

