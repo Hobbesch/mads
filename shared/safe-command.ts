@@ -328,18 +328,77 @@ export function isGitCommit(command: string): boolean {
  *   6) Schreib-Tools — tee/cp/mv/ln mit Ziel AUSSERHALB von Projekt/Temp.
  * Fällt nichts davon → ALLOW (Skripte, `python -c`, `-m`, node, Dev-Server, unbekannte lokale Tools).
  */
+/**
+ * SEC-2: Liest der Befehl die Umgebung oder eine Secret-Datei? Bash umgeht den `sensitivePath`-
+ * Schutz, der nur für die strukturierten Read/Glob-Tools greift. Konservativ (im Zweifel: fragen);
+ * die String-Ebene kann diese Klasse nicht abschließend lösen (echte Grenze = OS-Sandbox).
+ */
+function envOrSecretRead(s: string): string | null {
+  // (a) Ganze Umgebung dumpen (enthält ANTHROPIC_*/GH_TOKEN/AWS_*): `printenv` immer; `env` außer,
+  // wenn DIREKT eine Zuweisung folgt (`env NAME=val cmd` setzt Vars, dumpt nicht). Ein NACH-
+  // gestelltes bloßes `env` (wie in `env A=b env`) wird weiterhin gefangen (jedes Vorkommen zählt).
+  if (/(^|[\s;&|(])printenv(\s|$)/.test(s)) return "liest Umgebungsvariablen (Secrets) — printenv";
+  if (/(^|[\s;&|(])env(\s+(?![A-Za-z_][A-Za-z0-9_]*=)|\s*$)/.test(s))
+    return "liest die Umgebung (Secrets) — env";
+  // (a2) bash-native Voll-Dumps mit Werten: `export -p`, `declare -x|-p`, `typeset -x|-p` — dieselbe
+  // Klasse wie printenv/env, nur ein anderes Wort (ein injizierter Agent umginge sonst trivial).
+  if (/(^|[\s;&|(])(?:export\s+-p|declare\s+-\w*[xp]|typeset\s+-\w*[xp])(\s|$)/.test(s))
+    return "dumpt die exportierte Umgebung (Secrets) — export -p/declare";
+  // (b) Interpreter, der die Umgebung dumpt (os.environ / process.env / Ruby|Perl ENV) — der SDK-
+  // erbte Env liegt auch im Agenten-Shell-Prozess, den ein `python3 -c`/`node -e` erreicht.
+  if (/\bos\.environ\b|\bprocess\.env\b|%ENV\b|\$ENV\{|\bENV\.to_h\b/.test(s))
+    return "liest die Umgebung über einen Interpreter (Secrets)";
+  // (b2) Interpreter liest gezielt eine SECRET-benannte Variable (getenv/environ.get/ENV[…]) — fängt
+  // `os.getenv("ANTHROPIC_API_KEY")`, das weder os.environ (b) noch das $VAR-Muster (c) trifft. Der
+  // Var-Name muss ein Secret-Muster tragen, sonst nicht (getenv("PORT") bleibt erlaubt).
+  if (/(?:getenv|environ(?:\.get)?|ENV)\s*[([]\s*['"]?[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|_KEY|ANTHROPIC|OPENAI|GH_TOKEN|GITHUB_TOKEN|AWS_)/i.test(s))
+    return "liest eine Secret-Umgebungsvariable über einen Interpreter";
+  // (c) Explizit eine Secret-Umgebungsvariable lesen (echo/printf $KEY …). AWS_ACCESS_KEY_ID,
+  // *_KEY_ID und DATABASE_URL mitnehmen.
+  if (/\$\{?\s*(?:[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z_]*|[A-Za-z_]+_KEY(?:_ID)?|ANTHROPIC[A-Za-z_]*|OPENAI[A-Za-z_]*|GH_TOKEN|GITHUB_TOKEN|DATABASE_URL|AWS_(?:SECRET|SESSION|ACCESS)[A-Za-z_]*)\b/i.test(s))
+    return "liest eine Secret-Umgebungsvariable";
+  // (d) Zugriff auf eine Secret-DATEI — LEADING-COMMAND-AGNOSTISCH statt einer Reader-Whitelist
+  // (die awk/sed/base64/`< .env`/Interpreter-`open(".env")` durchließ = Whack-a-Mole). Konventionell
+  // secret-freie, committte Templates (.env.example/.sample/.template/.dist) vorher rausschneiden,
+  // damit `cat .env.example` nicht fragt — ein VERBLIEBENES bare `.env` (z. B. `cp .env.example .env`)
+  // löst weiterhin aus.
+  const withoutTemplates = s.replace(/\.env\.(?:example|sample|template|dist)\b/gi, " ");
+  if (/(?:\.env(?:\.[A-Za-z0-9_]+)?\b|\.envrc\b|\.netrc\b|\.npmrc\b|\.pgpass\b|\.git-credentials\b|\.aws\/|\.ssh\/|\.kube\/|\.gnupg\/|\.config\/(?:gh|gcloud)\/|\.docker\/config\.json\b|\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\.pem\b)/.test(withoutTemplates))
+    return "greift auf eine Secret-Datei zu (.env/.ssh/…)";
+  return null;
+}
+
 export function classifyBashCommand(command: string): AutoDecision {
   const cmd = command.trim();
   if (!cmd) return ASK("leerer Befehl");
 
-  // Anführungszeichen/Backticks → Leerzeichen: riskante Tokens INNERHALB von Code-Strings
-  // (z. B. python -c 'os.system("rm -rf x")') behalten so ihre Wortgrenzen und werden gefangen.
-  const neutralized = cmd.replace(/['"`]/g, " ");
+  // ZWEI neutralisierte Sichten, gegen mehrere Umgehungsklassen (CMD-1):
+  //  • `neutralized` (Quotes → Leerzeichen): riskante Tokens INNERHALB von Code-Strings
+  //    (python -c 'os.system("rm -rf x")') behalten ihre Wortgrenzen und werden gefangen.
+  //  • `collapsed` (Quotes UND Backslashes ENTFERNT): zieht per Word-Splitting zerlegte Tokens
+  //    wieder zusammen — sonst umgehen `\rm`, `\git push`, `c""url`, `r""m` die Grenzzeichen-Muster
+  //    (der Neutralizer strippte bisher keine Backslashes), obwohl die Shell den Token korrekt baut.
+  // Beide Sichten expandieren zusätzlich JEDE `${IFS…}`/`$IFS`-Parameter-Expansion zu Leerzeichen:
+  // das ist der klassische Klassifizierer-Bypass, der SONST die ganze DANGER-/Secret-Liste entschärft
+  // (`rm${IFS}-rf`, `cat${IFS}.env`, `${IFS}printenv`, auch die Modifier-Form `${IFS%??}gh`) — die
+  // Shell splittet dort trotzdem in echte Tokens. `[^}]*` deckt Modifier wie `%??`/`:0:1` ab.
+  const ifs = /\$\{IFS[^}]*\}|\$IFS\b/g;
+  const neutralized = cmd.replace(/['"`]/g, " ").replace(ifs, " ");
+  const collapsed = cmd.replace(/[\\'"`]/g, "").replace(ifs, " ");
 
-  for (const d of DANGER) if (d.re.test(neutralized)) return ASK(d.why);
+  for (const d of DANGER) if (d.re.test(neutralized) || d.re.test(collapsed)) return ASK(d.why);
 
-  const net = outwardNetworkRisk(neutralized);
+  const net = outwardNetworkRisk(neutralized) ?? outwardNetworkRisk(collapsed);
   if (net) return ASK(net);
+
+  // SEC-2: Umgebungs-/Secret-Lesen im Auto-Modus gaten (Bash umgeht den sensitivePath-Schutz der
+  // Read-Tools). Der Sidecar erbt ANTHROPIC_*/GH_TOKEN/AWS_* — `env`/`cat .env`/`echo $KEY` würden
+  // sie sonst still in den (jetzt redigierten, aber weiterhin sichtbaren) Stream schreiben. Der
+  // leading-command-agnostische Datei-Gate fragt bewusst FAIL-SAFE auch, wenn ein Befehl einen
+  // Secret-Dateinamen nur ERWÄHNT (z. B. `git commit -m '… .env …'`) — String-Ebene kann „nennt"
+  // und „liest" nicht sicher trennen; ein Skip per führendem git/gh übersähe `git commit && cat .env`.
+  const secretRead = envOrSecretRead(neutralized) ?? envOrSecretRead(collapsed);
+  if (secretRead) return ASK(secretRead);
 
   const pkg = pkgManagerRisk(cmd);
   if (pkg) return ASK(pkg);

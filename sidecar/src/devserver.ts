@@ -251,6 +251,14 @@ export class DevServerRun {
 
   private buildEnv(spec: ServiceSpec): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...process.env };
+    // RCE-1-Härtung: mads-/Agenten-eigene Secrets NICHT an den (aus `.mads/run.json` stammenden,
+    // un-sandboxed) Dev-Server vererben — der braucht sie nie; ein manipuliertes run.json könnte sie
+    // sonst exfiltrieren. Projekt-eigene Env (appsettings/VITE_*/DB) bleibt bewusst erhalten.
+    for (const k of Object.keys(env)) {
+      if (k.startsWith("ANTHROPIC_") || k.startsWith("CLAUDE_") || k === "GH_TOKEN" || k === "GITHUB_TOKEN" || k === "GH_ENTERPRISE_TOKEN") {
+        delete env[k];
+      }
+    }
     for (const [k, v] of Object.entries(spec.env ?? {})) env[k] = expandEnv(v);
     // Denselben node/npm wie der Sidecar erzwingen (dessen bin-Verzeichnis GANZ vorne im PATH).
     // Sonst nimmt die Sub-Shell evtl. ein node anderer Architektur (macOS: /usr/local x64 vs.

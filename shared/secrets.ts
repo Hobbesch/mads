@@ -15,8 +15,9 @@ export interface SecretHit {
 
 const PATTERNS: Array<{ kind: string; re: RegExp }> = [
   { kind: "Private Key", re: /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/ },
-  { kind: "AWS Access Key", re: /\bAKIA[0-9A-Z]{16}\b/ },
+  { kind: "AWS Access Key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/ }, // AKIA=long-lived, ASIA=temporary (SEC-3)
   { kind: "GitHub Token", re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/ },
+  { kind: "GitHub Fine-grained PAT", re: /\bgithub_pat_[0-9A-Za-z_]{20,}\b/ }, // SEC-3
   { kind: "GitLab Token", re: /\bglpat-[0-9A-Za-z_-]{20,}\b/ },
   { kind: "Slack Token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
   { kind: "Slack Webhook", re: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_+-]{20,}/ },
@@ -55,6 +56,23 @@ export function findSecrets(text: string): SecretHit[] {
     }
   }
   return hits;
+}
+
+/**
+ * Ersetzt JEDEN Treffer aller Muster durch einen Platzhalter (SEC-1/SEC-4: nicht nur der erste
+ * Treffer, sondern alle). Zum Redigieren von Egress-Text, BEVOR er den Host verlässt (NDJSON-Stream
+ * → UI/Bridge/Transcript, Stderr-Log). Kein Klartext-Secret bleibt zurück. Gibt bei keinem Treffer
+ * denselben String-Inhalt zurück (identitätsschonend für Aufrufer, die auf Änderung prüfen).
+ */
+export function redactSecrets(text: string): string {
+  const s = String(text ?? "");
+  if (!s) return s;
+  let out = s;
+  for (const p of PATTERNS) {
+    const g = new RegExp(p.re.source, p.re.flags.includes("g") ? p.re.flags : p.re.flags + "g");
+    out = out.replace(g, () => `«redacted:${p.kind}»`);
+  }
+  return out;
 }
 
 /** Diff-Wrapper: prüft nur hinzugefügte Zeilen (aber nicht den "+++"-Datei-Header). */

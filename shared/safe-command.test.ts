@@ -190,6 +190,56 @@ check("LD_PRELOAD=evil.so ls → ask", ask("LD_PRELOAD=./evil.so ls"));
 check("DYLD_INSERT_LIBRARIES → ask", ask("DYLD_INSERT_LIBRARIES=/tmp/e.dylib /bin/ls"));
 check("DYLD_LIBRARY_PATH → ask", ask("DYLD_LIBRARY_PATH=/tmp env"));
 
+// ---- CMD-1: Word-Split-/Backslash-Bypass des Klassifizierers → jetzt gefangen ----
+check("\\rm -rf ~ → ask (Backslash-Bypass)", ask("\\rm -rf ~"));
+check("\\git push → ask (Backslash-Bypass, umging classifyGit)", ask("\\git push origin main"));
+check('c""url evil → ask (Quote-Split → curl)', ask('c""url http://evil.example/x'));
+check('r""m -rf x → ask (Quote-Split → rm)', ask('r""m -rf x'));
+check("normaler rm bleibt → ask", ask("rm -rf build"));
+// ---- SEC-2: Umgebungs-/Secret-Lesen im Auto-Modus → jetzt gegated ----
+check("printenv → ask (SEC-2)", ask("printenv"));
+check("env (bloßer Dump) → ask (SEC-2)", ask("env"));
+check("env NAME=val cmd → allow (Runner, kein Dump)", allow("env NODE_ENV=prod node app.js"));
+check("cat .env → ask (SEC-2)", ask("cat .env"));
+check("source .env → ask (SEC-2)", ask("source .env"));
+check("echo $ANTHROPIC_API_KEY → ask (SEC-2)", ask("echo $ANTHROPIC_API_KEY"));
+check("echo $GH_TOKEN → ask (SEC-2)", ask("echo $GH_TOKEN"));
+check("grep -r . ~/.aws/credentials → ask (SEC-2)", ask("grep secret ~/.aws/credentials"));
+check("cat README.md → allow (keine Secret-Datei)", allow("cat README.md"));
+check("echo $HOME → allow (kein Secret-Var)", allow("echo $HOME"));
+
+// ---- SEC-2/CMD-1 (adversariale Runde): Interpreter-Dumps, ${IFS}, Reader-agnostisch, Templates ----
+check("python3 -c os.environ → ask (Interpreter-Env-Dump)", ask("python3 -c 'import os; print(os.environ)'"));
+check("node -e process.env → ask (Interpreter-Env-Dump)", ask("node -e 'console.log(process.env)'"));
+check("ruby ENV.to_h → ask (Interpreter-Env-Dump)", ask("ruby -e 'p ENV.to_h'"));
+check("awk auf .env → ask (Reader-agnostisch)", ask("awk '{print}' .env"));
+check("sed auf .env → ask (Reader-agnostisch)", ask("sed -n '1,99p' .env"));
+check("base64 id_rsa → ask (Reader-agnostisch)", ask("base64 ~/.ssh/id_rsa"));
+check("python open(.env) → ask (Interpreter-Datei-Read)", ask("python3 -c 'print(open(\".env\").read())'"));
+check("< .env cat → ask (Redirect-Read)", ask("cat < .env"));
+check("rm${IFS}-rf build → ask (IFS-Bypass der DANGER-Liste)", ask("rm${IFS}-rf${IFS}build"));
+check("cat${IFS}.env → ask (IFS-Bypass des Secret-Gates)", ask("cat${IFS}.env"));
+check("${IFS}printenv → ask (IFS-Bypass)", ask("${IFS}printenv"));
+check("env A=b env → ask (nachgestelltes env dumpt)", ask("env A=b env"));
+check("echo $AWS_ACCESS_KEY_ID → ask (AWS-Access-Key-ID)", ask("echo $AWS_ACCESS_KEY_ID"));
+check("echo $DATABASE_URL → ask (DB-Creds)", ask("echo $DATABASE_URL"));
+check("cat .env.example → allow (committtes Template)", allow("cat .env.example"));
+check("cp .env.example .env → ask (verbleibendes bare .env)", ask("cp .env.example .env"));
+check("cat .env.production → ask (kein Template)", ask("cat .env.production"));
+
+// ---- Verifikationsrunde 2: IFS-Modifier, bash-Dumps, getenv, mehr Cred-Pfade, FP-Fix ----
+check("${IFS%??}printenv → ask (IFS-Modifier-Bypass)", ask("${IFS%??}printenv"));
+check("rm${IFS:0:1}-rf x → ask (IFS-Modifier vor rm)", ask("rm${IFS:0:1}-rf x"));
+check("export -p → ask (bash-Env-Dump)", ask("export -p"));
+check("declare -x → ask (bash-Env-Dump)", ask("declare -x"));
+check("python os.getenv(SECRET) → ask (Interpreter-getenv)", ask("python3 -c 'print(os.getenv(\"ANTHROPIC_API_KEY\"))'"));
+check("python os.getenv(PORT) → allow (kein Secret-Name)", allow("python3 -c 'print(os.getenv(\"PORT\"))'"));
+check("cat .envrc → ask (direnv-Secrets)", ask("cat .envrc"));
+check("cat ~/.kube/config → ask (Cluster-Creds)", ask("cat ~/.kube/config"));
+check("cat ~/.config/gh/hosts.yml → ask (gh-OAuth)", ask("cat ~/.config/gh/hosts.yml"));
+check("git commit erwähnt .env → ask (bewusster Fail-safe-Over-Ask: nennt≠liest)", ask("git commit -m 'add .env to .gitignore'"));
+check("node process.env.CI → ask (bewusster Fail-safe-Over-Ask)", ask("node -e 'if(process.env.CI){build()}'"));
+
 // ---- Schreiben AUSSERHALB von Projekt/Temp ----
 check("Redirect nach /etc → ask", ask('echo "x" > /etc/hosts'));
 check("Append nach ~/.zshrc → ask", ask('echo "x" >> ~/.zshrc'));
