@@ -88,13 +88,17 @@ export interface NextStep {
  *  verschwindet sie beim nächsten PR-Poll (der den alten MERGED-Zustand refresht), obwohl es
  *  ungemergte Arbeit gibt. Genutzt vom aktiven Grid (AgentGrid) UND vom geführten nextStep. */
 export function isMergedDone(a: AgentVM): boolean {
-  // Ein AKTIVER/fortgesetzter Stream (Nutzer hat ihn resumt oder eine Nachricht geschickt → live=true,
-  // bleibt es über running/waiting_input hinweg; nur der passive Restore setzt false) ist NIE
-  // „erledigt". Sonst rutscht er beim nächsten PR-Poll aus dem aktiven Grid in die zugeklappte
-  // „Erledigt"-Sektion — genau der Bug, dass ein Stream nach dem Absenden eines Prompts „verschwindet",
-  // obwohl er gerade arbeitet oder auf eine Rückfrage wartet. Nur ein passiver, gemergter Stream ohne
-  // offene Arbeit ist wirklich erledigt.
-  if (a.live === true) return false;
+  // Ein Stream, der noch ARBEITET oder auf eine Rückfrage/Entscheidung wartet, ist NIE „erledigt"
+  // (caa3619): sonst rutscht er beim nächsten PR-Poll aus dem aktiven Grid in die zugeklappte
+  // „Erledigt"-Sektion, obwohl er gerade läuft/wartet. Deshalb schützt `live` — ABER nur, solange der
+  // SDK-Turn noch läuft. Ist der Turn beendet (Status „done"/„error"), darf `live` das nicht mehr
+  // überstimmen: `live` ist ein klebriges Frontend-Flag, das in-Session NIE zurückgesetzt wird (nur der
+  // passive Restore beim App-Neustart tut das) — sonst bliebe ein gemergter, fertiger Stream ewig im
+  // aktiven Grid (der gemeldete Bug: nach „Integrieren & beenden"/Selbst-Merge verschwindet die Kachel
+  // nicht). `ahead === 0` bleibt Pflicht: ein „Mergen & weiterarbeiten"-Stream zeigt nach dem nächsten
+  // Poll wieder MERGED, hat aber neue, ungemergte Commits (ahead>0) → bleibt so korrekt aktiv.
+  const stillWorking = a.status !== "done" && a.status !== "error";
+  if (a.live === true && stillWorking) return false;
   return a.pr?.state === "MERGED" && a.ahead === 0 && !a.dirty;
 }
 
