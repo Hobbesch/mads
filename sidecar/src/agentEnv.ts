@@ -1,0 +1,49 @@
+/**
+ * Env-Scrub für den Agenten-Tool-Prozess (User-Entscheidung 2026-07-09: „implement + live-test").
+ *
+ * Der Bash-Tool-Prozess eines Agenten läuft INNERHALB der Claude-Code-CLI, die die Agent-SDK als
+ * Subprozess startet. Dessen Env = das, was wir der SDK als `options.env` geben (die SDK MERGT nicht,
+ * sie ERSETZT — daher spreaden wir `process.env` und entfernen nur die Geheimnisse). Ohne Scrub
+ * könnte ein prompt-injizierter Agent `echo $GH_TOKEN` / `echo $AWS_SECRET_ACCESS_KEY` ausführen und
+ * die Tokens exfiltrieren (der Klassifizierer in safe-command.ts ist nur UX, keine harte Grenze).
+ *
+ * GESTRIPPT werden NUR Credentials, die die CLI für SICH NICHT braucht: GitHub- und AWS-Tokens.
+ * mads' EIGENE git/gh-Operationen laufen als separate Sidecar-Subprozesse (git.ts) mit der vollen
+ * Sidecar-Env — die sind unberührt und behalten GH_TOKEN.
+ *
+ * BEWUSSTE GRENZE (nicht hier lösbar): die Anthropic-Auth selbst — `ANTHROPIC_API_KEY` bzw.
+ * `CLAUDE_CODE_OAUTH_TOKEN` — lässt sich auf dieser Ebene NICHT vor dem Bash-Tool verstecken: die CLI
+ * BRAUCHT sie, und der Bash-Subprozess erbt genau diese CLI-Env. Sie hier zu strippen bräche die
+ * Agent-Authentifizierung. Das erfordert `apiKeyHelper` (Key out-of-band) oder eine OS-Sandbox, die
+ * die Env für Tool-Subprozesse getrennt kontrolliert — aufgeschobene Strukturarbeit.
+ */
+
+/** Credential-Env-Namen, die der Agenten-Tool-Prozess NICHT sehen soll (CLI braucht sie nicht). */
+export const AGENT_STRIPPED_ENV: readonly string[] = [
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GH_ENTERPRISE_TOKEN",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_SECURITY_TOKEN",
+];
+
+/**
+ * Kopie von `base` (Default: `process.env`) OHNE die AGENT_STRIPPED_ENV-Schlüssel. Gibt zusätzlich
+ * die tatsächlich entfernten Namen zurück (für ein transparentes Log beim Agent-Start).
+ */
+export function scrubbedAgentEnv(base: NodeJS.ProcessEnv = process.env): {
+  env: Record<string, string | undefined>;
+  stripped: string[];
+} {
+  const env: Record<string, string | undefined> = { ...base };
+  const stripped: string[] = [];
+  for (const k of AGENT_STRIPPED_ENV) {
+    if (env[k] !== undefined) {
+      delete env[k];
+      stripped.push(k);
+    }
+  }
+  return { env, stripped };
+}

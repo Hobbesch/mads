@@ -14,6 +14,7 @@ import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
 import { createWorktree, removeWorktree } from "./git.js";
 import { classifyToolCall, isGitCommit, registrableDomain, rememberableFetchDomain } from "../../shared/safe-command.js";
+import { scrubbedAgentEnv } from "./agentEnv.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
@@ -304,10 +305,18 @@ export class AgentSession {
         });
       }
 
+      // Env-Scrub: dem Agenten-Tool-Prozess GH-/AWS-Tokens entziehen (siehe agentEnv.ts). `options.env`
+      // ERSETZT die Env des CLI-Subprozesses (nicht mergen) → scrubbedAgentEnv spreadet process.env.
+      const agentEnv = scrubbedAgentEnv();
+      if (agentEnv.stripped.length) {
+        log(`[${this.agentId}] Agenten-Env bereinigt (nicht an Tool-Prozess vererbt): ${agentEnv.stripped.join(", ")}`);
+      }
+
       this.q = sdk.query({
         prompt: this.inbox,
         options: {
           cwd,
+          env: agentEnv.env,
           model: msg.model,
           // Effort/Ultracode (SDK-nativ): low/medium/high/xhigh → options.effort;
           // ultracode → effort xhigh + settings.ultracode. Ohne Effort → SDK-Default (high).
