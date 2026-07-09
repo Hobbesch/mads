@@ -68,6 +68,8 @@ export type HostMessage =
   | UpdateMainMsg
   | StartDevServerMsg
   | StopDevServerMsg
+  | HandoffExportMsg
+  | HandoffImportMsg
   | RequestSnapshotMsg
   | ShutdownMsg;
 
@@ -223,6 +225,21 @@ export interface RequestSnapshotMsg extends BaseMsg {
   type: "request_snapshot";
 }
 
+/** Kompletten Projekt-Stand (alle Streams: Code+Uncommittet+Registry+Verlauf+Claude-Sessions)
+ *  in EINE portable Datei exportieren (scripts/mads-handoff.mjs). */
+export interface HandoffExportMsg extends BaseMsg {
+  type: "handoff_export";
+  repoRoot: string;
+  outFile: string;
+}
+
+/** Einen zuvor exportierten Handoff-Stand importieren und die Streams wiederherstellen. */
+export interface HandoffImportMsg extends BaseMsg {
+  type: "handoff_import";
+  file: string;
+  targetRepoRoot?: string;
+}
+
 export interface SendInputMsg extends BaseMsg {
   type: "send_input";
   agentId: string;
@@ -318,7 +335,8 @@ export type SidecarMessage =
   | DevServerStatusMsg
   | DevServerLogMsg
   | ProjectLockedMsg
-  | SidecarErrorMsg;
+  | SidecarErrorMsg
+  | HandoffResultMsg;
 
 /**
  * Öffnen abgelehnt: dieses Projekt ist bereits in einer ANDEREN, laufenden mads-Instanz offen
@@ -553,6 +571,16 @@ export interface ResumableAgent {
 export interface ResumableAgentsMsg extends BaseMsg {
   type: "resumable_agents";
   agents: ResumableAgent[];
+}
+
+/** Ergebnis eines Handoff-Export/-Imports → treibt einen dismissbaren Hinweis-Banner im Frontend. */
+export interface HandoffResultMsg extends BaseMsg {
+  type: "handoff_result";
+  action: "export" | "import";
+  ok: boolean;
+  message: string;
+  path?: string;      // exportierte Datei (export) bzw. Ziel-Repo (import)
+  repoRoot?: string;  // nach Import: Projekt-Repo, das geöffnet werden kann
 }
 
 /**

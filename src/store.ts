@@ -10,7 +10,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { startSidecar, sendHost, envelope, pickFolder } from "./ipc";
+import { startSidecar, sendHost, envelope, pickFolder, pickSaveFile, pickHandoffFile } from "./ipc";
 import type {
   AgentStatus,
   SidecarMessage,
@@ -23,6 +23,7 @@ import type {
   GateStep,
   ResumableAgent,
   ReconcileSummaryMsg,
+  HandoffResultMsg,
   AutonomyConfig,
   PermissionMode,
   AutopilotLevel,
@@ -269,6 +270,8 @@ export interface MadsState {
   resumables: ResumableAgent[];
   /** Einmaliger GitHub-Abgleich beim Öffnen (FF main / aufgeräumt / Reste) — dismissbar. */
   reconcileSummary?: ReconcileSummaryMsg;
+  /** Ergebnis des letzten Handoff-Export/-Imports — treibt einen dismissbaren Banner. */
+  handoff?: HandoffResultMsg;
   collisions: Collision[];
   // ── Spracheingabe (lokales Whisper) ──
   whisper: WhisperVM;
@@ -320,6 +323,10 @@ export interface MadsState {
   init: () => Promise<void>;
   setAutonomy: (config: AutonomyConfig) => Promise<void>;
   openProject: () => Promise<void>;
+  /** Kompletten Projekt-Stand (alle Streams) in eine Datei exportieren bzw. eine importieren. */
+  exportHandoff: () => Promise<void>;
+  importHandoff: () => Promise<void>;
+  dismissHandoff: () => void;
   openRecentProject: (repoRoot: string, force?: boolean) => Promise<void>;
   forgetRecentProject: (repoRoot: string) => void;
   createAgent: (opts: {
@@ -712,6 +719,10 @@ export const useStore = create<MadsState>((set) => {
         set({ reconcileSummary: msg });
         break;
 
+      case "handoff_result":
+        set({ handoff: msg });
+        break;
+
       case "collision_warning":
         set({ collisions: msg.collisions });
         break;
@@ -936,6 +947,25 @@ export const useStore = create<MadsState>((set) => {
       set({ projectStatus: "opening", projectLocked: undefined });
       await sendHost({ ...envelope(), type: "open_project", projectId: crypto.randomUUID(), repoRoot });
     },
+
+    exportHandoff: async () => {
+      const project = useStore.getState().project;
+      if (!project) return;
+      const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+      const outFile = await pickSaveFile(`mads-handoff-${project.repo}-${stamp}.tar.gz`);
+      if (!outFile) return;
+      set({ handoff: undefined });
+      await sendHost({ ...envelope(), type: "handoff_export", repoRoot: project.repoRoot, outFile });
+    },
+
+    importHandoff: async () => {
+      const file = await pickHandoffFile();
+      if (!file) return;
+      set({ handoff: undefined });
+      await sendHost({ ...envelope(), type: "handoff_import", file });
+    },
+
+    dismissHandoff: () => set({ handoff: undefined }),
 
     openRecentProject: async (repoRoot, force) => {
       set({ projectStatus: "opening", projectLocked: undefined });
