@@ -4,7 +4,7 @@
  *  - SidecarMessages kommen als NDJSON-Zeilen über einen `Channel<SidecarChannelEvent>`.
  */
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { PROTOCOL_VERSION } from "../shared/protocol";
 import type { HostMessage, SidecarChannelEvent } from "../shared/protocol";
 
@@ -15,6 +15,21 @@ export function envelope() {
 /** Nativer macOS-Ordner-Picker. Gibt den gewählten Repo-Pfad zurück (oder null). */
 export async function pickFolder(): Promise<string | null> {
   const res = await open({ directory: true, multiple: false, title: "Projekt-Repo wählen" });
+  return typeof res === "string" ? res : null;
+}
+
+/** Nativer Speichern-Dialog für die Handoff-Datei. Gibt den Zielpfad zurück (oder null). */
+export async function pickSaveFile(defaultName: string): Promise<string | null> {
+  const res = await save({ title: "Stand exportieren", defaultPath: defaultName });
+  return res ?? null;
+}
+
+/** Nativer Öffnen-Dialog für eine Handoff-Datei (.tar.gz). Gibt den Pfad zurück (oder null). */
+export async function pickHandoffFile(): Promise<string | null> {
+  const res = await open({
+    directory: false, multiple: false, title: "Handoff-Datei öffnen",
+    filters: [{ name: "mads Handoff", extensions: ["gz", "tgz"] }],
+  });
   return typeof res === "string" ? res : null;
 }
 

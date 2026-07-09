@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useStore } from "./store";
 import { ActivityRail } from "./components/ActivityRail";
 import { PrimaryPanel } from "./components/PrimaryPanel";
@@ -31,6 +32,11 @@ export default function App() {
   const collisions = useStore((s) => s.collisions);
   const autonomy = useStore((s) => s.autonomy);
   const setAutonomy = useStore((s) => s.setAutonomy);
+  const exportHandoff = useStore((s) => s.exportHandoff);
+  const importHandoff = useStore((s) => s.importHandoff);
+  const handoff = useStore((s) => s.handoff);
+  const dismissHandoff = useStore((s) => s.dismissHandoff);
+  const openRecentProject = useStore((s) => s.openRecentProject);
   const [showNew, setShowNew] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
 
@@ -212,6 +218,20 @@ export default function App() {
                 </button>
               </>
             )}
+            <button
+              onClick={() => void importHandoff()}
+              title="Stand von einem anderen Rechner importieren (Handoff-Datei .tar.gz)"
+            >
+              ⤒ Import
+            </button>
+            {project && (
+              <button
+                onClick={() => void exportHandoff()}
+                title="Kompletten Stand (alle Streams: Code, Verlauf, Sessions) als Datei exportieren"
+              >
+                ⤓ Export
+              </button>
+            )}
             <button className="primary" onClick={() => setShowNew(true)}>
               + Neuer Stream
             </button>
@@ -337,6 +357,37 @@ export default function App() {
                 Unterbrochene fortsetzen ({interrupted.length})
               </button>
             )}
+          </div>
+        )}
+
+        {handoff && (
+          <div className="reconcile-banner">
+            <span className="reconcile-text">
+              {handoff.action === "export" ? "📦 Export" : "📥 Import"}
+              {handoff.ok ? " ✓ " : " ⚠ "}
+              {handoff.message}
+              {handoff.ok && handoff.action === "export" && handoff.path ? ` → ${handoff.path}` : ""}
+            </span>
+            {handoff.ok && handoff.action === "import" && handoff.repoRoot && (
+              <button
+                className="banner-action"
+                onClick={() => {
+                  const r = handoff.repoRoot!;
+                  dismissHandoff();
+                  void openRecentProject(r);
+                }}
+              >
+                Projekt öffnen
+              </button>
+            )}
+            {handoff.ok && handoff.action === "export" && handoff.path && (
+              <button className="banner-action" onClick={() => void revealItemInDir(handoff.path!)}>
+                Im Finder zeigen
+              </button>
+            )}
+            <button className="banner-action" onClick={() => dismissHandoff()}>
+              ✕
+            </button>
           </div>
         )}
 

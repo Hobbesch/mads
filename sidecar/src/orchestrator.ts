@@ -7,6 +7,8 @@
  *     mergeable, review) je Agent meldet → Eskalations-Signale fürs Dashboard.
  */
 import { existsSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { AgentSession } from "./session.js";
 import { send, log, envelope, timelineSnapshot } from "./io.js";
 import { autoCommit, createPr, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
@@ -345,6 +347,14 @@ export class Orchestrator {
         this.emitSnapshot();
         break;
 
+      case "handoff_export":
+        this.runHandoff("export", ["export", msg.repoRoot, msg.outFile]);
+        break;
+
+      case "handoff_import":
+        this.runHandoff("import", ["import", msg.file, ...(msg.targetRepoRoot ? [msg.targetRepoRoot] : [])]);
+        break;
+
       default:
         log("[orchestrator] unbekannter HostMessage-Typ", JSON.stringify(msg));
     }
@@ -389,6 +399,38 @@ export class Orchestrator {
     }
     // Live-Refresh (git/PR) asynchron nachschieben — blockiert den Snapshot nicht.
     void this.pollAll();
+  }
+
+  /**
+   * scripts/mads-handoff.mjs export|import als Subprozess ausführen und das Ergebnis als
+   * `handoff_result` melden. Bei erfolgreichem Import wird das (ggf. re-homed) Ziel-Repo aus der
+   * Skript-Ausgabe geparst und mitgeschickt → das Frontend bietet „Projekt öffnen" an, der
+   * anschließende Reconcile zeigt die Streams als fortsetzbar (mit Kontext).
+   */
+  private runHandoff(action: "export" | "import", args: string[]): void {
+    const script = fileURLToPath(new URL("../../scripts/mads-handoff.mjs", import.meta.url));
+    log(`[orchestrator] handoff ${action}: node ${script} ${args.join(" ")}`);
+    execFile("node", [script, ...args], { maxBuffer: 1 << 28, timeout: 600_000 }, (err, stdout, stderr) => {
+      const out = `${stdout ?? ""}${stderr ?? ""}`.trim();
+      const lines = out.split("\n").filter(Boolean);
+      if (err) {
+        const message = lines.slice(-3).join(" · ") || String(err);
+        this.emit({ ...envelope(), type: "handoff_result", action, ok: false, message });
+        log(`[orchestrator] handoff ${action} FEHLER: ${out}`);
+        return;
+      }
+      const summary = lines.filter((l) => /✓|Streams|Sessions|origin/.test(l)).join(" · ") || lines.slice(-2).join(" · ");
+      let repoRoot: string | undefined;
+      let path: string | undefined;
+      if (action === "export") {
+        path = args[2]; // outFile
+      } else {
+        repoRoot = out.match(/Import fertig → (.+)/)?.[1]?.trim();
+        path = repoRoot;
+      }
+      this.emit({ ...envelope(), type: "handoff_result", action, ok: true, message: summary, path, repoRoot });
+      log(`[orchestrator] handoff ${action} ok → ${summary}`);
+    });
   }
 
   // ---------------------------------------------------------------- GitHub
