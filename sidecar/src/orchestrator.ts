@@ -383,6 +383,9 @@ export class Orchestrator {
       // nur den Live-Rest ab jetzt, nicht die bereits gestreamten Schritte. Frontend ignoriert das.
       const tl = timelineSnapshot(s.agentId);
       if (tl.length) this.emit({ ...envelope(), type: "agent_timeline", agentId: s.agentId, events: tl });
+      // Offene Permission-Requests erneut senden — sonst sieht ein (wieder) verbundener Remote-Client
+      // eine noch wartende Rückfrage/Tool-Freigabe nicht und kann sie nicht beantworten.
+      s.resnapshotPermissions();
     }
     // Live-Refresh (git/PR) asynchron nachschieben — blockiert den Snapshot nicht.
     void this.pollAll();

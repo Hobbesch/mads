@@ -57,6 +57,9 @@ interface PendingPermission {
   suggestions?: unknown[]; // Regel-Vorschläge von Claude Code (für „Immer erlauben")
   input?: Record<string, unknown>; // ursprünglicher Tool-Input — als updatedInput zurückgeben
   toolName?: string; // für „Immer erlauben" domänenweit bei WebFetch (approvedFetchHosts)
+  // Die ursprünglich gesendete permission_request-Nutzlast (ohne envelope) — für Snapshot-Replay an
+  // (wieder) verbundene Remote-Clients: sonst sähen sie eine noch wartende Rückfrage nicht.
+  snapshot?: Record<string, unknown>;
 }
 
 interface SdkUserMessage {
@@ -184,6 +187,16 @@ export class AgentSession {
   /** Wartet eine Permission-Rückfrage? (Autopilot agiert nur, wenn der Stream ruhig ist.) */
   hasPending(): boolean {
     return this.pending.size > 0;
+  }
+
+  /** Offene Permission-Requests erneut senden — für den Snapshot an einen (wieder) verbundenen
+   *  Remote-Client. Ohne dies sähe ein erst NACH dem Emit verbundener Client (Reconnect, App-Update)
+   *  eine noch wartende Rückfrage/Tool-Freigabe nicht und könnte sie nicht beantworten. Idempotent:
+   *  gleiche requestId → beide Reducer (Desktop/iOS) ersetzen statt zu duplizieren. */
+  resnapshotPermissions(): void {
+    for (const p of this.pending.values()) {
+      if (p.snapshot) this.emit({ ...envelope(), ...p.snapshot });
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -425,10 +438,9 @@ export class AgentSession {
   ): Promise<PermissionResult> {
     return new Promise<PermissionResult>((resolve) => {
       const requestId = randomUUID();
-      this.pending.set(requestId, { resolve, suggestions: opts.suggestions as unknown[] | undefined, input, toolName });
       const isAsk = toolName === "AskUserQuestion";
-      this.emit({
-        ...envelope(),
+      // Nutzlast einmal bauen → im Pending-Eintrag ablegen (für Snapshot-Replay) → senden.
+      const request: Record<string, unknown> = {
         type: "permission_request",
         agentId: this.agentId,
         requestId,
@@ -439,7 +451,9 @@ export class AgentSession {
         blockedPath: opts.blockedPath as string | undefined,
         decisionReason: smartReason ?? (opts.decisionReason as string | undefined),
         suggestions: opts.suggestions as unknown[] | undefined,
-      });
+      };
+      this.pending.set(requestId, { resolve, suggestions: opts.suggestions as unknown[] | undefined, input, toolName, snapshot: request });
+      this.emit({ ...envelope(), ...request });
       this.setStatus("waiting_input", `permission: ${toolName}`);
     });
   }
@@ -646,9 +660,7 @@ export class AgentSession {
     await delay(700);
     // Permission-Loop demonstrieren:
     const requestId = randomUUID();
-    this.pending.set(requestId, { resolve: () => {} });
-    this.emit({
-      ...envelope(),
+    const request: Record<string, unknown> = {
       type: "permission_request",
       agentId: this.agentId,
       requestId,
@@ -656,7 +668,9 @@ export class AgentSession {
       input: { command: "git push -u origin feat/demo" },
       kind: "tool",
       decisionReason: "Push auf das Remote ist eine außen-sichtbare Aktion (mads-Invariante 3).",
-    });
+    };
+    this.pending.set(requestId, { resolve: () => {}, snapshot: request });
+    this.emit({ ...envelope(), ...request });
     this.setStatus("waiting_input", "permission: Bash");
     // wartet auf answerPermission -> mockAfterPermission()
   }
