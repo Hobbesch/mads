@@ -368,10 +368,115 @@ export async function createWorktree(
   return { ok: true, path };
 }
 
-export async function removeWorktree(repoRoot: string, path: string, branch?: string): Promise<void> {
+function sameFileContent(a: string, b: string): boolean {
+  try {
+    if (lstatSync(a).size !== lstatSync(b).size) return false;
+    return readFileSync(a).equals(readFileSync(b));
+  } catch {
+    return false;
+  }
+}
+
+export interface ReclaimResult {
+  /** Dateien, die es im Haupt-Checkout NICHT gab → dorthin kopiert (der eigentliche Verlust-Fix). */
+  restored: string[];
+  /** Dateien, die im Haupt abweichen → nach `.mads/reclaimed/<agentId>/…` gesichert (nicht überschrieben). */
+  reclaimed: string[];
+}
+
+/**
+ * Umkehrung von `seedLocalDevFiles` beim Cleanup: BEVOR ein Worktree (force-)entfernt wird, die lokale,
+ * gitignorte Dev-Config (Secrets/Keys) RETTEN — sie war nie in git (gitignored) und `worktree remove
+ * --force` löscht sie sonst spurlos (genau der Fall: ein im Stream angelegter API-Key verschwindet
+ * beim Aufräumen). Symmetrisch & konservativ:
+ *   • Kandidaten = aktive `.mads/worktree-seed`-Pfade + im STREAM live erkannte „confident"-Config
+ *     (fängt eine ERST im Stream erzeugte Datei wie appsettings.json, die der Haupt-Checkout nie hatte);
+ *     bewusste Opt-outs (auskommentierte Zeilen) werden respektiert.
+ *   • Gleiche Guards wie beim Seeden: keine Symlinks/Ordner/`..`/absoluten Pfade, ≤ 5 MB, nie Junk/Dumps.
+ *   • Fehlt die Datei im Haupt → kopieren (`restored`). Existiert sie & weicht ab → NICHT überschreiben,
+ *     sondern nach `.mads/reclaimed/<agentId>/…` sichern (`reclaimed`) → es geht nichts verloren, der
+ *     Mensch entscheidet, ob er die Stream-Version übernimmt. Best effort.
+ */
+export function reclaimSeedFiles(repoRoot: string, worktree: string): ReclaimResult {
+  const restored: string[] = [];
+  const reclaimed: string[] = [];
+  const agentId = basename(worktree) || "stream";
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  const mentioned = new Set<string>();
+
+  // Kuratierte Liste: aktive Pfade = Kandidat, '#'/'# ?' = bewusstes Opt-out (nicht zurückspiegeln).
+  try {
+    for (const raw of readFileSync(join(repoRoot, ".mads", "worktree-seed"), "utf8").split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (line.startsWith("#")) {
+        const m = line.match(/^#\s*\??\s*(\S+)/);
+        if (m) mentioned.add(m[1]);
+        continue;
+      }
+      const token = line.split(/\s+/)[0];
+      candidates.push(token);
+      mentioned.add(token);
+    }
+  } catch {
+    /* keine Liste → nur Live-Erkennung unten */
+  }
+  try {
+    for (const rel of detectIgnoredConfig(worktree).confident) if (!mentioned.has(rel)) candidates.push(rel);
+  } catch {
+    /* keine git-Erkennung → nur kuratierte Liste */
+  }
+
+  for (const rel of candidates) {
+    if (!rel || seen.has(rel) || isAbsolute(rel) || rel.split(sep).includes("..")) continue;
+    seen.add(rel);
+    try {
+      const src = join(worktree, rel);
+      const st = lstatSync(src);
+      if (!st.isFile() || st.size > SEED_MAX_BYTES) continue; // kein Symlink/Ordner/Riese
+      const dst = join(repoRoot, rel);
+      if (!existsSync(dst)) {
+        mkdirSync(dirname(dst), { recursive: true });
+        copyFileSync(src, dst);
+        restored.push(rel);
+      } else if (!sameFileContent(src, dst)) {
+        const bak = join(repoRoot, ".mads", "reclaimed", agentId, rel);
+        mkdirSync(dirname(bak), { recursive: true });
+        copyFileSync(src, bak);
+        reclaimed.push(rel);
+      }
+    } catch {
+      /* einzelne Datei nicht rettbar → überspringen */
+    }
+  }
+  restored.sort();
+  reclaimed.sort();
+  return { restored, reclaimed };
+}
+
+export async function removeWorktree(repoRoot: string, path: string, branch?: string): Promise<ReclaimResult> {
+  // VOR dem force-Entfernen die gitignorte Dev-Config retten (Secrets/Keys gehen sonst verloren).
+  // Best effort — blockiert das Cleanup nie.
+  let salvage: ReclaimResult = { restored: [], reclaimed: [] };
+  try {
+    if (existsSync(path)) {
+      salvage = reclaimSeedFiles(repoRoot, path);
+      if (salvage.restored.length || salvage.reclaimed.length)
+        log(
+          `[git] Cleanup ${branch ?? basename(path)}: gitignorte Dev-Config bewahrt — ` +
+            `${salvage.restored.length} gerettet` +
+            (salvage.reclaimed.length ? `, ${salvage.reclaimed.length} nach .mads/reclaimed/ gesichert` : "") +
+            ` (${[...salvage.restored, ...salvage.reclaimed].slice(0, 6).join(", ")})`,
+        );
+    }
+  } catch (e) {
+    log(`[git] reclaimSeedFiles fehlgeschlagen: ${String(e)}`);
+  }
   await git(["-C", repoRoot, "worktree", "remove", "--force", path], repoRoot);
   if (branch) await git(["-C", repoRoot, "branch", "-D", branch], repoRoot);
   await git(["-C", repoRoot, "worktree", "prune"], repoRoot);
+  return salvage;
 }
 
 /**

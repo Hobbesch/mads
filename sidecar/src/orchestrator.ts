@@ -289,7 +289,7 @@ export class Orchestrator {
             }
           }
           await this.stopDevServerIf(msg.agentId); // Dev-Server hält den Worktree offen → erst killen
-          await removeWorktree(root, path, msg.branch);
+          this.emitSeedReclaimed(msg.agentId, await removeWorktree(root, path, msg.branch));
           this.removed.add(msg.agentId); // aufgeräumt → merge-persist nicht wiederbeleben
           saveRegistry(root, loadRegistry(root).filter((e) => e.agentId !== msg.agentId));
           log(`[orchestrator] aufgeräumt: ${msg.branch ?? msg.agentId} (${path})`);
@@ -664,7 +664,7 @@ export class Orchestrator {
     if (s.worktreePath) {
       try {
         await this.stopDevServerIf(agentId); // Dev-Server killen, bevor der Worktree entfernt wird
-        await removeWorktree(s.repoRoot, s.worktreePath, s.branch);
+        this.emitSeedReclaimed(agentId, await removeWorktree(s.repoRoot, s.worktreePath, s.branch));
       } catch (e) {
         log(`[orchestrator] worktree cleanup after merge failed: ${String(e)}`);
       }
@@ -681,6 +681,25 @@ export class Orchestrator {
 
   private emitMergeResult(agentId: string, ok: boolean, reasons: string[], prNumber?: number): void {
     this.emit({ ...envelope(), type: "merge_result", agentId, ok, merged: ok, reasons, prNumber });
+  }
+
+  /** Hinweis im Stream-Verlauf, dass beim Aufräumen gitignorte Dev-Config gerettet wurde. */
+  private emitSeedReclaimed(agentId: string, salvage: { restored: string[]; reclaimed: string[] }): void {
+    if (!salvage.restored.length && !salvage.reclaimed.length) return;
+    const parts: string[] = [];
+    if (salvage.restored.length)
+      parts.push(`in den Haupt-Checkout gerettet: ${salvage.restored.join(", ")}`);
+    if (salvage.reclaimed.length)
+      parts.push(`abweichende nach .mads/reclaimed/ gesichert (Haupt-Version unberührt): ${salvage.reclaimed.join(", ")}`);
+    this.emit({
+      ...envelope(),
+      type: "agent_event",
+      agentId,
+      event: {
+        kind: "assistant_text",
+        text: `🔐 Aufräumen: gitignorte Dev-Config (Secrets/Keys) bewahrt — ${parts.join("; ")}.`,
+      },
+    });
   }
 
   /** Hinweis im Stream-Verlauf, dass der ADR-Kollisions-Backstop umnummeriert hat. */
