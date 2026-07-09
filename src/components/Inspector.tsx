@@ -13,6 +13,7 @@ import { ModelEffortPicker } from "./ModelEffortPicker";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
 import { blobToBase64 } from "../blob";
+import { loadUiPrefs, saveUiPrefs } from "../uiPrefs";
 import type { PermissionMode, ImageInput, AutopilotLevel } from "../../shared/protocol";
 
 // Stabile Leer-Referenz: ein zustand-Selektor darf NICHT bei jedem Render ein neues []
@@ -41,6 +42,10 @@ export function Inspector() {
   const devLog = useStore((s) => (s.selectedId ? s.devLog[s.selectedId] ?? NO_DEVLOG : NO_DEVLOG));
   const devLogRef = useRef<HTMLDivElement>(null);
   const devLogStickRef = useRef(true); // an den unteren Rand „geklebt"? (nur dann folgen)
+  // Auf-/Zu-Zustand des Dev-Server-Logs: FOLGT der Nutzer-Einstellung (persistent in uiPrefs) und
+  // klappt NICHT bei jeder neuen Log-Zeile selbständig auf. Vorher war <details open> statisch → React
+  // erzwang bei jedem Re-Render (jedes devserver_log-Event) wieder „auf", was den Chat verdrängte.
+  const [devLogOpen, setDevLogOpen] = useState(() => loadUiPrefs().devLogOpen);
   useLayoutEffect(() => {
     const el = devLogRef.current;
     if (el && devLogStickRef.current) el.scrollTop = el.scrollHeight; // nur, wenn User schon unten steht
@@ -466,7 +471,16 @@ export function Inspector() {
       </header>
 
       {agent.role === "sub" && (agent.devServer || devLog.length > 0) && (
-        <details className="devserver-log" open>
+        <details
+          className="devserver-log"
+          open={devLogOpen}
+          onToggle={(e) => {
+            const v = e.currentTarget.open;
+            if (v === devLogOpen) return; // nur echte Zustandswechsel persistieren (kein Render-Loop)
+            setDevLogOpen(v);
+            saveUiPrefs({ devLogOpen: v });
+          }}
+        >
           <summary>
             <span className={`devserver-dot ${agent.devServer?.state ?? "stopped"}`} />
             Dev-Server

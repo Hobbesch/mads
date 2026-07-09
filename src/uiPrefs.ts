@@ -29,6 +29,9 @@ export interface UiPrefs {
   defaultModel: string;
   /** Globaler Default für den Effort neuer Streams. */
   defaultEffort: EffortMode;
+  /** Ob der Dev-Server-Log-Bereich im Inspector auf-/zugeklappt ist (folgt der Nutzer-Einstellung,
+   *  klappt NICHT bei neuen Log-Zeilen selbständig auf). */
+  devLogOpen: boolean;
 }
 
 const KEY = "mads.uiPrefs";
@@ -47,6 +50,7 @@ const DEFAULTS: UiPrefs = {
   treePaneWidth: 200,
   defaultModel: DEFAULT_MODEL,
   defaultEffort: DEFAULT_EFFORT,
+  devLogOpen: true,
 };
 
 const VALID_VIEWS: ViewId[] = ["streams", "files", "settings"];
@@ -78,6 +82,7 @@ export function loadUiPrefs(): UiPrefs {
     if (!obj || typeof obj !== "object") return { ...DEFAULTS };
     const activeView: ViewId = VALID_VIEWS.includes(obj.activeView) ? obj.activeView : DEFAULTS.activeView;
     const railCollapsed = typeof obj.railCollapsed === "boolean" ? obj.railCollapsed : DEFAULTS.railCollapsed;
+    const devLogOpen = typeof obj.devLogOpen === "boolean" ? obj.devLogOpen : DEFAULTS.devLogOpen;
     // Nur bekannte Modelle akzeptieren; Effort auf das Modell begrenzen.
     const defaultModel = MODELS.some((m) => m.id === obj.defaultModel) ? (obj.defaultModel as string) : DEFAULTS.defaultModel;
     const defaultEffort = clampEffort(defaultModel, obj.defaultEffort as EffortMode) ?? DEFAULTS.defaultEffort;
@@ -89,6 +94,7 @@ export function loadUiPrefs(): UiPrefs {
       treePaneWidth: clampTreePaneWidth(obj.treePaneWidth),
       defaultModel,
       defaultEffort,
+      devLogOpen,
     };
   } catch {
     return { ...DEFAULTS };
