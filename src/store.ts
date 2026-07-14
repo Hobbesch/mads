@@ -431,6 +431,24 @@ export interface MadsState {
 
 const mkId = () => crypto.randomUUID();
 
+// Whisper halluziniert bei (fast) leerem/sehr kurzem Audio typische YouTube-Untertitel-Floskeln
+// (die im Trainingsmaterial massenhaft am Clip-Ende stehen). Backstop hinter der PTT-Halte-Schwelle:
+// ist der GANZE Transkript-Text nur eine solche Floskel, NICHT in den Entwurf einfügen. Nur exakte
+// Voll-Text-Treffer (nach Kleinschreibung + Satzzeichen-Trim), damit echte Diktate unberührt bleiben.
+const WHISPER_HALLUCINATIONS = new Set([
+  "you",
+  "thank you", "thank you very much", "thanks", "thanks for watching",
+  "thanks for watching!", "thank you for watching", "please subscribe",
+  "subtitles by the amara.org community",
+  "vielen dank", "vielen dank fürs zuschauen", "vielen dank für's zuschauen",
+  "untertitel", "untertitelung", "untertitel im auftrag des zdf für funk, 2017",
+  "untertitel der amara.org-community", "untertitelung des zdf, 2020",
+]);
+function isWhisperHallucination(text: string): boolean {
+  const t = text.toLowerCase().replace(/[\s.!?,…"„"»«]+$/u, "").replace(/^[\s.!?,…"„"»«]+/u, "").trim();
+  return WHISPER_HALLUCINATIONS.has(t);
+}
+
 // Transkript-Persistenz (Session-Restore): den UI-Verlauf je Stream debounced auf Platte
 // schreiben (<repoRoot>/.mads/transcripts/<agentId>.json), damit er nach dem Neustart
 // wieder erscheint. Pro Agent ein Timer; häufige Events werden gebündelt.
@@ -1519,8 +1537,9 @@ export const useStore = create<MadsState>((set) => {
       set((st) => ({ dictation: { ...st.dictation, recording: false, transcribing: true } }));
       try {
         const text = ((await invoke("dictation_stop")) as string).trim();
-        if (text && id) {
-          const cur = useStore.getState().drafts[id] ?? "";
+        if (text && id && !isWhisperHallucination(text)) {
+          // trailing Leerzeichen (u. a. das durchgelassene PTT-Leerzeichen) entfernen → kein doppeltes Space.
+          const cur = (useStore.getState().drafts[id] ?? "").replace(/[ \t]+$/, "");
           useStore.getState().setDraft(id, cur ? `${cur} ${text}` : text);
         }
         set(() => ({ dictation: { recording: false, transcribing: false } }));

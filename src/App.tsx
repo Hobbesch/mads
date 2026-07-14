@@ -99,7 +99,13 @@ export default function App() {
   // Datei-Filter …) NICHT gekapert, damit dort normal getippt werden kann.
   const pttActive = useRef(false); // eine PTT-Aufnahme läuft (Backend nimmt auf)
   const pttHeld = useRef(false); // Shift+Space als Hotkey erkannt UND Leertaste noch gehalten
+  const pttArmTimer = useRef<number | null>(null); // Timer bis zur Aufnahme-Armierung (Tipp-Schutz)
   useEffect(() => {
+    // Shift+Space nimmt erst nach dieser Halte-Schwelle auf. Ein flüchtiges Shift+Space beim schnellen
+    // Tippen (Shift für den nächsten Großbuchstaben überlappt mit dem Space des vorigen Worts) ist
+    // kürzer → löst KEINE Aufnahme aus. Sonst nahm Whisper Mini-/Leer-Audio auf und halluzinierte
+    // YouTube-Floskeln wie „Thank you" in den Composer (+ kurz die rote „Aufnahme läuft"-Anzeige).
+    const PTT_ARM_MS = 250;
     const editable = (el: Element | null): boolean => {
       if (!el) return false;
       const h = el as HTMLElement;
@@ -120,6 +126,10 @@ export default function App() {
     // statt `blur`, damit der erstmalige Mikrofon-TCC-Dialog (App bleibt sichtbar) die
     // laufende Aufnahme nicht abwürgt.
     const resetLatch = () => {
+      if (pttArmTimer.current !== null) {
+        clearTimeout(pttArmTimer.current);
+        pttArmTimer.current = null;
+      }
       const wasRecording = pttActive.current;
       pttActive.current = false;
       pttHeld.current = false;
@@ -136,14 +146,22 @@ export default function App() {
       }
       // Hotkey nur im Composer / außerhalb anderer Eingabefelder kapern.
       if (!e.shiftKey || !shouldHandle()) return;
-      // Ab hier ist Shift+Space als Diktat-Hotkey erkannt → Leerzeichen NIE durchlassen.
-      e.preventDefault();
       pttHeld.current = true; // ab jetzt schluckt der Guard oben alle Repeats, egal ob Shift noch hält
+      // Das ERSTE Space im Composer durchlassen: erweist sich das Shift+Space als bloßes Tippen (vor
+      // der Armierung losgelassen), hat der Nutzer sein Leerzeichen an der richtigen Stelle. Außerhalb
+      // des Composers (Body) preventDefault, sonst scrollt Space die Seite. Auto-Repeats fängt der
+      // Guard oben (pttHeld) ab, sobald die Aufnahme läuft.
+      const inComposer = (document.activeElement as HTMLElement | null)?.classList?.contains("composer-input");
+      if (!inComposer) e.preventDefault();
       if (e.repeat) return;
       const s = useStore.getState();
       if (s.dictation.recording || s.dictation.transcribing || s.whisper.downloading) return; // busy: nur schlucken
-      pttActive.current = true;
-      void s.startDictation();
+      // Erst nach der Halte-Schwelle wirklich aufnehmen (Tipp-Schutz, siehe PTT_ARM_MS).
+      pttArmTimer.current = window.setTimeout(() => {
+        pttArmTimer.current = null;
+        pttActive.current = true;
+        void useStore.getState().startDictation();
+      }, PTT_ARM_MS);
     };
     const onUp = (e: KeyboardEvent) => {
       if (e.code !== "Space" || (!pttActive.current && !pttHeld.current)) return;
@@ -151,6 +169,13 @@ export default function App() {
       pttActive.current = false;
       pttHeld.current = false;
       e.preventDefault();
+      if (pttArmTimer.current !== null) {
+        // Vor der Armierung losgelassen = flüchtiges Shift+Space (Tippen), keine PTT-Absicht:
+        // Aufnahme nie starten. Das Leerzeichen ging im Composer bereits durch.
+        clearTimeout(pttArmTimer.current);
+        pttArmTimer.current = null;
+        return;
+      }
       if (wasRecording) void useStore.getState().stopDictation();
     };
     const onVisibility = () => {
