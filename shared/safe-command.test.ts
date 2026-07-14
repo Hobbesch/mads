@@ -344,6 +344,25 @@ check("git commit-tree (plumbing) → NICHT", !isGitCommit("git commit-tree $t -
 // reason wird bei ask geliefert
 check("ask liefert reason", typeof classifyBashCommand("git push").reason === "string");
 
+// ---- Kategorien (kind) für projektweites „Immer erlauben" ----
+const kind = (c: string) => classifyBashCommand(c).kind;
+check("curl → kind network", kind("curl https://app.ardexa.com/api/v1") === "network");
+check("docker compose → kind pkg", kind("docker compose -f x.yml up -d") === "pkg");
+check("rm -rf → kind danger", kind("rm -rf build") === "danger");
+check("cat .env → kind secret", kind("cat .env") === "secret");
+check("git push → kind git", kind("git push origin main") === "git");
+
+// ---- classifyToolCall: gemerkte Kategorie erlaubt still; danger ist NIE merkbar ----
+const bash = (c: string, approved: string[] = []) =>
+  classifyToolCall("Bash", { command: c }, { isKindApproved: (k) => approved.includes(k) }).decision;
+check("network gemerkt → curl allow", bash("curl https://x.com/api", ["network"]) === "allow");
+check("network NICHT gemerkt → curl ask", bash("curl https://x.com/api", []) === "ask");
+check("pkg gemerkt → docker allow", bash("docker compose up", ["pkg"]) === "allow");
+check("secret gemerkt → cat .env allow", bash("cat .env", ["secret"]) === "allow");
+check("danger gemerkt → rm bleibt ask (nie merkbar)", bash("rm -rf x", ["danger"]) === "ask");
+check("rm mit erlaubtem network+danger → weiterhin ask", bash("rm -rf x", ["network", "danger"]) === "ask");
+check("ohne isKindApproved-Callback → curl ask (Default sicher)", classifyToolCall("Bash", { command: "curl https://x.com" }, {}).decision === "ask");
+
 for (const r of results) console.log(r);
 console.log(`\n${results.length - failed} passed, ${failed} failed`);
 if (failed > 0) throw new Error(`${failed} safe-command test(s) failed`);

@@ -10,6 +10,8 @@
  * Sidecar und Frontend, damit beide denselben Vertrag sprechen.
  */
 
+import type { CommandKind } from "./safe-command.js";
+
 import type { Collision } from "./collision";
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -436,6 +438,9 @@ export interface PermissionRequestMsg extends BaseMsg {
   decisionReason?: string;
   questions?: AskQuestion[];
   suggestions?: unknown[]; // Regel-Vorschläge von Claude Code (für „Immer erlauben")
+  /** Bash-Kategorie (network/pkg/secret/git/write/danger) — steuert das projektweite „Immer erlauben".
+   *  Fehlt bei nicht-Bash-Tools und bei `danger` gibt es KEINEN „Immer erlauben"-Knopf. */
+  commandKind?: CommandKind;
 }
 
 export interface StatusUpdateMsg extends BaseMsg {

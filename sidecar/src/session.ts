@@ -13,7 +13,7 @@
 import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
 import { createWorktree, removeWorktree } from "./git.js";
-import { classifyToolCall, isGitCommit, registrableDomain, rememberableFetchDomain } from "../../shared/safe-command.js";
+import { classifyToolCall, isGitCommit, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
 import { scrubbedAgentEnv } from "./agentEnv.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -58,6 +58,7 @@ interface PendingPermission {
   suggestions?: unknown[]; // Regel-Vorschläge von Claude Code (für „Immer erlauben")
   input?: Record<string, unknown>; // ursprünglicher Tool-Input — als updatedInput zurückgeben
   toolName?: string; // für „Immer erlauben" domänenweit bei WebFetch (approvedFetchHosts)
+  commandKind?: CommandKind; // für „Immer erlauben" projektweit bei Bash (approvedKinds)
   // Die ursprünglich gesendete permission_request-Nutzlast (ohne envelope) — für Snapshot-Replay an
   // (wieder) verbundene Remote-Clients: sonst sähen sie eine noch wartende Rückfrage nicht.
   snapshot?: Record<string, unknown>;
@@ -143,6 +144,13 @@ function userMsg(text: string, images?: ImageInput[]): SdkUserMessage {
   return { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null };
 }
 
+/** Projektweite „Immer erlauben"-Freigaben (Bash-Kategorien), vom Orchestrator bereitgestellt und
+ *  persistiert. Alle Streams eines Projekts teilen sich denselben Zustand. */
+export interface PermissionHooks {
+  isKindApproved: (kind: CommandKind) => boolean;
+  approveKind: (kind: CommandKind) => void;
+}
+
 export class AgentSession {
   readonly agentId: string;
   status: AgentStatus = "starting";
@@ -177,12 +185,15 @@ export class AgentSession {
   // Vom Nutzer per „Immer erlauben" freigegebene WebFetch-Domains (registrierbare Domain, z. B.
   // „sec.gov") → weitere Seiten dort laufen ohne Rückfrage. Pro Stream, in-memory.
   private readonly approvedFetchHosts = new Set<string>();
+  // Projektweite „Immer erlauben"-Freigaben für Bash-Kategorien (vom Orchestrator, persistent).
+  private readonly perms?: PermissionHooks;
   private q?: QueryHandle;
   private readonly onChange?: () => void;
 
-  constructor(agentId: string, onChange?: () => void) {
+  constructor(agentId: string, onChange?: () => void, perms?: PermissionHooks) {
     this.agentId = agentId;
     this.onChange = onChange;
+    this.perms = perms;
   }
 
   /** Wartet eine Permission-Rückfrage? (Autopilot agiert nur, wenn der Stream ruhig ist.) */
@@ -428,13 +439,14 @@ export class AgentSession {
       const verdict = classifyToolCall(toolName, input, {
         cwd: this.cwd,
         isFetchHostApproved: (h) => this.approvedFetchHosts.has(registrableDomain(h)),
+        isKindApproved: (k) => this.perms?.isKindApproved(k) ?? false,
       });
       if (verdict.decision === "allow") {
         // updatedInput ist im CLI-Schema PFLICHT (Record) — sonst ZodError. Ursprünglichen
         // Input zurückgeben.
         return Promise.resolve({ behavior: "allow", updatedInput: input });
       }
-      return this.promptPermission(toolName, input, opts, verdict.reason);
+      return this.promptPermission(toolName, input, opts, verdict.reason, verdict.kind);
     }
     return this.promptPermission(toolName, input, opts);
   }
@@ -444,6 +456,7 @@ export class AgentSession {
     input: Record<string, unknown>,
     opts: Record<string, unknown>,
     smartReason?: string,
+    commandKind?: CommandKind,
   ): Promise<PermissionResult> {
     return new Promise<PermissionResult>((resolve) => {
       const requestId = randomUUID();
@@ -460,8 +473,10 @@ export class AgentSession {
         blockedPath: opts.blockedPath as string | undefined,
         decisionReason: smartReason ?? (opts.decisionReason as string | undefined),
         suggestions: opts.suggestions as unknown[] | undefined,
+        // Kategorie des Befehls → das Frontend zeigt „Immer erlauben (…)" nur für merkbare Kategorien.
+        commandKind,
       };
-      this.pending.set(requestId, { resolve, suggestions: opts.suggestions as unknown[] | undefined, input, toolName, snapshot: request });
+      this.pending.set(requestId, { resolve, suggestions: opts.suggestions as unknown[] | undefined, input, toolName, snapshot: request, commandKind });
       this.emit({ ...envelope(), ...request });
       this.setStatus("waiting_input", `permission: ${toolName}`);
     });
@@ -483,7 +498,7 @@ export class AgentSession {
       return false;
     }
     this.pending.delete(requestId);
-    const { resolve, suggestions, input, toolName } = entry;
+    const { resolve, suggestions, input, toolName, commandKind } = entry;
     if (decision.behavior === "allow") {
       // „Immer erlauben" bei WebFetch → die ganze DOMAIN dieses Streams merken (nicht die einzelne
       // URL) → weitere Seiten dort ohne Rückfrage. SSRF/privat/Creds sind ausgeschlossen (null).
@@ -493,6 +508,13 @@ export class AgentSession {
           this.approvedFetchHosts.add(dom);
           log(`[${this.agentId}] WebFetch-Domain gemerkt: ${dom}`);
         }
+      }
+      // „Immer erlauben" bei Bash → die KATEGORIE projektweit merken (persistent, via Orchestrator).
+      // `danger` ist nie merkbar (classifyToolCall reicht es gar nicht als merkbar durch, und der
+      // Orchestrator/Store filtert es zusätzlich) → destruktive Befehle fragen weiterhin.
+      if (decision.remember && toolName === "Bash" && commandKind && commandKind !== "danger") {
+        this.perms?.approveKind(commandKind);
+        log(`[${this.agentId}] Befehls-Kategorie projektweit gemerkt: ${commandKind}`);
       }
       resolve({
         behavior: "allow",

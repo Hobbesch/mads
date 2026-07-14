@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useStore } from "../store";
 import { toolDescription, toolCommand } from "../toolText";
 import type { AskQuestion, PermissionRequestMsg } from "../../shared/protocol";
+import { COMMAND_KIND_LABELS } from "../../shared/safe-command";
 
 // Sentinel für die „Etwas anderes…"-Option (Freitext statt einer angebotenen Option).
 const CUSTOM = "__custom__";
@@ -27,15 +28,25 @@ function ToolApproval({ req }: { req: PermissionRequestMsg }) {
         <button className="deny" onClick={() => void answer(req, { behavior: "deny", message: "Vom Nutzer abgelehnt" })}>
           Ablehnen
         </button>
-        {req.suggestions && req.suggestions.length > 0 && (
-          <button
-            className="allow-always"
-            title="Diese Art von Aktion für diese Sitzung merken (keine erneute Nachfrage)"
-            onClick={() => void answer(req, { behavior: "allow", remember: true })}
-          >
-            Immer erlauben
-          </button>
-        )}
+        {(() => {
+          // „Immer erlauben" für eine merkbare Bash-Kategorie (projektweit, persistent) ODER — wie
+          // bisher — für ein Tool mit Claude-Code-Regel-Vorschlägen (z. B. WebFetch-Domain). Das
+          // destruktive `danger` (rm/sudo/dd/…) ist NIE merkbar → kein Knopf.
+          const ck = req.commandKind;
+          const kindRemember = ck && ck !== "danger";
+          const suggestRemember = !!req.suggestions && req.suggestions.length > 0;
+          if (!kindRemember && !suggestRemember) return null;
+          const label = kindRemember ? `Immer erlauben (${COMMAND_KIND_LABELS[ck!]})` : "Immer erlauben";
+          const title = kindRemember
+            ? `„${COMMAND_KIND_LABELS[ck!]}" projektweit erlauben — diese Kategorie fragt danach nicht mehr, ` +
+              `auch über App-Neustarts. Destruktive Befehle (rm/sudo/…) bleiben immer eine Rückfrage.`
+            : "Diese Art von Aktion merken (keine erneute Nachfrage)";
+          return (
+            <button className="allow-always" title={title} onClick={() => void answer(req, { behavior: "allow", remember: true })}>
+              {label}
+            </button>
+          );
+        })()}
         <button className="allow" onClick={() => void answer(req, { behavior: "allow" })}>
           Erlauben{agent ? ` (${agent.label})` : ""}
         </button>

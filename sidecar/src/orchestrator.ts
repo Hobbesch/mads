@@ -9,7 +9,9 @@
 import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { AgentSession } from "./session.js";
+import { AgentSession, type PermissionHooks } from "./session.js";
+import { loadApprovedKinds, saveApprovedKinds } from "./permissions.js";
+import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot } from "./io.js";
 import { autoCommit, createPr, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
@@ -38,6 +40,9 @@ const POLL_INTERVAL_MS = 25_000;
 export class Orchestrator {
   private readonly pool = new Map<string, AgentSession>();
   private project?: ProjectInfo;
+  // Projektweite „Immer erlauben"-Freigaben für Bash-Kategorien (persistent in .mads/permissions.json).
+  // Alle Streams des Projekts teilen sich diesen Zustand; bei Projektwechsel neu geladen.
+  private readonly approvedKinds = new Set<CommandKind>();
   private pollTimer?: ReturnType<typeof setInterval>;
   // Re-Entrancy-Schutz: dauert ein Poll-Zyklus (fetch + Autopilot commit/push/PR) länger als das
   // Intervall, würde `setInterval` einen ZWEITEN parallel starten → zwei Push-/Rebase-Zyklen kollidieren
@@ -73,6 +78,7 @@ export class Orchestrator {
     switch (msg.type) {
       case "set_project":
         this.project = msg.project;
+        this.reloadApprovedKinds();
         log(`[orchestrator] project set: ${msg.project.owner}/${msg.project.repo} @ ${msg.project.repoRoot}`);
         this.startPolling();
         break;
@@ -117,6 +123,7 @@ export class Orchestrator {
           log(`[orchestrator] project switch → previous pool stopped & cleared`);
         }
         this.project = { projectId: msg.projectId, repoRoot: msg.repoRoot, ...info };
+        this.reloadApprovedKinds();
         this.emit({ ...envelope(), type: "project_resolved", project: this.project });
         log(`[orchestrator] project resolved: ${info.owner}/${info.repo} (default ${info.defaultBranch})`);
         void this.offerResumable(msg.repoRoot);
@@ -129,7 +136,7 @@ export class Orchestrator {
           log(`[orchestrator] agent ${msg.agentId} existiert bereits`);
           return;
         }
-        const session = new AgentSession(msg.agentId, () => this.persist());
+        const session = new AgentSession(msg.agentId, () => this.persist(), this.permHooks());
         this.pool.set(msg.agentId, session);
         await session.start(msg);
         this.persist();
@@ -233,7 +240,7 @@ export class Orchestrator {
           break;
         }
         // Neuen Sub-Stream im ausgelagerten Worktree starten (Autopilot committet/PRt die Änderungen).
-        const session = new AgentSession(msg.agentId, () => this.persist());
+        const session = new AgentSession(msg.agentId, () => this.persist(), this.permHooks());
         this.pool.set(msg.agentId, session);
         await session.start({
           ...envelope(),
@@ -699,6 +706,24 @@ export class Orchestrator {
   }
 
   /** Hinweis im Stream-Verlauf, dass beim Aufräumen gitignorte Dev-Config gerettet wurde. */
+  /** Projektweite „Immer erlauben"-Freigaben aus .mads/permissions.json (neu) laden. */
+  private reloadApprovedKinds(): void {
+    this.approvedKinds.clear();
+    if (this.project) for (const k of loadApprovedKinds(this.project.repoRoot)) this.approvedKinds.add(k);
+  }
+
+  /** Permission-Hooks, die jede Session bekommt: geteilter (live) Projekt-Zustand + Persistenz. */
+  private permHooks(): PermissionHooks {
+    return {
+      isKindApproved: (k) => this.approvedKinds.has(k),
+      approveKind: (k) => {
+        if (this.approvedKinds.has(k)) return;
+        this.approvedKinds.add(k);
+        if (this.project) saveApprovedKinds(this.project.repoRoot, this.approvedKinds);
+      },
+    };
+  }
+
   private emitSeedReclaimed(agentId: string, salvage: { restored: string[]; reclaimed: string[] }): void {
     if (!salvage.restored.length && !salvage.reclaimed.length) return;
     const parts: string[] = [];

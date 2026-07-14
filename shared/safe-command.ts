@@ -19,9 +19,26 @@
 
 import { findSecrets } from "./secrets.js";
 
-export type AutoDecision = { decision: "allow" | "ask"; reason?: string };
+/** Kategorie einer Rückfrage — steuert das projektweite „Immer erlauben". `danger` (destruktiv:
+ *  rm/sudo/dd/kill/…) ist BEWUSST NICHT merkbar und fragt IMMER. Alle anderen kann der Nutzer per
+ *  „Immer erlauben" für das Projekt freischalten (näher an Claude Code). */
+export type CommandKind = "danger" | "network" | "pkg" | "secret" | "git" | "write";
 
-const ASK = (reason: string): AutoDecision => ({ decision: "ask", reason });
+/** Kategorien, die „Immer erlauben" merken darf (alles außer dem destruktiven `danger`). */
+export const REMEMBERABLE_KINDS: readonly CommandKind[] = ["network", "pkg", "secret", "git", "write"];
+/** Menschliche Labels (Dialog-Knopf „Immer erlauben (…)" + Persistenz-Anzeige). */
+export const COMMAND_KIND_LABELS: Record<CommandKind, string> = {
+  danger: "destruktive Befehle",
+  network: "Netzwerkzugriff nach außen",
+  pkg: "Paket-/Dienst-Verwaltung",
+  secret: "Zugriff auf Secrets/Config",
+  git: "Git-Fernaktionen",
+  write: "Schreiben außerhalb des Projekts",
+};
+
+export type AutoDecision = { decision: "allow" | "ask"; reason?: string; kind?: CommandKind };
+
+const ASK = (reason: string, kind?: CommandKind): AutoDecision => ({ decision: "ask", reason, kind });
 const ALLOW: AutoDecision = { decision: "allow" };
 
 // Tools, die nur lesen → immer auto-erlaubt.
@@ -34,26 +51,30 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 // auswärts/destruktiv/System/Secrets — die IMMER fragen. Der Scan läuft QUOTE-NEUTRALISIERT
 // (Anführungszeichen → Leerzeichen), damit z. B. `python -c 'os.system("rm -rf x")'` das `rm`
 // trotzdem fängt. curl/wget (loopback-bewusst) und Paketmanager werden separat behandelt.
-const DANGER = [
-  { re: /(^|[\s;&|(])sudo(\s|$)/, why: "läuft mit sudo" },
-  { re: /(^|[\s;&|(])(rm|rmdir|shred|unlink)(\s|$)/, why: "löscht Dateien (rm)" },
-  { re: /(^|[\s;&|(])(chmod|chown|chgrp)(\s|$)/, why: "ändert Dateirechte" },
-  { re: /(^|[\s;&|(])(kill|killall|pkill|shutdown|reboot|halt)(\s|$)/, why: "beendet Prozesse / fährt herunter" },
-  { re: /(^|[\s;&|(])(dd|mkfs|diskutil|fdisk)(\s|$)/, why: "Datenträger-/Low-Level-Operation" },
+// Jeder Eintrag trägt seine KATEGORIE (kind) fürs „Immer erlauben": die echt destruktiven/Exploit-
+// Muster sind `danger` (NIE merkbar, fragen immer); Shell-Netz (ssh/scp/…) ist `network`, System-/
+// Paketwerkzeuge sind `pkg`, gh/git-Fern sind `git` — die kann der Nutzer projektweit freischalten.
+const DANGER: { re: RegExp; why: string; kind: CommandKind }[] = [
+  { re: /(^|[\s;&|(])sudo(\s|$)/, why: "läuft mit sudo", kind: "danger" },
+  { re: /(^|[\s;&|(])(rm|rmdir|shred|unlink)(\s|$)/, why: "löscht Dateien (rm)", kind: "danger" },
+  { re: /(^|[\s;&|(])(chmod|chown|chgrp)(\s|$)/, why: "ändert Dateirechte", kind: "danger" },
+  { re: /(^|[\s;&|(])(kill|killall|pkill|shutdown|reboot|halt)(\s|$)/, why: "beendet Prozesse / fährt herunter", kind: "danger" },
+  { re: /(^|[\s;&|(])(dd|mkfs|diskutil|fdisk)(\s|$)/, why: "Datenträger-/Low-Level-Operation", kind: "danger" },
   // Auswärts-Netz (Shell-Zugänge/Transfers). curl/wget sind NICHT hier — die sind loopback-bewusst.
-  { re: /(^|[\s;&|(])(nc|ncat|telnet|ssh|scp|sftp|rsync|ftp)(\s|$)/, why: "Netzwerkzugriff nach aussen" },
-  { re: /(^|[\s;&|(])(brew|apt|apt-get|yum|dnf|port|docker|podman|launchctl|crontab|systemctl)(\s|$)/, why: "System-/Paket-/Dienst-Verwaltung" },
-  { re: /(^|[\s;&|(])(osascript|defaults|pbcopy|pbpaste)(\s|$)/, why: "macOS-Systemfunktionen/Zwischenablage" },
-  { re: /(^|[\s;&|(])gh(\s|$)/, why: "GitHub-CLI (außen-sichtbar: PR/Issue/API)" },
+  { re: /(^|[\s;&|(])(nc|ncat|telnet|ssh|scp|sftp|rsync|ftp)(\s|$)/, why: "Netzwerkzugriff nach aussen", kind: "network" },
+  { re: /(^|[\s;&|(])(brew|apt|apt-get|yum|dnf|port|docker|podman|launchctl|crontab|systemctl)(\s|$)/, why: "System-/Paket-/Dienst-Verwaltung", kind: "pkg" },
+  { re: /(^|[\s;&|(])(osascript|defaults|pbcopy|pbpaste)(\s|$)/, why: "macOS-Systemfunktionen/Zwischenablage", kind: "danger" },
+  { re: /(^|[\s;&|(])gh(\s|$)/, why: "GitHub-CLI (außen-sichtbar: PR/Issue/API)", kind: "git" },
   // git außen-sichtbar/destruktiv — auch code-versteckt (Scan ist quote-neutralisiert). Den
   // nuancierten Top-Level-Fall (`git remote -v` ok, `git remote add` fragt; Config-Exec-Keys)
   // deckt zusätzlich classifyGit ab; hier nur die eindeutig riskanten Subcommands.
-  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*(push|pull|fetch|clone|reset|clean)(\s|$)/, why: "git außen-sichtbar/verändernd" },
-  { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)" },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*(push|pull|fetch|clone|reset|clean)(\s|$)/, why: "git außen-sichtbar/verändernd", kind: "git" },
+  { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)", kind: "danger" },
   // Hijack-/Egress-Umgebungsvariablen: laden fremde Libs bzw. übernehmen git/ssh nach aussen.
   {
     re: /(^|[\s;&|(])(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|DYLD_VERSIONED_LIBRARY_PATH|GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_PROXY_COMMAND|GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_ALTERNATE_OBJECT_DIRECTORIES)=/,
     why: "setzt eine Hijack-/Egress-Umgebungsvariable",
+    kind: "danger",
   },
 ];
 
@@ -386,10 +407,10 @@ export function classifyBashCommand(command: string): AutoDecision {
   const neutralized = cmd.replace(/['"`]/g, " ").replace(ifs, " ");
   const collapsed = cmd.replace(/[\\'"`]/g, "").replace(ifs, " ");
 
-  for (const d of DANGER) if (d.re.test(neutralized) || d.re.test(collapsed)) return ASK(d.why);
+  for (const d of DANGER) if (d.re.test(neutralized) || d.re.test(collapsed)) return ASK(d.why, d.kind);
 
   const net = outwardNetworkRisk(neutralized) ?? outwardNetworkRisk(collapsed);
-  if (net) return ASK(net);
+  if (net) return ASK(net, "network");
 
   // SEC-2: Umgebungs-/Secret-Lesen im Auto-Modus gaten (Bash umgeht den sensitivePath-Schutz der
   // Read-Tools). Der Sidecar erbt ANTHROPIC_*/GH_TOKEN/AWS_* — `env`/`cat .env`/`echo $KEY` würden
@@ -398,19 +419,19 @@ export function classifyBashCommand(command: string): AutoDecision {
   // Secret-Dateinamen nur ERWÄHNT (z. B. `git commit -m '… .env …'`) — String-Ebene kann „nennt"
   // und „liest" nicht sicher trennen; ein Skip per führendem git/gh übersähe `git commit && cat .env`.
   const secretRead = envOrSecretRead(neutralized) ?? envOrSecretRead(collapsed);
-  if (secretRead) return ASK(secretRead);
+  if (secretRead) return ASK(secretRead, "secret");
 
   const pkg = pkgManagerRisk(cmd);
-  if (pkg) return ASK(pkg);
+  if (pkg) return ASK(pkg, "pkg");
 
   const git = classifyGit(cmd);
-  if (git) return git;
+  if (git) return git.decision === "ask" ? { ...git, kind: git.kind ?? "git" } : git;
 
   const wr = unsafeWriteRedirect(cmd);
-  if (wr) return ASK(wr);
+  if (wr) return ASK(wr, "write");
 
   const wo = writesOutsideProject(cmd);
-  if (wo) return ASK(wo);
+  if (wo) return ASK(wo, "write");
 
   return ALLOW; // lokale Ausführung — im Trusted-Local-Dev-Modus erlaubt
 }
@@ -564,7 +585,11 @@ export function rememberableFetchDomain(url: string): string | null {
 export function classifyToolCall(
   toolName: string,
   input: Record<string, unknown> | undefined,
-  ctx: { cwd?: string; isFetchHostApproved?: (host: string) => boolean } = {},
+  ctx: {
+    cwd?: string;
+    isFetchHostApproved?: (host: string) => boolean;
+    isKindApproved?: (kind: CommandKind) => boolean;
+  } = {},
 ): AutoDecision {
   if (toolName === "AskUserQuestion") return ASK("Rückfrage des Agenten");
   if (READ_TOOLS.has(toolName)) {
@@ -584,7 +609,12 @@ export function classifyToolCall(
 
   if (toolName === "Bash") {
     const c = (input?.command ?? "") as string;
-    return classifyBashCommand(c);
+    const d = classifyBashCommand(c);
+    // Projektweit per „Immer erlauben" gemerkte Kategorie → still erlauben. `danger` (rm/sudo/dd/…)
+    // ist NIE merkbar und fragt weiterhin. Kombi-Befehle: klassifiziert wird der ERSTE Treffer, und
+    // die DANGER-Prüfung läuft zuerst → ein destruktiver Teil bleibt trotz erlaubtem network/pkg gegated.
+    if (d.decision === "ask" && d.kind && d.kind !== "danger" && ctx.isKindApproved?.(d.kind)) return ALLOW;
+    return d;
   }
 
   // Erstanbieter-Orchestrierungs-Tools des In-Process-MCP-Servers „mads". spawn_substreams
