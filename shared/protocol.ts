@@ -390,6 +390,9 @@ export type AgentEvent =
   | { kind: "assistant_text"; text: string }
   | { kind: "assistant_delta"; text: string }
   | { kind: "thinking"; text: string }
+  // Vom Menschen eingegebene Anweisung (Prompt). Der Sidecar emittiert sie als Event, damit sie
+  // auf ALLEN Clients (Mac + Remote) im Verlauf erscheint — nicht nur dort, wo sie getippt wurde.
+  | { kind: "user_text"; text: string; images?: number }
   | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown> }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; summary?: string; output?: string }
   | { kind: "system"; subtype: string; data?: Record<string, unknown> };

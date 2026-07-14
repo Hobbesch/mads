@@ -763,7 +763,11 @@ export const useStore = create<MadsState>((set) => {
 
       case "agent_event": {
         const ev = msg.event;
-        if (ev.kind === "assistant_text" || ev.kind === "assistant_delta") {
+        if (ev.kind === "user_text") {
+          // Vom Menschen eingegebene Anweisung (Mac ODER Remote) — vom Sidecar ausgespielt, damit sie
+          // auf ALLEN Clients im Verlauf steht. Ersetzt die frühere rein lokale, optimistische Anzeige.
+          if (ev.text.trim()) pushEvent(msg.agentId, { id: mkId(), kind: "user", text: ev.text, images: ev.images });
+        } else if (ev.kind === "assistant_text" || ev.kind === "assistant_delta") {
           if (ev.text.trim()) pushEvent(msg.agentId, { id: mkId(), kind: "assistant", text: ev.text });
         } else if (ev.kind === "thinking") {
           pushEvent(msg.agentId, { id: mkId(), kind: "thinking", text: ev.text });
@@ -1033,7 +1037,9 @@ export const useStore = create<MadsState>((set) => {
         live: true,
       };
       set((s) => ({ agents: { ...s.agents, [id]: agent }, order: [...s.order, id], selectedId: id }));
-      pushEvent(id, { id: mkId(), kind: "user", text: prompt });
+      // Start-Prompt NICHT optimistisch pushen: der Sidecar emittiert ihn als user_text-Event
+      // (session.start, vor der Worktree-Erstellung → praktisch instant) — so ist er auf Mac
+      // UND Remote identisch sichtbar, ohne Duplikat.
 
       const useWorktree = !mock && !!project && role === "sub";
       const finalBranch = branch?.trim() || slugifyBranch(label);
@@ -1170,7 +1176,8 @@ export const useStore = create<MadsState>((set) => {
 
     sendInput: async (id, text, images) => {
       const a = useStore.getState().agents[id];
-      pushEvent(id, { id: mkId(), kind: "user", text, images: images?.length });
+      // Folge-Anweisung NICHT optimistisch pushen: der Sidecar emittiert sie als user_text-Event
+      // (session.sendInput bzw. beim Resume session.start) → beidseitig sichtbar, kein Duplikat.
       patchAgent(id, { status: "running", workStartedAt: Date.now(), live: true });
       if (a && a.live === false) {
         // Passiv wiederhergestellter Stream (nicht im Pool) → Session erst fortsetzen,

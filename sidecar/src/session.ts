@@ -223,6 +223,7 @@ export class AgentSession {
     this.effort = msg.effort;
     this.lastPrompt = msg.prompt;
     this.permissionMode = msg.permissionMode;
+    this.emitUserText(msg.prompt); // Start-Prompt beidseitig sichtbar machen
     this.inbox.push(userMsg(msg.prompt));
     this.setStatus("running", "starting up");
 
@@ -546,6 +547,7 @@ export class AgentSession {
   }
 
   sendInput(text: string, images?: ImageInput[]): void {
+    this.emitUserText(text, images); // Folge-Anweisung beidseitig sichtbar machen
     this.inbox.push(userMsg(text, images));
     this.setStatus("running");
     if (this.mock) void this.runMock(text);
@@ -740,6 +742,15 @@ export class AgentSession {
   }
 
   // ----------------------------- Helpers ------------------------------------
+  /** Die vom Menschen eingegebene Anweisung als Event ausspielen → auf ALLEN Clients (Mac + Remote)
+   *  im Verlauf sichtbar, nicht nur dort, wo sie getippt wurde. Geht durch den zentralen Egress →
+   *  Timeline-Puffer (Snapshot-Replay für später verbundene Remotes) UND Bridge-Tee. */
+  private emitUserText(text: string, images?: ImageInput[]): void {
+    const t = text.trim();
+    if (!t) return;
+    this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "user_text", text: t, images: images?.length } });
+  }
+
   private emitText(text: string): void {
     this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "assistant_text", text } });
     if (this.mock) {
