@@ -141,9 +141,24 @@ export class Orchestrator {
         this.pool.get(msg.agentId)?.sendInput(msg.text, msg.images);
         break;
 
-      case "answer_permission":
-        this.pool.get(msg.agentId)?.answerPermission(msg.requestId, msg.decision);
+      case "answer_permission": {
+        const target = this.pool.get(msg.agentId);
+        const applied = target?.answerPermission(msg.requestId, msg.decision) ?? false;
+        if (!applied) {
+          // Bisher lief eine nicht zuordenbare (Fern-)Antwort LAUTLOS ins Leere → die Frage blieb
+          // ewig offen. Jetzt: Grund loggen UND ein sichtbares System-Event senden, damit der
+          // Client (iPad/Desktop) sieht, dass die Antwort nicht angekommen ist.
+          const why = target ? "Anfrage nicht mehr offen" : "Stream nicht aktiv";
+          log(`[orchestrator] answer_permission verworfen (${why}): agent=${msg.agentId} req=${msg.requestId}`);
+          this.emit({
+            ...envelope(),
+            type: "agent_event",
+            agentId: msg.agentId,
+            event: { kind: "system", subtype: `⚠ Antwort nicht angekommen (${why}) — Stream fortsetzen und erneut beantworten` },
+          });
+        }
         break;
+      }
 
       case "interrupt_agent":
         await this.pool.get(msg.agentId)?.interrupt();

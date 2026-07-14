@@ -467,11 +467,20 @@ export class AgentSession {
     });
   }
 
-  answerPermission(requestId: string, decision: PermissionDecision): void {
-    const entry = this.pending.get(requestId);
+  answerPermission(requestId: string, decision: PermissionDecision): boolean {
+    let entry = this.pending.get(requestId);
+    if (!entry && this.pending.size === 1) {
+      // requestId-Drift (z. B. nachdem ein Fern-Client per Snapshot neu verbunden hat): ist genau
+      // EINE Anfrage offen, ist die Zuordnung eindeutig → diese beantworten, statt die Antwort
+      // lautlos verpuffen zu lassen. Bei mehreren offenen Anfragen wird NICHT geraten (return false).
+      const only = [...this.pending.keys()][0];
+      log(`[${this.agentId}] answer_permission: requestId ${requestId} unbekannt → Fallback auf die einzige offene Anfrage ${only}`);
+      requestId = only;
+      entry = this.pending.get(only);
+    }
     if (!entry) {
-      log(`[${this.agentId}] unknown requestId`, requestId);
-      return;
+      log(`[${this.agentId}] answer_permission: keine passende offene Anfrage (requestId ${requestId}, offen: ${this.pending.size})`);
+      return false;
     }
     this.pending.delete(requestId);
     const { resolve, suggestions, input, toolName } = entry;
@@ -511,6 +520,7 @@ export class AgentSession {
     }
     this.setStatus("running");
     if (this.mock) void this.mockAfterPermission();
+    return true;
   }
 
   sendInput(text: string, images?: ImageInput[]): void {
