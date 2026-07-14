@@ -75,6 +75,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init()) // doc 07 §4.2 — für watch + Plugin-Scope
+        .plugin(tauri_plugin_notification::init()) // macOS-Benachrichtigung (mit Ton) bei Rückfrage
         .manage(SidecarState::default())
         .manage(FsScope::default()) // doc 07 §4.2 — Laufzeit-Allow-Liste
         .manage(DictationState::default()) // Spracheingabe (Whisper)

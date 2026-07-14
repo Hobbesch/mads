@@ -34,6 +34,7 @@ import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL } from "./modelCa
 import type { Collision } from "../shared/collision";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
+import { notifyOsPermission } from "./osNotify";
 import { toolCommand } from "./toolText";
 import { blobToBase64, base64ToBytes, extForMime, dirname } from "./blob";
 import { openMarkdownWindow } from "./detachWindow";
@@ -803,11 +804,18 @@ export const useStore = create<MadsState>((set) => {
         notice(msg.agentId, "warn", `● wartet auf dich${msg.message ? `: ${msg.message}` : ""}`);
         break;
 
-      case "permission_request":
+      case "permission_request": {
         patchAgent(msg.agentId, { status: "waiting_input" });
         notice(msg.agentId, "warn", `● Erlaubnis erforderlich: ${msg.toolName}`);
+        // NUR bei einer wirklich neuen Anfrage benachrichtigen (Snapshot-Replay re-emittiert dieselbe).
+        const isNew = !useStore.getState().permissions.some((p) => p.requestId === msg.requestId);
         set((s) => ({ permissions: [...s.permissions.filter((p) => p.requestId !== msg.requestId), msg] }));
+        if (isNew) {
+          const label = useStore.getState().agents[msg.agentId]?.label ?? msg.agentId;
+          void notifyOsPermission(msg, label); // macOS-Benachrichtigung, falls Fenster nicht im Fokus
+        }
         break;
+      }
 
       case "agent_done":
         patchAgent(msg.agentId, {

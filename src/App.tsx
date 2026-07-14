@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useStore } from "./store";
+import { ensureNotificationPermission } from "./osNotify";
 import { ActivityRail } from "./components/ActivityRail";
 import { PrimaryPanel } from "./components/PrimaryPanel";
 import { ChangeOverlay } from "./components/ChangeOverlay";
@@ -92,6 +93,12 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Beim Start die macOS-Benachrichtigungs-Erlaubnis einholen → Rückfragen können mit Ton gemeldet
+  // werden, wenn das mads-Fenster nicht im Vordergrund ist.
+  useEffect(() => {
+    void ensureNotificationPermission();
   }, []);
 
   // Spracheingabe-Hotkey: ⇧Leertaste = Push-to-talk (halten). Im Composer-Textarea wird
