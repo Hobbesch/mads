@@ -23,7 +23,7 @@ export function AboutDialog({ onClose }: { onClose: () => void }) {
           <img className="about-logo" src="/mads-logo.png" alt="mads" />
         </div>
         <div className="about-name">mads</div>
-        <div className="about-tagline">multi-agent development studio</div>
+        <div className="about-tagline">Multi Agent Design Studio</div>
         <div className="about-version-row">
           <span className="about-version">Version {RELEASE.version}</span>
           {RELEASE.isPreRelease && <span className="badge prerelease">{RELEASE.channel}</span>}

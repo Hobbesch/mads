@@ -103,7 +103,7 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
         {!railCollapsed && (
           <div className="brand-text">
             <div className="brand-name">mads</div>
-            <div className="brand-tag">multi-agent surface</div>
+            <div className="brand-tag">Multi Agent Design Studio</div>
           </div>
         )}
       </div>
