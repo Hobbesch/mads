@@ -1,0 +1,50 @@
+[package]
+name = "mads"
+version = "0.1.0"
+description = "mads — multi-agent development surface"
+authors = ["Hobbesch"]
+edition = "2021"
+
+[lib]
+name = "mads_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+libc = "0.2" # _exit() beim Quit — umgeht den ggml-metal C++-Static-Destructor-Abort
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = { version = "2", features = ["watch"] }
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Datei-Explorer (docs/design/07-file-explorer.md): ignore-aware Dir-Walk,
+# content-hash für das Conflict-Signal, base64 für Binär-/Bild-Payloads.
+ignore = "0.4"
+sha2 = "0.10"
+base64 = "0.22"
+# Spracheingabe (lokales whisper.cpp via whisper-rs, Metal-GPU auf Apple Silicon) +
+# Mikrofon-Aufnahme (cpal). Resampling auf 16 kHz und Modell-Download (curl) ohne
+# weitere Crates, um den nativen Build schlank zu halten.
+whisper-rs = { version = "0.16.0", features = ["metal"] }
+cpal = "0.18.1"
+
+# ── Remote-Bridge (docs/design/remote-companion-app.md; docs → mads-remote/docs/mads-bridge.md) ──
+# WSS-Server (TLS 1.3) + mDNS-Advertise, teet den Sidecar-stdout an gekoppelte iOS-Clients.
+# Wir bringen unser eigenes self-signed Zert (TOFU-Pinning) → KEINE webpki-/native-roots nötig
+# (das sind Client-Features); der Server nutzt tokio-rustls direkt als Acceptor.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
+tokio-tungstenite = "0.29"
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pki-types = "1"
+rcgen = "0.14"
+mdns-sd = "0.20"
+futures-util = "0.3"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+argon2 = "0.5"
+rand = "0.8" # stabile API (0.10 hat Breaking Changes); für Token-/PIN-CSPRNG (OsRng)
+qrcode = { version = "0.14", default-features = false, features = ["svg"] } # nur SVG-Render, KEINE image-Kette

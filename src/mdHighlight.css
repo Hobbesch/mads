@@ -1,0 +1,5 @@
+/* highlight.js-Token-Farben für die Markdown-Pipeline (rehype-highlight → .hljs*-Klassen).
+   Folgt OS-Light/Dark automatisch — passend zum App-Theme (prefers-color-scheme, App.css).
+   Hinweis: Der Code-Hintergrund kommt aus .md/.markdown-body; hier nur die Token-Farben. */
+@import "highlight.js/styles/github.css" screen and (prefers-color-scheme: light);
+@import "highlight.js/styles/github-dark.css" screen and (prefers-color-scheme: dark);

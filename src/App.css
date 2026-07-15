@@ -1,0 +1,3730 @@
+:root {
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+
+  --bg: #ececec;
+  --bg-content: #f6f6f7;
+  --sidebar-bg: rgba(245, 245, 247, 0.72);
+  --panel: #ffffff;
+  --panel-2: #fbfbfd;
+  --text: #1d1d1f;
+  --text-dim: #6e6e73;
+  --text-faint: #8e8e93;
+  --border: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --accent: #0a84ff;
+  --accent-weak: rgba(10, 132, 255, 0.12);
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+
+  --s-blue: #0a84ff;
+  --s-green: #30d158;
+  --s-yellow: #ffb020;
+  --s-red: #ff453a;
+  --s-gray: #98989d;
+  --s-teal: #40c8e0;
+
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e20;
+    --bg-content: #232325;
+    --sidebar-bg: rgba(38, 38, 41, 0.7);
+    --panel: #2a2a2d;
+    --panel-2: #right;
+    --panel-2: #2f2f33;
+    --text: #f2f2f7;
+    --text-dim: #a1a1a6;
+    --text-faint: #8e8e93;
+    --border: rgba(255, 255, 255, 0.1);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --accent-weak: rgba(10, 132, 255, 0.22);
+    --shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+body {
+  background: var(--bg);
+  overflow: hidden;
+}
+button {
+  font-family: var(--font);
+  cursor: pointer;
+}
+
+/* Fenster über Drag-Regionen verschiebbar machen (kein nativer Titlebar bei
+   titleBarStyle: Overlay). Braucht zusätzlich core:window:allow-start-dragging. */
+*[data-tauri-drag-region] {
+  app-region: drag;
+  -webkit-app-region: drag;
+}
+/* Interaktive Elemente innerhalb von Drag-Regionen klickbar halten */
+[data-tauri-drag-region] button,
+[data-tauri-drag-region] input,
+[data-tauri-drag-region] select,
+[data-tauri-drag-region] a {
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
+}
+
+/* ---------------- App shell ---------------- */
+.app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* ---------------- Activity-Rail (Navigations-Toolbar, doc 10) ---------------- */
+.activity-rail {
+  width: 176px;
+  flex-shrink: 0;
+  background: var(--sidebar-bg);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  backdrop-filter: blur(28px) saturate(180%);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  /* Traffic-Light-Sicherheitsabstand (titleBarStyle: Overlay), übernommen von .sidebar. */
+  padding: 30px 8px 8px;
+  gap: 4px;
+  position: relative;
+  /* Die Rail bildet über `backdrop-filter` einen eigenen Stacking-Context. Ohne z-index läge
+     der (auf nav-Ebene gerenderte) Projekt-Popover unter den positionierten Content-Kacheln
+     (.card, z-index 6) → er erschien HINTER den Stream-Kacheln. z-index hebt die ganze Rail
+     samt Popover über den Content, bleibt aber unter echten Overlays (.perm-overlay 50,
+     .modal-overlay 60, .change-overlay 80), die die Rail weiterhin abdecken. */
+  z-index: 30;
+}
+.activity-rail.collapsed {
+  width: 52px;
+  align-items: stretch;
+}
+@media (prefers-reduced-transparency: reduce) {
+  .activity-rail {
+    background: var(--panel);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+.rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 8px;
+  cursor: pointer;
+  border-radius: 8px;
+}
+.rail-brand:hover {
+  background: rgba(120, 120, 128, 0.12);
+}
+.rail-brand:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.activity-rail.collapsed .rail-brand {
+  justify-content: center;
+  padding: 4px 0 8px;
+}
+
+.rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rail-top {
+  flex: 1;
+  overflow-y: auto;
+}
+.rail-bottom {
+  margin-top: auto;
+}
+.rail-item-wrap {
+  position: relative;
+}
+.rail-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 5px 6px;
+}
+
+.rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  padding: 7px 9px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+.rail-item.collapsed {
+  justify-content: center;
+  padding: 8px 0;
+}
+.rail-item:hover:not(:disabled) {
+  background: rgba(120, 120, 128, 0.14);
+}
+.rail-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.rail-item.active {
+  background: var(--accent-weak);
+  font-weight: 600;
+}
+/* Aktiv-Zustand NIE nur farblich: linker Akzent-Balken (doc 10 §8). */
+.rail-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+.rail-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.rail-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+.rail-item.active .rail-icon {
+  color: var(--accent);
+}
+.rail-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-shortcut {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.rail-badge {
+  position: absolute;
+  top: -5px;
+  right: -7px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--s-gray);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+.rail-badge.red {
+  background: var(--s-red);
+}
+.rail-badge.dot {
+  min-width: 8px;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  top: -2px;
+  right: -3px;
+}
+
+.rail-collapse {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  padding: 7px 9px;
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.rail-collapse:hover {
+  background: rgba(120, 120, 128, 0.14);
+}
+.rail-collapse:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.activity-rail.collapsed .rail-collapse {
+  justify-content: center;
+  padding: 8px 0;
+}
+
+/* Recent-/Projekt-Popover (übernimmt .recent-box/.project-box, doc 10 §1.3) */
+.recent-popover {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 70px; /* auf nav-Ebene gerendert → vertikal beim „Projekt"-Eintrag ankern */
+  z-index: 50;
+  width: 280px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.recent-popover-head {
+  font-size: 13px;
+  font-weight: 700;
+  padding: 2px 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-open-new {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-weight: 550;
+  font-size: 13px;
+}
+.recent-open-new:hover {
+  filter: brightness(1.08);
+}
+.brand-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+/* ---------------- About dialog ---------------- */
+.about-card {
+  width: 384px;
+  background: var(--panel);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 32px 28px 20px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.about-card::before {
+  content: "";
+  position: absolute;
+  top: -70px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 300px;
+  height: 300px;
+  background: radial-gradient(circle, rgba(10, 132, 255, 0.28), transparent 68%);
+  pointer-events: none;
+}
+.about-logo-wrap {
+  position: relative;
+}
+.about-logo {
+  width: 108px;
+  height: 108px;
+  border-radius: 26px;
+  box-shadow: 0 12px 34px rgba(10, 132, 255, 0.4);
+  position: relative;
+}
+.about-name {
+  font-size: 28px;
+  font-weight: 700;
+  margin-top: 14px;
+  letter-spacing: -0.01em;
+}
+.about-tagline {
+  font-size: 13px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+.about-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+.about-version {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: rgba(120, 120, 128, 0.16);
+  padding: 3px 10px;
+  border-radius: 20px;
+}
+.about-build {
+  margin-top: 6px;
+  font-size: 10.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-faint);
+}
+.about-desc {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  text-align: left;
+  margin: 16px 2px 14px;
+}
+.about-invariants {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  text-align: left;
+}
+.about-invariants li {
+  font-size: 12px;
+  color: var(--text);
+  padding-left: 20px;
+  position: relative;
+  line-height: 1.95;
+}
+.about-invariants li::before {
+  content: "✓";
+  position: absolute;
+  left: 2px;
+  color: var(--s-green);
+  font-weight: 700;
+}
+.about-invariants code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: rgba(120, 120, 128, 0.16);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.about-tech {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+.about-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+.about-actions button {
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-weight: 550;
+  font-size: 13px;
+}
+.about-actions .primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+.about-footer {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 16px;
+}
+.brand-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+.brand-tag {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.group-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  padding: 8px 8px 4px;
+}
+button.group-title.done-toggle {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+button.group-title.done-toggle:hover {
+  color: var(--text-dim);
+}
+.grid-done {
+  margin-top: 14px;
+}
+
+/* ---------------- Status dot ---------------- */
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.dot.pulse {
+  box-shadow: 0 0 0 0 currentColor;
+  animation: pulse 1.8s infinite;
+}
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(48, 209, 88, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(48, 209, 88, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(48, 209, 88, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dot.pulse {
+    animation: none;
+  }
+}
+
+/* ---------------- Main ---------------- */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-content);
+  min-width: 0;
+}
+.titlebar {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.titlebar-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+.titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--text-dim);
+}
+.pill.ready {
+  background: rgba(48, 209, 88, 0.16);
+  color: #28a745;
+}
+.pill.error {
+  background: rgba(255, 69, 58, 0.16);
+  color: #d33b30;
+}
+button.pill.version {
+  border: none;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: -0.01em;
+}
+button.pill.version:hover {
+  filter: brightness(1.08);
+}
+.pill.version.prerelease {
+  background: rgba(255, 176, 32, 0.18);
+  color: #b9791b;
+}
+.badge.prerelease {
+  background: rgba(255, 176, 32, 0.18);
+  color: #b9791b;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  padding: 6px 12px;
+  font-weight: 550;
+  font-size: 13px;
+}
+button.primary:hover {
+  filter: brightness(1.08);
+}
+.fatal-error {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg, #1e1e1e);
+  color: var(--text, #eee);
+}
+.fatal-card {
+  max-width: 760px;
+  width: 100%;
+}
+.fatal-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.fatal-sub {
+  font-size: 13px;
+  opacity: 0.8;
+  margin-bottom: 12px;
+}
+.fatal-trace {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 50vh;
+  overflow: auto;
+  background: rgba(255, 69, 58, 0.1);
+  border: 1px solid rgba(255, 69, 58, 0.3);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.fatal-reload {
+  margin-top: 14px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.escalation-banner {
+  background: rgba(255, 69, 58, 0.14);
+  color: #d33b30;
+  border-bottom: 1px solid rgba(255, 69, 58, 0.3);
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 550;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.escalation-banner .escalation-text {
+  flex: 1;
+  min-width: 0;
+}
+.banner-close {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 6px;
+  opacity: 0.7;
+}
+.banner-close:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.06);
+}
+.banner-action {
+  flex-shrink: 0;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 9px;
+  border-radius: 6px;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+.banner-action:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.06);
+}
+.resume-banner {
+  background: var(--accent-weak);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.resume-label {
+  font-weight: 600;
+  color: var(--accent);
+}
+.resume-banner button {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.resume-banner button:hover:not(.resume-all) {
+  background: var(--panel-2); /* nicht den weiß-schriftigen Accent-Button „Alle" überschreiben */
+}
+.resume-banner button.resume-all {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  font-weight: 600;
+  margin-left: auto;
+}
+.resume-banner button.resume-all:hover {
+  filter: brightness(1.08);
+}
+/* GitHub-Abgleich-Hinweis (was beim Öffnen automatisch bereinigt wurde). */
+.reconcile-banner {
+  background: rgba(40, 167, 69, 0.12);
+  color: #2a8a43;
+  border-bottom: 1px solid rgba(40, 167, 69, 0.28);
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 550;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.reconcile-banner .reconcile-text {
+  flex: 1;
+  min-width: 0;
+}
+/* main hängt zurück & konnte nicht automatisch nachgezogen werden → Warnfarbe (amber). */
+.reconcile-banner.warn {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+  border-bottom-color: rgba(255, 176, 32, 0.3);
+}
+/* „Lokal hinter GitHub" — konsolidiertes Staleness-Banner mit „Alle aktualisieren". */
+.staleness-banner {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+  border-bottom: 1px solid rgba(255, 176, 32, 0.3);
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 550;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.staleness-banner .staleness-text {
+  flex: 1;
+}
+.staleness-banner .staleness-sync {
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 176, 32, 0.5);
+  background: rgba(255, 176, 32, 0.18);
+  color: #8a5a10;
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.staleness-banner .staleness-sync:hover {
+  background: rgba(255, 176, 32, 0.32);
+}
+/* „Erledigt (gemergt) mit lokalen Resten" — neutral-grau, Aufräumen statt Fortsetzen. */
+.resume-banner.done {
+  background: var(--panel-2);
+}
+.resume-banner.done .resume-label {
+  color: var(--text-dim, #6b7280);
+}
+.resume-banner button.resume-cleanup {
+  border-color: rgba(255, 176, 32, 0.5);
+}
+.resume-banner button.resume-cleanup:hover {
+  background: rgba(255, 176, 32, 0.16);
+}
+.collision-banner {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+  border-bottom: 1px solid rgba(255, 176, 32, 0.3);
+  padding: 8px 16px;
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+.collision-label {
+  font-weight: 700;
+}
+.collision-item {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* Autonomie-Toggles in der Titelleiste */
+.titlebar-right button.toggle {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text-faint);
+  border-radius: 20px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.titlebar-right button.toggle.on {
+  background: rgba(48, 209, 88, 0.16);
+  color: #28a745;
+  border-color: transparent;
+}
+
+/* ---------------- Body split ---------------- */
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.center {
+  width: 46%;
+  max-width: 560px;
+  min-width: 320px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 14px;
+}
+.center-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  padding: 2px 4px 10px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 12px;
+}
+
+/* ---------------- Agent card ---------------- */
+.card {
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.05s;
+  color: var(--text);
+}
+.card:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.07);
+}
+.card:active {
+  transform: scale(0.995);
+}
+.card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-weak);
+}
+.card.needs-input {
+  border-color: var(--s-yellow);
+}
+.card.escalated {
+  border-color: var(--s-red);
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Laufend-Spinner auf der Agent-Karte (nutzt @keyframes spin). */
+.card-spin {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .card-spin {
+    animation-duration: 2.4s;
+  }
+}
+.card-label {
+  font-weight: 600;
+  font-size: 13px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.role-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.role-badge.integrator {
+  background: rgba(94, 92, 230, 0.16);
+  color: #5e5ce6;
+}
+.role-badge.sub {
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--text-dim);
+}
+.card-step {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.card-cost {
+  font-variant-numeric: tabular-nums;
+}
+.card-flag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.card-flag.yellow {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+}
+.card-flag.red {
+  background: rgba(255, 69, 58, 0.16);
+  color: #d33b30;
+}
+
+/* ---------------- Empty state ---------------- */
+.empty-state {
+  margin: auto;
+  text-align: center;
+  max-width: 320px;
+  padding: 40px 0;
+}
+.empty-title {
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+.empty-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+/* ---------------- Inspector ---------------- */
+.inspector {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg-content);
+}
+.inspector.empty {
+  align-items: center;
+  justify-content: center;
+}
+.inspector-placeholder {
+  color: var(--text-faint);
+  font-size: 13px;
+}
+.inspector-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap; /* Aktionen brechen bei schmalem Inspector um statt überzulaufen */
+  gap: 6px 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.inspector-title {
+  flex: 1;
+  min-width: 0;
+}
+.inspector-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+.inspector-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.inspector-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  /* Zeilen-Abstand klein, Spalten-Abstand größer → sichtbare Trennung der beiden Cluster. */
+  gap: 7px 16px;
+  margin-left: auto;
+}
+/* Zwei aufgeräumte Cluster: links die Einstell-Dropdowns (insp-config), rechts die
+   Aktions-Buttons (insp-ops). JEDER Cluster bricht als EINHEIT um → nie überlappende oder
+   wild verteilte Kontrollen; bei schmalem Fenster stapeln sich die Cluster sauber. */
+.insp-config,
+.insp-ops {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+/* Einheitliche Höhe/Optik aller Steuerelemente (Selects wie Buttons). */
+.inspector-actions .mode-select,
+.inspector-actions .model-effort select,
+.inspector-actions button {
+  height: 30px;
+  box-sizing: border-box;
+}
+/* Modell/Effort im Inspector: kompakt, feste Eigenbreite — KEIN Wachsen (das verursachte die
+   Überlappung mit den Buttons). */
+.model-effort.inspector {
+  gap: 6px;
+}
+.model-effort.inspector select {
+  font-size: 12px;
+  padding: 5px 8px;
+  font-weight: 550;
+}
+.model-effort.inspector .me-model {
+  flex: 0 0 auto;
+  min-width: 84px;
+}
+.model-effort.inspector .me-effort {
+  flex: 0 0 auto;
+  min-width: 78px;
+}
+/* Kleines „Stream"-Label vor dem Pro-Stream-Picker (Gegenstück zum „· DEFAULT" der linken Leiste). */
+.insp-me {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.insp-me-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.inspector-actions button {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 550;
+}
+/* Generischer Hover NUR für die schlichten Buttons — NICHT für die farbigen Primär-Buttons
+   (step-primary/integrate, weiße Schrift): deren Hintergrund würde sonst auf hell gesetzt,
+   während die Schrift weiß bleibt → unlesbar. Die färben ihren Hover selbst (filter brightness). */
+.inspector-actions button:hover:not(.step-primary):not(.integrate) {
+  background: var(--panel-2);
+}
+.inspector-actions .danger {
+  color: #d33b30;
+}
+.inspector-actions .step-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  font-weight: 650;
+}
+.inspector-actions .step-primary.cleanup {
+  background: var(--s-teal, #2bb3a3);
+}
+.inspector-actions .step-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.inspector-actions .step-primary:disabled {
+  background: var(--panel);
+  color: var(--text-faint);
+  border-color: var(--border);
+  cursor: default;
+}
+.inspector-actions .integrate {
+  background: var(--s-green);
+  color: #fff;
+  border-color: transparent;
+}
+.inspector-actions .integrate:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.inspector-actions .integrate:disabled {
+  background: var(--panel);
+  color: var(--text-faint);
+  border-color: var(--border);
+  cursor: default;
+}
+/* ---------------- Message timeline (Chat-Detailansicht, VS-Code-Stil) ---------------- */
+.timeline-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--bg-content);
+}
+.timeline {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 16px 20px 40px;
+  display: flex;
+  flex-direction: column;
+}
+/* „Zum Ende springen" — schwebt unten rechts, wenn man hochgescrollt ist. */
+.tl-jump {
+  position: sticky;
+  bottom: 10px;
+  align-self: flex-end;
+  margin-top: -34px; /* überlagert die Bottom-Padding-Zone, kein Layout-Sprung */
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+}
+.tl-jump:hover {
+  background: var(--panel-2);
+}
+.tl-empty {
+  color: var(--text-faint);
+  font-size: 13px;
+  padding: 20px 0;
+}
+.tl-user {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 14px;
+  font-weight: 550;
+  margin-bottom: 18px;
+  white-space: pre-wrap;
+}
+.tl-img-chip {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-weak);
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+.tl-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+.tl-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 6px;
+  flex-shrink: 0;
+  background: var(--text-faint);
+}
+.tl-dot.dim {
+  background: var(--border-strong);
+}
+.tl-dot.ok {
+  background: var(--s-green);
+}
+.tl-dot.err {
+  background: var(--s-red);
+}
+.tl-dot.running {
+  background: var(--accent);
+  animation: pulse 1.6s infinite;
+}
+
+.tl-tool-body {
+  flex: 1;
+  min-width: 0;
+}
+.tl-tool-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.tl-tool-name {
+  font-weight: 700;
+  font-size: 13px;
+}
+.tl-tool-desc {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.tl-io {
+  display: flex;
+  gap: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-top: 6px;
+}
+.tl-io-label {
+  flex-shrink: 0;
+  width: 26px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--mono);
+  padding-top: 2px;
+}
+.tl-io-content {
+  flex: 1;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  color: var(--text);
+}
+.tl-io-content.clamped {
+  max-height: 140px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 62%, transparent);
+  mask-image: linear-gradient(180deg, #000 62%, transparent);
+}
+.tl-expand {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 0 0;
+  cursor: pointer;
+}
+
+.tl-thinking-body {
+  flex: 1;
+}
+.tl-thinking-toggle {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+}
+.tl-thinking-text {
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  border-left: 2px solid var(--border-strong);
+  padding-left: 10px;
+}
+
+.tl-todos {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.tl-todos .todo {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text);
+}
+.tl-todos .todo.completed {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+.tl-todos .todo.in_progress {
+  font-weight: 600;
+}
+.todo-mark {
+  width: 14px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+.tl-todos .todo.completed .todo-mark {
+  color: var(--s-green);
+  text-decoration: none;
+}
+
+.tl-notice {
+  flex: 1;
+  font-size: 13px;
+}
+.tl-notice.ok {
+  color: #28a745;
+}
+.tl-notice.err {
+  color: #d33b30;
+}
+.tl-notice.warn {
+  color: #b9791b;
+}
+.tl-notice.accent,
+.tl-notice.info {
+  color: var(--text-dim);
+}
+.tl-working {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.tl-working-label {
+  font-style: italic;
+}
+.tl-working-time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+/* Mitlaufender Spinner — klares "es passiert etwas"-Signal. */
+.tl-spinner {
+  width: 11px;
+  height: 11px;
+  margin-top: 4px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tl-spinner {
+    animation-duration: 2.4s;
+  }
+}
+
+/* Markdown (Assistant-Text) */
+.md {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+}
+/* Chat-Markdown-Wrapper aus MarkdownView (className="md-inner"): kein eigenes Box-Modell,
+   damit die Inhalte direkte Layout-Kinder von .md sind (first/last-child-Reset greift) und
+   die kompakten .md-Regeln statt github-markdown-css gelten. */
+.md-inner {
+  display: contents;
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md h1,
+.md h2,
+.md h3 {
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 18px 0 8px;
+}
+.md h1 {
+  font-size: 20px;
+}
+.md h2 {
+  font-size: 17px;
+}
+.md h3 {
+  font-size: 15px;
+}
+.md p {
+  margin: 8px 0;
+}
+.md ul,
+.md ol {
+  margin: 8px 0;
+  padding-left: 22px;
+}
+.md li {
+  margin: 3px 0;
+}
+.md a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.md a:hover {
+  text-decoration: underline;
+}
+.md code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  background: rgba(120, 120, 128, 0.18);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+.md pre {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.md pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+}
+.md table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 13px;
+  display: block;
+  overflow-x: auto;
+}
+.md th,
+.md td {
+  border: 1px solid var(--border-strong);
+  padding: 6px 10px;
+  text-align: left;
+}
+.md th {
+  background: var(--panel-2);
+  font-weight: 600;
+}
+.md blockquote {
+  border-left: 3px solid var(--border-strong);
+  margin: 8px 0;
+  padding-left: 12px;
+  color: var(--text-dim);
+}
+.composer {
+  display: flex;
+  align-items: flex-end; /* Send/Stop bleibt unten, während die Textarea wächst */
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+.composer-input {
+  flex: 1;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.4;
+  background: var(--panel);
+  color: var(--text);
+  resize: none; /* Höhe wächst automatisch (JS), keine Resize-Ecke */
+  min-height: 38px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.composer-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-weak);
+}
+.composer button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-weight: 550;
+}
+.composer button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* Kombinierter Senden(↑)/Stop(■)-Button im VS-Code-Stil */
+/* Spezifität .composer button.composer-btn (0,2,1) MUSS die generische
+   `.composer button { padding: 8px 16px }` (0,1,1) schlagen — sonst bekommt der
+   Icon-Button 16px Seitenpadding, wird breit/„länglich" und das Icon wirkt winzig. */
+.composer button.composer-btn {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+}
+/* „+"-Anhang-Button: dezenter Sekundär-Look (nicht gefüllt wie „Senden"). */
+.composer button.composer-btn.attach {
+  font-size: 22px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+}
+.composer button.composer-btn.attach:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.composer .icon-stop {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+.composer-wrap {
+  border-top: 1px solid var(--border);
+}
+.composer-wrap .composer {
+  border-top: none;
+}
+.composer-attachments {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px 0;
+}
+.thumb {
+  position: relative;
+}
+.thumb img {
+  height: 56px;
+  width: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  display: block;
+}
+.thumb button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--s-red);
+  color: #fff;
+  border: none;
+  font-size: 12px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+/* Datei-Anhang-Chip (Nicht-Bilder) — Name + Entfernen-Knopf. */
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 6px 4px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel-2);
+  font-size: 12px;
+  color: var(--text);
+}
+.file-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-chip button {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: none;
+  background: var(--border-strong);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.file-chip button:hover {
+  background: var(--s-red);
+  color: #fff;
+}
+/* Verstecktes Datei-Input hinter dem „+"-Button. */
+.composer-file-input {
+  display: none;
+}
+.mode-select {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 550;
+  font-family: var(--font);
+}
+
+/* ---------------- Modell-/Effort-Wähler (linke Nav = global; Inspector = pro Stream) ---------------- */
+.model-effort {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.model-effort select {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 550;
+  font-family: var(--font);
+}
+.model-effort .me-model {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.model-effort .me-effort {
+  flex: 0 0 auto;
+}
+.model-effort .me-effort-na {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+/* Rail-Variante: schmale linke Leiste → Modell + Effort voll gestapelt. */
+.rail-modeleffort {
+  padding: 8px 8px 4px;
+  border-top: 1px solid var(--border);
+}
+.rail-me-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  margin-bottom: 5px;
+}
+.model-effort.rail {
+  flex-wrap: wrap;
+}
+.model-effort.rail select {
+  font-size: 11px;
+  padding: 4px 6px;
+}
+.model-effort.rail .me-model,
+.model-effort.rail .me-effort {
+  flex: 1 1 100%;
+}
+/* Dialog-Variante: volle Breite im Formularfeld, Modell breiter als Effort. */
+.model-effort.dialog {
+  width: 100%;
+}
+.model-effort.dialog .me-model {
+  flex: 2 1 0;
+}
+.model-effort.dialog .me-effort {
+  flex: 1 1 0;
+}
+
+/* ---------------- Permission overlay ---------------- */
+.perm-overlay {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 50;
+}
+.perm-card {
+  width: 380px;
+  /* Nie höher als der Viewport (die Karte ist unten verankert und wuchs sonst oben aus dem
+     Bild). Kopf oben + „Antwort senden" unten fixiert, die Fragen dazwischen scrollen. */
+  max-height: calc(100vh - 36px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.perm-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 10px;
+  flex-shrink: 0;
+}
+.perm-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--s-yellow);
+  box-shadow: 0 0 0 4px rgba(255, 176, 32, 0.2);
+  flex-shrink: 0;
+}
+.perm-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.perm-subtitle {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.perm-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0; /* erlaubt dem inneren Scroll-Bereich zu schrumpfen statt überzulaufen */
+}
+/* Scrollbarer Fragen-/Inhalts-Bereich zwischen fixiertem Kopf und fixiertem Footer. */
+.perm-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 16px 10px;
+}
+.perm-tool {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.perm-desc {
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--text);
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+.perm-tool code,
+.perm-cmd {
+  font-family: var(--mono);
+}
+.perm-cmd {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0 0 10px;
+  max-height: 140px;
+  overflow: auto;
+}
+.perm-reason {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  line-height: 1.45;
+}
+.perm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0; /* fixierter Footer — „Antwort senden" bleibt immer sichtbar */
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+.perm-actions button {
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-weight: 600;
+  font-size: 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+}
+.perm-actions .allow {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+.perm-actions .allow-always {
+  background: var(--accent-weak);
+  color: var(--accent);
+  border-color: transparent;
+}
+.perm-actions .deny {
+  color: #d33b30;
+}
+.perm-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.perm-actions .parallel-btn {
+  margin-right: auto;
+  background: var(--accent-weak);
+  color: var(--accent);
+  border-color: transparent;
+}
+
+/* ---------------- Parallel-Streams-Picker ---------------- */
+.parallel-card {
+  width: 460px;
+}
+.parallel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50vh;
+  overflow: auto;
+  margin-bottom: 4px;
+}
+.parallel-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.parallel-item.on {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+}
+.parallel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.parallel-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.parallel-desc {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  margin: 4px 0 0 24px;
+  line-height: 1.4;
+}
+.parallel-brief {
+  width: 100%;
+  margin-top: 8px;
+  resize: vertical;
+  font: inherit;
+  font-size: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: var(--panel);
+  color: var(--text);
+  box-sizing: border-box;
+}
+.perm-question {
+  margin-bottom: 12px;
+}
+.perm-q {
+  font-size: 13px;
+  font-weight: 550;
+  margin-bottom: 8px;
+}
+.perm-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.perm-opt {
+  text-align: left;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  border-radius: 9px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text);
+}
+.perm-opt.chosen {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-weak);
+}
+.opt-label {
+  font-weight: 600;
+  font-size: 12px;
+}
+.opt-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+/* „Etwas anderes…"-Option: gestrichelt, um sie von den vorgegebenen Optionen abzuheben. */
+.perm-opt-custom {
+  border-style: dashed;
+}
+.perm-custom {
+  width: 100%;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.4;
+  resize: vertical;
+  min-height: 56px;
+}
+.perm-custom:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-weak);
+}
+
+/* ---------------- New stream modal ---------------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  display: grid;
+  place-items: center;
+  z-index: 60;
+}
+.modal {
+  width: 440px;
+  background: var(--panel);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.modal-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.field > span {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.field input,
+.field textarea,
+.field select {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: var(--font);
+  background: var(--panel-2);
+  color: var(--text);
+  resize: vertical;
+}
+.field input:focus,
+.field textarea:focus,
+.field select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-weak);
+}
+.field-row {
+  display: flex;
+  gap: 12px;
+}
+.field-row .field {
+  flex: 1;
+}
+.checkbox {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.checkbox input {
+  margin-top: 2px;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.modal-actions button {
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-weight: 550;
+  font-size: 13px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text);
+}
+.modal-actions .primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+.modal-actions .danger {
+  background: #d33b30;
+  color: #fff;
+  border-color: transparent;
+}
+/* Bestätigungs-Dialog: Folgen-Text */
+.confirm-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.confirm-body p {
+  margin: 0 0 8px;
+}
+.confirm-body code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+/* Rollen-Hinweis des Main-Streams (Integrator) — erklärt, dass hier orchestriert/integriert wird. */
+.inspector-rolehint {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--accent-weak);
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.inspector-rolehint code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.modal-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.modal-hint {
+  font-size: 12px;
+  color: #b9791b;
+  background: rgba(255, 176, 32, 0.14);
+  border-radius: 8px;
+  padding: 8px 10px;
+  line-height: 1.4;
+}
+
+/* ---------------- Project box (sidebar) ---------------- */
+.project-box {
+  background: rgba(120, 120, 128, 0.1);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 10px;
+}
+.project-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.project-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0;
+}
+.project-name {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-branch {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* ---------------- Zuletzt geöffnete Projekte ---------------- */
+.recent-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+.recent-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  padding: 2px 2px 1px;
+}
+.recent-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.recent-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 6px;
+  cursor: pointer;
+  text-align: left;
+}
+.recent-open:hover {
+  background: rgba(120, 120, 128, 0.12);
+}
+.recent-open:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.recent-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-path {
+  font-size: 10px;
+  color: var(--text-faint);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+}
+.recent-forget {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 5px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.recent-forget:hover {
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--text);
+}
+
+/* ---------------- Badges (git/PR) ---------------- */
+.card-branch {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.badges,
+.inspector-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.inspector-badges {
+  padding: 8px 16px 0;
+}
+.badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.badge.info {
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--text-dim);
+}
+.badge.ok {
+  background: rgba(48, 209, 88, 0.16);
+  color: #28a745;
+}
+.badge.warn {
+  background: rgba(255, 176, 32, 0.18);
+  color: #b9791b;
+}
+.badge.err {
+  background: rgba(255, 69, 58, 0.16);
+  color: #d33b30;
+}
+.pill.repo {
+  background: rgba(94, 92, 230, 0.16);
+  color: #5e5ce6;
+}
+.titlebar-right > button:not(.primary) {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-weight: 550;
+}
+
+/* ---------------- Primary-Panel (Mittel-Spalte, doc 10 §2.2 / doc 07) ---------------- */
+.primary-panel {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  min-width: 0;
+}
+.primary-panel-head {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  font-weight: 600;
+  font-size: 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
+/* ---------------- Settings-Panel ---------------- */
+.settings-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.settings-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.settings-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-row input {
+  margin-top: 2px;
+}
+.settings-row-label {
+  display: block;
+  font-weight: 550;
+}
+.settings-row-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ---------------- Remote-Pairing (mads-remote iOS-App) ---------------- */
+.remote-pair-error {
+  color: var(--err, #e06c6c);
+}
+.remote-pair-btn,
+.remote-pair-btn-sm {
+  align-self: flex-start;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 550;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+  border-radius: 6px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  color: inherit;
+  cursor: pointer;
+}
+.remote-pair-btn:hover,
+.remote-pair-btn-sm:hover {
+  background: var(--surface-3, rgba(255, 255, 255, 0.09));
+}
+.remote-pair-btn-sm {
+  padding: 3px 9px;
+  font-size: 11px;
+}
+.remote-pair-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+  border-radius: 8px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+}
+.remote-pair-pin {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+}
+.remote-pair-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.remote-pair-qr {
+  width: 184px;
+  height: 184px;
+  background: #fff;
+  padding: 8px;
+  border-radius: 6px;
+}
+.remote-pair-qr svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.remote-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.remote-device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  padding: 2px 0;
+}
+.remote-device-name {
+  font-weight: 550;
+}
+
+/* ---------------- Change-Overview-Overlay (doc 09) ---------------- */
+.change-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: var(--bg-content); /* opak, kein Vibrancy unter den Diff-Flächen (HIG A.5) */
+  display: flex;
+  flex-direction: column;
+}
+.change-overlay-head {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  font-weight: 600;
+  font-size: 14px;
+}
+.change-overlay-title {
+  white-space: nowrap;
+}
+.change-overlay-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.change-overlay-filter {
+  width: 200px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+}
+.change-overlay-filter:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.change-overlay-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.change-overlay-close:hover {
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--text);
+}
+.change-overlay-aria {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+.change-overlay-body {
+  flex: 1;
+  overflow: auto;
+  padding: 14px;
+}
+.change-overlay-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+/* Diff-Pane-Grid (auto-fill, Idiom wie .grid im .center) */
+.diff-pane-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+.diff-pane {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh;
+}
+.diff-pane:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.diff-pane.coll-region {
+  border-color: var(--s-red);
+  box-shadow: 0 0 0 1px var(--s-red) inset;
+}
+.diff-pane.coll-file {
+  border-color: var(--s-yellow);
+  box-shadow: 0 0 0 1px var(--s-yellow) inset;
+}
+.diff-pane.failed {
+  border-color: var(--s-red);
+}
+.diff-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.diff-pane-label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.diff-pane-path {
+  font-family: var(--mono);
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* von links clippen, Dateiname bleibt sichtbar */
+  text-align: left;
+  flex: 1;
+}
+.diff-pane-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.diff-pane-badge.err {
+  background: rgba(255, 69, 58, 0.16);
+  color: var(--s-red);
+}
+.diff-pane-coll {
+  padding: 6px 10px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+}
+.diff-pane-coll.region {
+  background: rgba(255, 69, 58, 0.12);
+  color: var(--s-red);
+}
+.diff-pane-coll.file {
+  background: rgba(255, 176, 32, 0.14);
+  color: var(--s-yellow);
+}
+.diff-pane-body {
+  overflow: auto;
+}
+.diff-subview + .diff-subview {
+  border-top: 1px dashed var(--border);
+}
+.diff-subview-label {
+  padding: 4px 10px;
+  font-size: 10px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+.diff-pane-cm .cm-editor {
+  font-size: 12px;
+  background: transparent;
+}
+.diff-pane-cm .cm-scroller {
+  font-family: var(--mono);
+}
+.diff-pane-cap {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+}
+.diff-pane-cap-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .diff-pane,
+  .diff-pane-cm .cm-scroller {
+    scroll-behavior: auto;
+  }
+}
+@media (prefers-contrast: more) {
+  .diff-pane {
+    border-width: 2px;
+  }
+}
+
+/* ---------------- File Explorer (doc 07) ---------------- */
+.file-explorer {
+  width: 460px;
+}
+.file-explorer-loading,
+.file-explorer-body {
+  flex: 1;
+  min-height: 0;
+}
+.file-explorer-body {
+  display: flex;
+}
+.file-error {
+  font-size: 12px;
+  color: #d33b30;
+  padding: 6px 12px;
+  background: rgba(255, 69, 58, 0.1);
+  border-bottom: 1px solid var(--border);
+}
+.file-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  font-size: 13px;
+  padding: 20px;
+  text-align: center;
+}
+
+/* Stream-Kontext-Selector (Panel-Header, PRIMÄR) */
+.file-context {
+  position: relative;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex-shrink: 0;
+}
+.file-context-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  background: none;
+  border: none;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.file-context-trigger:hover {
+  background: rgba(120, 120, 128, 0.1);
+}
+.file-context-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-context-caret {
+  color: var(--text-faint);
+}
+.ctx-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--s-gray);
+}
+/* Modifier bewusst NICHT `.main` — das kollidiert mit der globalen Layout-Klasse
+   `.main { flex: 1 }` und bläht den 10px-Punkt zu einem breiten Oval auf. */
+.ctx-dot.ctx-main {
+  background: var(--accent);
+}
+.file-context-menu {
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  right: 8px;
+  z-index: 40;
+  margin: 4px 0 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text);
+}
+.ctx-item:hover {
+  background: rgba(120, 120, 128, 0.14);
+}
+.ctx-item.active {
+  background: var(--accent-weak);
+  font-weight: 600;
+}
+.ctx-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-empty {
+  padding: 7px 9px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* Tree-Pane */
+.file-tree-pane {
+  width: 200px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--sidebar-bg);
+  min-height: 0;
+}
+@media (prefers-reduced-transparency: reduce) {
+  .file-tree-pane {
+    background: var(--panel-2);
+  }
+}
+.file-filter {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.file-filter input {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+}
+.file-tree {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  padding: 0 4px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 5px;
+}
+.tree-row:hover {
+  background: rgba(120, 120, 128, 0.14);
+}
+.tree-row.selected {
+  background: var(--accent-weak);
+  font-weight: 600;
+}
+.tree-toggle {
+  display: inline-flex;
+  width: 14px;
+  justify-content: center;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.tree-indent {
+  display: inline-block;
+  width: 13px;
+}
+.tree-icon {
+  display: inline-flex;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-name.dim {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* File detail (preview/edit) — opak (nie Vibrancy unter Code/Editor, §1.3) */
+.file-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+}
+.file-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.file-content.empty {
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+}
+.file-content-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.fc-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fc-dirty {
+  color: var(--accent);
+}
+.fc-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.fc-mode,
+.fc-save {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.fc-save {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+.fc-save:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.fc-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.file-preview {
+  padding: 14px;
+}
+.file-preview.image {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+.file-preview.image img {
+  max-width: 100%;
+  height: auto;
+}
+.code-preview,
+.file-editor {
+  padding: 0;
+}
+.preview-cap {
+  font-size: 11px;
+  color: #b9791b;
+  padding: 6px 10px;
+  background: rgba(255, 176, 32, 0.12);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.binary-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+.binary-card {
+  text-align: center;
+  color: var(--text-dim);
+}
+.binary-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+.binary-meta {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin-top: 4px;
+}
+
+/* Warn-Leisten (§5.3) — beratend, nicht blockierend */
+.file-warnings {
+  display: flex;
+  flex-direction: column;
+}
+.warn-bar {
+  font-size: 12px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.warn-bar code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.warn-bar.info {
+  background: var(--accent-weak);
+  color: var(--text);
+  align-items: flex-start; /* Icon oben bündig, falls der Text umbricht */
+  line-height: 1.45;
+}
+/* CSS-gezeichnetes „i"-Badge (keine Emoji-/Font-Abhängigkeit). */
+.warn-bar.info .warn-icon {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 13px;
+  text-align: center;
+  opacity: 0.65;
+}
+/* Der GESAMTE Satz (inkl. <code>main</code>) in EINEM Flex-Item → normaler Textfluss,
+   sonst würde flex das <code> zu einem eigenen, zentrierten Item machen. */
+.warn-bar.info .warn-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.warn-bar.info .warn-text strong {
+  font-weight: 600;
+}
+.warn-bar .warn-dismiss {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  margin-top: -1px;
+}
+.warn-bar .warn-dismiss:hover {
+  color: var(--text);
+}
+.warn-bar.external {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+  justify-content: space-between;
+}
+.warn-bar.external button {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 12px;
+}
+.warn-bar.amber {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+}
+.warn-bar.trespass {
+  background: rgba(255, 69, 58, 0.14);
+  color: #d33b30;
+}
+
+/* Conflict-Sheet (§7) */
+.file-conflict-sheet {
+  padding: 10px 12px;
+  background: rgba(255, 69, 58, 0.1);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.conflict-actions {
+  display: flex;
+  gap: 8px;
+}
+.conflict-actions button {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.conflict-actions button.danger {
+  color: #d33b30;
+  border-color: rgba(255, 69, 58, 0.4);
+}
+
+/* ── Markdown-Editor (docs/design/08-markdown-editor.md §1.3/§1.4) ── */
+.md-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.md-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end; /* Actions auf Umbruch-Zeile rechtsbündig */
+  flex-wrap: wrap; /* statt in den Nachbarbereich zu laufen: umbrechen */
+  gap: 6px 12px;
+  min-height: 40px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex-shrink: 0;
+}
+.md-title {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto; /* füllt Zeile 1 → drückt Actions nach rechts; schrumpft mit Ellipse */
+  min-width: 0;
+}
+.md-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.md-dirty {
+  color: var(--accent);
+}
+.md-head-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap; /* Buttons brechen intern um statt überzulaufen */
+  justify-content: flex-end;
+  gap: 6px 8px;
+  min-width: 0;
+}
+/* Segmented Control (macOS-HIG) — Stil an .toggle/.pill angelehnt (§1.4) */
+.md-segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.md-seg {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 4px 11px;
+  font-size: 12px;
+  font-weight: 550;
+  border-right: 1px solid var(--border);
+}
+.md-seg:last-child {
+  border-right: none;
+}
+.md-seg.active {
+  background: var(--accent);
+  color: #fff;
+}
+.md-seg:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.md-save {
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 550;
+}
+.md-save:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.md-readonly-banner {
+  font-size: 12px;
+  color: #b9791b;
+  padding: 7px 12px;
+  background: rgba(255, 176, 32, 0.16);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Such-Leiste (Text im Dokument finden). Spannt die Editorbreite, liegt unter dem Header,
+   funktioniert in Preview/Edit/Split. */
+.md-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex-shrink: 0;
+}
+.md-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.md-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.md-search-count {
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 44px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Preview-Treffer via CSS Custom Highlight API (kein DOM-/HTML-Eingriff → XSS-Invariante bleibt).
+   Die CodeMirror-Treffer (.cm-searchMatch*) sind im cmTheme gefärbt, nicht hier. */
+::highlight(md-find) {
+  background-color: var(--accent-weak);
+}
+::highlight(md-find-current) {
+  background-color: var(--accent);
+  color: #fff;
+}
+
+/* Formatierungs-Toolbar (§1.4 — nur Edit/Split) */
+.md-toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex-shrink: 0;
+}
+.md-tb-btn {
+  min-width: 28px;
+  height: 26px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 6px;
+}
+.md-tb-btn:hover:not(:disabled) {
+  background: var(--accent-weak);
+}
+.md-tb-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* Body: Preview/Edit (ein Panel) oder Split (zwei) */
+.md-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.md-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.md-body.mode-split .md-pane-source {
+  border-right: 1px solid var(--border);
+}
+/* WYSIWYG-Modus (Live-Preview): nur die Source-Pane (volle Breite) + dokumentnahe
+   Proportionalschrift statt Monospace. Inline-Code/Überschriften überschreiben das via
+   die cm-md-*-Klassen (cmTheme). */
+.md-body.mode-wysiwyg .cm-content {
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif;
+  line-height: 1.55;
+  padding: 6px 14px;
+}
+.md-source {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.md-source .cm-editor {
+  height: 100%;
+}
+.md-preview-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 18px;
+}
+
+/* Wikilink-Darstellung (§5.4) */
+.markdown-body a.wikilink,
+.md a.wikilink {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--accent);
+}
+
+/* Globale Save-Notice (§3.3, OE-37) */
+.save-toast {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  padding: 8px 16px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 550;
+  color: #fff;
+  background: var(--text);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.22);
+  cursor: default;
+}
+.save-toast.ok {
+  background: #34c759;
+}
+.save-toast.err {
+  background: #d33b30;
+}
+
+/* ============================================================================
+   UI-Erweiterungen: Agent-Farben · ziehbares Panel · MD-Vollbild/loslösen · Baum
+   ============================================================================ */
+
+/* --- Agent-/Branch-Farbe: Kachel-Streifen links + Spiegelung im Detail-Header --- */
+.card {
+  position: relative;
+}
+.card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  border-radius: 12px 0 0 12px;
+  background: var(--agent-color, transparent);
+}
+.card-branch {
+  color: var(--agent-color, var(--text-dim));
+  font-weight: 600;
+}
+/* Detail-Header bekommt denselben Farbakzent (links + zarte Tönung) */
+.inspector-head.agent-tinted {
+  border-left: 4px solid var(--agent-color, transparent);
+  background: color-mix(in srgb, var(--agent-color, transparent) 9%, transparent);
+}
+
+/* --- Ziehbares Mittel-Panel (Dateien/Einstellungen) --- */
+.primary-panel-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  min-width: 0;
+  /* width via inline style (persistiert) */
+}
+.primary-panel {
+  width: 100%; /* füllt den ziehbaren Wrapper (überschreibt feste 320px) */
+  flex: 1;
+}
+.panel-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 6;
+  background: transparent;
+}
+.panel-resizer:hover,
+body.col-resizing .panel-resizer {
+  background: var(--accent-weak);
+}
+body.col-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* Innen-Resizer zwischen Ordner-Spalte und Datei-Detail (Flex-Item, straddelt die
+   Trennlinie der .file-tree-pane). */
+.tree-resizer {
+  flex: 0 0 7px;
+  width: 7px;
+  margin-left: -4px;
+  margin-right: -3px;
+  cursor: col-resize;
+  z-index: 6;
+  background: transparent;
+}
+.tree-resizer:hover,
+body.col-resizing .tree-resizer {
+  background: var(--accent-weak);
+}
+
+/* --- Dateibaum: scrollbar + normale Zeilenhöhe (kein react-arborist mehr) --- */
+.file-tree {
+  overflow: auto;
+}
+.tree-row {
+  height: auto;
+  min-height: 24px;
+}
+
+/* --- Markdown: Icon-Buttons, Vollbild, losgelöstes Fenster --- */
+.md-iconbtn {
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+.md-iconbtn:hover {
+  background: var(--panel-2);
+}
+.md-editor-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--panel);
+}
+/* Losgelöstes Fenster: Editor füllt das ganze Fenster */
+.detached-md {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+}
+.detached-md .md-editor {
+  flex: 1;
+  min-height: 0;
+}
+.detached-status {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 24px;
+  text-align: center;
+}
+
+/* ============================================================================
+   Fix: Toolbar bei schmalem Fenster + versehentliche Text-Markierung in der Chrome
+   ============================================================================ */
+
+/* Toolbar (Dashboard-Kopf) bricht jetzt sauber auf MEHRERE Zeilen um, statt den
+   Chip-TEXT umzubrechen oder zu beschneiden. */
+.titlebar {
+  height: auto;
+  min-height: 48px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  padding: 6px 16px;
+}
+.titlebar-right {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 6px;
+}
+/* Jeder Chip bleibt EINZEILIG (kein „Auto-Sync\nan", kein „+ Neuer\nStream"). */
+.pill,
+.titlebar-right button,
+.resume-banner button {
+  white-space: nowrap;
+}
+
+/* Chrome (Toolbar/Navigation/Kontext-Leiste/Banner/Baum/Kacheln) ist NICHT
+   selektierbar → keine versehentlichen blauen Text-Markierungen mehr. Inhalt
+   (Chat-Timeline, Markdown-Vorschau, Editor, Datei-Inhalt) bleibt selektierbar. */
+.titlebar,
+.activity-rail,
+.file-context,
+.primary-panel-head,
+.file-filter,
+.file-tree,
+.card,
+.resume-banner,
+.reconcile-banner,
+.collision-banner,
+.escalation-banner,
+.inspector-head,
+.inspector-actions {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Das „blaue Oval" oben links: WKWebView/Safari zeichnet einen breiten, weichen
+   blauen Focus-Ring um den vollbreiten „Kontext"-Button — schon beim Maus-Klick.
+   Nur noch bei TASTATUR-Fokus einen dezenten Ring zeigen (Accessibility bleibt). */
+.file-context-trigger:focus {
+  outline: none;
+}
+.file-context-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Markdown-Zoom (− 100% +): skaliert Vorschau UND Editor-Inhalt via CSS-`zoom`
+   (1 = unverändert). `--md-zoom` wird auf .md-editor gesetzt und hier vererbt. */
+.md-pane-preview .markdown-body {
+  zoom: var(--md-zoom, 1);
+}
+.md-pane-source .cm-editor {
+  zoom: var(--md-zoom, 1);
+}
+.md-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+}
+.md-zoom .md-iconbtn {
+  width: 26px;
+}
+.md-zoom .md-zoom-val {
+  width: auto;
+  min-width: 46px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------- Spracheingabe (Mikrofon / Whisper) ---------------- */
+.composer button.composer-btn.mic {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+}
+.composer button.composer-btn.mic:hover:not(:disabled) {
+  background: var(--panel-2);
+}
+.composer button.composer-btn.mic:disabled {
+  opacity: 0.55;
+}
+.composer button.composer-btn.mic.recording {
+  background: #d33b30;
+  border-color: #d33b30;
+  color: #fff;
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(211, 59, 48, 0.5);
+  }
+  60% {
+    box-shadow: 0 0 0 6px rgba(211, 59, 48, 0);
+  }
+}
+.mic-pct {
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.composer-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 2px 16px 4px;
+}
+.composer-note.rec {
+  color: #d33b30;
+  font-weight: 600;
+}
+.composer-note.transcribing {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 12px;
+}
+.composer-note.transcribing .tl-spinner {
+  margin-top: 0; /* in der Flex-Zeile mittig statt mit Text-Offset */
+}
+.composer-note .cn-dim {
+  color: var(--text-faint);
+  font-weight: 400;
+}
+.composer-note.err {
+  color: #d33b30;
+}
+
+/* Diktat: expliziter Stopp-Knopf (neben dem roten „on air"-Mikro). */
+.composer button.composer-btn.dict-stop {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+}
+.composer button.composer-btn.dict-stop:hover {
+  background: var(--panel-2);
+}
+
+/* Resume-Banner: beim Beenden laufende (unterbrochene) Streams hervorheben. */
+.resume-banner button.was-running {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* ---------------- Integrations-Panel (3.5) ---------------- */
+.integration-panel {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+.intp-head {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.intp-group { margin-top: 6px; }
+.intp-grouptitle {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin: 6px 2px 4px;
+}
+.intp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  padding: 5px 7px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+.intp-row:hover { background: var(--panel-2); }
+.intp-row.sel { background: var(--accent-weak); }
+.intp-num {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--s-green, #2a8a43);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.intp-chip {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-weight: 650;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.intp-chip.ready { background: rgba(40, 167, 69, 0.16); color: #2a8a43; }
+.intp-chip.blocked { background: rgba(255, 176, 32, 0.18); color: #b9791b; }
+.intp-chip.conflicting { background: rgba(255, 69, 58, 0.14); color: #d33b30; }
+.intp-chip.unsaved { background: rgba(255, 69, 58, 0.12); color: #d33b30; }
+.intp-chip.needs_pr { background: var(--accent-weak); color: var(--accent); }
+.intp-chip.working { background: var(--panel-2); color: var(--text-dim); }
+.intp-label { font-weight: 600; flex: 0 0 auto; }
+.intp-pr { color: var(--text-dim); font-size: 11.5px; flex: 0 0 auto; }
+.intp-detail {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.intp-overlaps { margin: 6px 2px; }
+.intp-overlap {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #b9791b;
+  background: rgba(255, 176, 32, 0.12);
+  border-radius: 7px;
+  padding: 5px 8px;
+  margin-top: 4px;
+}
+
+/* ---------------- Code-Block Kopieren-Button ---------------- */
+.code-block { position: relative; }
+.code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  font-size: 11px;
+  font-weight: 550;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.code-block:hover .code-copy,
+.code-block:focus-within .code-copy {
+  opacity: 1;
+}
+.code-copy:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+@media (prefers-reduced-motion: reduce) {
+  .code-copy { transition: none; }
+}
+
+/* ---------------- Composer: Bild per Drag&Drop ---------------- */
+.composer-wrap { position: relative; }
+.composer-wrap.dragover {
+  outline: 2px dashed var(--accent);
+  outline-offset: -5px;
+  border-radius: 10px;
+  background: var(--accent-weak);
+}
+.composer-drophint {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  pointer-events: none;
+}
+
+/* ── Stream-Dev-Server (Front-/Backend eines Streams im Worktree) ──────────── */
+.devserver-btn.on {
+  border-color: var(--s-green);
+  color: var(--s-green);
+}
+.devserver-open {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.devserver-log {
+  margin: 8px 14px 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.devserver-log > summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  list-style: none;
+}
+.devserver-log > summary::-webkit-details-marker { display: none; }
+.devserver-log-body {
+  max-height: 190px;
+  overflow-y: auto;
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.devserver-log-empty { color: var(--text-faint); }
+.devserver-log-line {
+  display: flex;
+  gap: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.devserver-log-line.err .devserver-log-text { color: var(--s-red); }
+.devserver-log-svc {
+  flex: 0 0 auto;
+  min-width: 58px;
+  color: var(--text-faint);
+}
+.devserver-log-text { flex: 1 1 auto; }
+.devserver-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--s-gray);
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.devserver-dot.running { background: var(--s-green); }
+.devserver-dot.starting,
+.devserver-dot.installing { background: var(--s-yellow); animation: pulse 1.1s infinite; }
+.devserver-dot.error { background: var(--s-red); }
