@@ -151,6 +151,9 @@ export class Orchestrator {
       case "answer_permission": {
         const target = this.pool.get(msg.agentId);
         const applied = target?.answerPermission(msg.requestId, msg.decision) ?? false;
+        // Doppel-Antwort auf eine GERADE aufgelöste Anfrage (anderer Client war schneller) ist harmlos —
+        // keine irreführende „nicht angekommen"-Meldung dafür.
+        if (!applied && target?.wasRecentlyResolved(msg.requestId)) break;
         if (!applied) {
           // Bisher lief eine nicht zuordenbare (Fern-)Antwort LAUTLOS ins Leere → die Frage blieb
           // ewig offen. Jetzt: Grund loggen UND ein sichtbares System-Event senden, damit der

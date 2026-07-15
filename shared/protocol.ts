@@ -322,6 +322,8 @@ export type SidecarMessage =
   | AgentTimelineMsg
   | NeedsInputMsg
   | PermissionRequestMsg
+  | PermissionResolvedMsg
+  | PermissionsOpenMsg
   | StatusUpdateMsg
   | CostUpdateMsg
   | AgentDoneMsg
@@ -444,6 +446,36 @@ export interface PermissionRequestMsg extends BaseMsg {
   /** Bash-Kategorie (network/pkg/secret/git/write/danger) — steuert das projektweite „Immer erlauben".
    *  Fehlt bei nicht-Bash-Tools und bei `danger` gibt es KEINEN „Immer erlauben"-Knopf. */
   commandKind?: CommandKind;
+}
+
+/**
+ * Eine offene permission_request ist erledigt → ALLE Clients (Mac, Remote/iOS, zweites Fenster)
+ * entfernen die Karte und verwerfen eine ggf. offene lokale Notification. Nötig, weil JEDER
+ * gekoppelte Client eine Anfrage beantworten kann: wer nicht selbst geantwortet hat, erführe sonst
+ * nie, dass die Karte weg darf — sie bliebe hängen. Gegenstück zu resnapshotPermissions().
+ */
+export interface PermissionResolvedMsg extends BaseMsg {
+  type: "permission_resolved";
+  agentId: string;
+  requestId: string;
+  /** Wie aufgelöst: beantwortet (allow/deny/answer_questions) oder anderweitig verworfen
+   *  (cancelled: Interrupt/Stop/Session-Ende). Clients brauchen zum Entfernen nur die requestId;
+   *  outcome ist additiv (Audit / künftige „woanders beantwortet"-Anzeige). */
+  outcome: "allow" | "deny" | "answer_questions" | "cancelled";
+}
+
+/**
+ * Autoritative Liste der aktuell OFFENEN Permission-requestIds eines Agents — Teil des Snapshots.
+ * Clients entfernen lokale Karten dieses Agents, deren requestId NICHT in `requestIds` steht (z. B.
+ * eine Anfrage, die aufgelöst wurde, WÄHREND der Client offline war → deren permission_resolved ging
+ * verloren). Prunt nur; fügt nichts hinzu und benachrichtigt nicht erneut (offene werden separat via
+ * resnapshotPermissions re-emittiert). Reihenfolge-sicher: später live erzeugte Anfragen kommen als
+ * eigenes permission_request nach dieser Liste und bleiben erhalten.
+ */
+export interface PermissionsOpenMsg extends BaseMsg {
+  type: "permissions_open";
+  agentId: string;
+  requestIds: string[];
 }
 
 export interface StatusUpdateMsg extends BaseMsg {

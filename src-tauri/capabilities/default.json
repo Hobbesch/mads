@@ -5,6 +5,7 @@
   "windows": ["main", "md-*"],
   "permissions": [
     "core:default",
+    "core:window:allow-is-focused",
     "core:window:allow-start-dragging",
     "core:webview:allow-create-webview-window",
     "opener:default",

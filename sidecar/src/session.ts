@@ -182,6 +182,10 @@ export class AgentSession {
 
   private readonly inbox = new AsyncQueue<SdkUserMessage>();
   private readonly pending = new Map<string, PendingPermission>();
+  // Kürzlich aufgelöste requestIds (FIFO-begrenzt). Verhindert, dass eine verspätete/doppelte Antwort
+  // (z. B. zwei Clients tippen dieselbe Karte im Broadcast-Fenster) über den „einzige offene Anfrage"-
+  // Fallback fälschlich eine ANDERE offene Anfrage beantwortet — sonst Permission-Gate-Bypass.
+  private readonly recentlyResolved = new Set<string>();
   // Vom Nutzer per „Immer erlauben" freigegebene WebFetch-Domains (registrierbare Domain, z. B.
   // „sec.gov") → weitere Seiten dort laufen ohne Rückfrage. Pro Stream, in-memory.
   private readonly approvedFetchHosts = new Set<string>();
@@ -209,6 +213,34 @@ export class AgentSession {
     for (const p of this.pending.values()) {
       if (p.snapshot) this.emit({ ...envelope(), ...p.snapshot });
     }
+    // Autoritative Liste der offenen requestIds → Clients prunen veraltete Karten (z. B. eine offline
+    // aufgelöste Anfrage, deren permission_resolved sie verpasst haben), ohne erneut zu benachrichtigen.
+    this.emit({ ...envelope(), type: "permissions_open", agentId: this.agentId, requestIds: [...this.pending.keys()] });
+  }
+
+  /** Eine erledigte Permission-Anfrage an ALLE Clients broadcasten → jeder (auch der, der NICHT
+   *  geantwortet hat: Mac, Remote/iOS, zweites Fenster) entfernt die Karte + eine offene Notification.
+   *  Ohne dies bliebe die Karte auf der Gegenseite hängen. Läuft durch denselben Egress → Bridge-Tee. */
+  private emitPermissionResolved(requestId: string, outcome: "allow" | "deny" | "answer_questions" | "cancelled"): void {
+    // Als „kürzlich aufgelöst" merken (FIFO-begrenzt) → eine verspätete Doppel-Antwort landet als No-op,
+    // nicht im requestId-Drift-Fallback.
+    this.recentlyResolved.add(requestId);
+    if (this.recentlyResolved.size > 64) this.recentlyResolved.delete(this.recentlyResolved.values().next().value as string);
+    this.emit({ ...envelope(), type: "permission_resolved", agentId: this.agentId, requestId, outcome });
+  }
+
+  /** Wurde diese requestId gerade eben aufgelöst? (Der Orchestrator unterdrückt damit die irreführende
+   *  „Antwort nicht angekommen"-Meldung bei einer harmlosen Doppel-Antwort.) */
+  wasRecentlyResolved(requestId: string): boolean {
+    return this.recentlyResolved.has(requestId);
+  }
+
+  /** Alle noch offenen Permission-Anfragen als „cancelled" auflösen (Interrupt/Stop/Session-Ende) →
+   *  Karten verschwinden überall, statt als tote, unbeantwortbare Prompts hängen zu bleiben. */
+  private cancelPendingPermissions(): void {
+    if (this.pending.size === 0) return;
+    for (const requestId of this.pending.keys()) this.emitPermissionResolved(requestId, "cancelled");
+    this.pending.clear();
   }
 
   // --------------------------------------------------------------------------
@@ -485,6 +517,12 @@ export class AgentSession {
 
   answerPermission(requestId: string, decision: PermissionDecision): boolean {
     let entry = this.pending.get(requestId);
+    if (!entry && this.recentlyResolved.has(requestId)) {
+      // Diese Anfrage wurde GERADE aufgelöst (z. B. anderer Client war schneller). NICHT auf eine
+      // andere offene Anfrage „driften" (das wäre ein Permission-Gate-Bypass) → sauberer No-op.
+      log(`[${this.agentId}] answer_permission: requestId ${requestId} bereits aufgelöst → ignoriert (kein Drift)`);
+      return false;
+    }
     if (!entry && this.pending.size === 1) {
       // requestId-Drift (z. B. nachdem ein Fern-Client per Snapshot neu verbunden hat): ist genau
       // EINE Anfrage offen, ist die Zuordnung eindeutig → diese beantworten, statt die Antwort
@@ -499,6 +537,9 @@ export class AgentSession {
       return false;
     }
     this.pending.delete(requestId);
+    // Auflösung an ALLE Clients broadcasten → die Karte verschwindet auch dort, wo NICHT geantwortet
+    // wurde (Gegenseite/Remote/zweites Fenster), statt hängen zu bleiben.
+    this.emitPermissionResolved(requestId, decision.behavior);
     const { resolve, suggestions, input, toolName, commandKind } = entry;
     if (decision.behavior === "allow") {
       // „Immer erlauben" bei WebFetch → die ganze DOMAIN dieses Streams merken (nicht die einzelne
@@ -555,6 +596,7 @@ export class AgentSession {
 
   async interrupt(): Promise<void> {
     await this.q?.interrupt?.();
+    this.cancelPendingPermissions(); // offene Rückfragen sind nach dem Abbruch tot → überall abräumen
     this.setStatus("paused");
   }
 
@@ -578,6 +620,7 @@ export class AgentSession {
   }
 
   async stop(removeWt = false): Promise<void> {
+    this.cancelPendingPermissions(); // Session endet → offene Rückfragen überall abräumen
     this.inbox.close();
     this.q?.close?.();
     if (removeWt && this.repoRoot && this.worktreePath) {
@@ -782,6 +825,7 @@ export class AgentSession {
     this.onChange?.();
   }
   private fail(code: string, message: string, recoverable: boolean): void {
+    this.cancelPendingPermissions(); // Session stirbt → offene Rückfragen überall abräumen (wie interrupt/stop)
     this.emit({ ...envelope(), type: "error", agentId: this.agentId, scope: "agent", code, message, recoverable });
     this.setStatus("error");
   }

@@ -34,7 +34,7 @@ import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL } from "./modelCa
 import type { Collision } from "../shared/collision";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
-import { notifyOsPermission } from "./osNotify";
+import { notifyOsPermission, dismissOsPermission } from "./osNotify";
 import { toolCommand } from "./toolText";
 import { blobToBase64, base64ToBytes, extForMime, dirname } from "./blob";
 import { openMarkdownWindow } from "./detachWindow";
@@ -821,6 +821,27 @@ export const useStore = create<MadsState>((set) => {
         break;
       }
 
+      case "permission_resolved": {
+        // Die Anfrage wurde IRGENDWO beantwortet (Mac, Remote/iOS, zweites Fenster) oder verworfen →
+        // Karte hier entfernen, auch wenn NICHT dieser Client geantwortet hat. Idempotent zur
+        // optimistischen Entfernung in answerPermission. Auch die OS-Notification zurückziehen.
+        set((s) => ({ permissions: s.permissions.filter((p) => p.requestId !== msg.requestId) }));
+        void dismissOsPermission(msg.requestId);
+        break;
+      }
+
+      case "permissions_open": {
+        // Autoritativer Snapshot: Karten dieses Agents entfernen, deren requestId nicht (mehr) offen ist
+        // — fängt Auflösungen ab, die dieser Client verpasst hat (z. B. war offline). Andere Agents unberührt.
+        const open = new Set(msg.requestIds);
+        const stale = useStore.getState().permissions.filter((p) => p.agentId === msg.agentId && !open.has(p.requestId));
+        if (stale.length) {
+          set((s) => ({ permissions: s.permissions.filter((p) => p.agentId !== msg.agentId || open.has(p.requestId)) }));
+          for (const p of stale) void dismissOsPermission(p.requestId);
+        }
+        break;
+      }
+
       case "agent_done":
         patchAgent(msg.agentId, {
           status: msg.isError ? "error" : "done",
@@ -1131,6 +1152,7 @@ export const useStore = create<MadsState>((set) => {
 
     answerPermission: async (req, decision) => {
       set((s) => ({ permissions: s.permissions.filter((p) => p.requestId !== req.requestId) }));
+      void dismissOsPermission(req.requestId); // eigene Antwort → Notification sofort zurückziehen (nicht erst nach dem Echo)
       patchAgent(req.agentId, { status: "running", workStartedAt: Date.now() });
       await sendHost({ ...envelope(), type: "answer_permission", agentId: req.agentId, requestId: req.requestId, decision });
     },
