@@ -5,7 +5,7 @@
  * Gefragt wird NUR bei echtem Risiko: Netz nach AUSSEN, Paketmanager/Installer, git-outward/PR,
  * sudo/destruktiv/System, Secrets-Zugriff, Schreiben ausserhalb von Projekt/Temp.
  */
-import { classifyBashCommand, classifyToolCall, isGitCommit, registrableDomain } from "./safe-command";
+import { classifyBashCommand, classifyToolCall, isDeployCommand, isGitCommit, registrableDomain } from "./safe-command";
 
 const results: string[] = [];
 let failed = 0;
@@ -362,6 +362,30 @@ check("secret gemerkt → cat .env allow", bash("cat .env", ["secret"]) === "all
 check("danger gemerkt → rm bleibt ask (nie merkbar)", bash("rm -rf x", ["danger"]) === "ask");
 check("rm mit erlaubtem network+danger → weiterhin ask", bash("rm -rf x", ["network", "danger"]) === "ask");
 check("ohne isKindApproved-Callback → curl ask (Default sicher)", classifyToolCall("Bash", { command: "curl https://x.com" }, {}).decision === "ask");
+
+// ---- isDeployCommand: Deploy/Publish erkennen, Alltag NICHT fälschlich ----
+check("deploy-test.sh → deploy", isDeployCommand("./deploy-test.sh"));
+check("echo y | pwsh push.ps1 → deploy", isDeployCommand("echo y | pwsh push.ps1"));
+check("bash deploy.sh → deploy", isDeployCommand("bash scripts/deploy.sh --prod"));
+check("docker push → deploy", isDeployCommand("docker push registry/app:1.2.3"));
+check("kubectl apply → deploy", isDeployCommand("kubectl apply -f k8s/"));
+check("helm upgrade → deploy", isDeployCommand("helm upgrade app ./chart"));
+check("terraform apply → deploy", isDeployCommand("terraform apply -auto-approve"));
+check("npm publish → deploy", isDeployCommand("npm publish"));
+check("npm run deploy → deploy", isDeployCommand("npm run deploy:prod"));
+check("gh release → deploy", isDeployCommand("gh release create v1.2.3"));
+check("vercel --prod → deploy", isDeployCommand("vercel --prod"));
+check("publish.sh → deploy", isDeployCommand("./scripts/publish.sh"));
+// Keine Fehl-Positiven im Alltag:
+check("git push ist KEIN deploy", !isDeployCommand("git push origin main"));
+check("npm run build ist KEIN deploy", !isDeployCommand("npm run build"));
+check("cat deploy.log ist KEIN deploy", !isDeployCommand("cat deploy.log"));
+check("relationship.sh ist KEIN deploy (Wortgrenze)", !isDeployCommand("./relationship.sh"));
+check("ls; echo hi ist KEIN deploy", !isDeployCommand("ls -la; echo hi"));
+check("docker build ist KEIN deploy", !isDeployCommand("docker build -t app ."));
+check("docker compose up ist KEIN deploy", !isDeployCommand("docker compose up -d"));
+check("npm publish --dry-run ist KEIN deploy (Probelauf)", !isDeployCommand("npm publish --dry-run"));
+check("Skript in deploy/-Ordner ist KEIN deploy (Basename zählt)", !isDeployCommand("./deploy/build.sh"));
 
 for (const r of results) console.log(r);
 console.log(`\n${results.length - failed} passed, ${failed} failed`);

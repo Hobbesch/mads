@@ -370,6 +370,8 @@ export interface MadsState {
   resolveConflict: (id: string) => Promise<void>;
   /** Uncommittete Änderungen des Main-Checkouts in einen neuen Sub-Stream auslagern. */
   outsourceMain: (integratorId: string) => Promise<void>;
+  /** Den aktuellen (Deploy-)Stand des Main-Checkouts als Release-Commit festhalten (chore(release): …). */
+  commitMainRelease: (integratorId: string) => Promise<void>;
   /** Integrator-only: main per fast-forward auf origin/<default> nachziehen (kein rebase). */
   updateMain: (id: string) => Promise<void>;
   /** Konsolidiert „Alle aktualisieren": main fast-forward + alle hinterherhängenden Subs rebasen. */
@@ -857,8 +859,9 @@ export const useStore = create<MadsState>((set) => {
 
       case "error": {
         let removedGhost = false;
-        if (msg.agentId && msg.code === "main_edited") {
-          // Proaktiver Hinweis (kein Fehler-Status): main-Edits → auslagern. Status bleibt unberührt.
+        if (msg.agentId && (msg.code === "main_edited" || msg.code === "main_deploy_dirty")) {
+          // Proaktiver Hinweis (kein Fehler-Status): main-Dirt → auslagern ODER (nach Deploy) als Release
+          // committen. Status bleibt unberührt; die Aktionen bietet der Inspector an, solange main dirty ist.
           notice(msg.agentId, "accent", `↗ ${msg.message}`);
         } else if (msg.agentId) {
           const a = useStore.getState().agents[msg.agentId];
@@ -1346,6 +1349,14 @@ export const useStore = create<MadsState>((set) => {
       }));
       notice(integratorId, "accent", `↗ Main-Änderungen → neuer Sub-Stream „${label}"`);
       await sendHost({ ...envelope(), type: "outsource_main", integratorId, agentId: newId, label, branch });
+    },
+
+    commitMainRelease: async (integratorId) => {
+      // Den aktuellen (Deploy-)Stand von main als Release-Commit festhalten (chore(release): …).
+      // Der Sidecar committet lokal auf dem Default-Branch (Push bleibt separat/explizit) und meldet
+      // Ergebnis + neuen git-Status zurück (Banner verschwindet dann).
+      notice(integratorId, "accent", "⤓ Release wird committet …");
+      await sendHost({ ...envelope(), type: "commit_main_release", agentId: integratorId });
     },
 
     resolveConflict: async (id) => {

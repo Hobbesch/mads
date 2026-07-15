@@ -65,6 +65,7 @@ export type HostMessage =
   | SetAutopilotMsg
   | SetModelEffortMsg
   | OutsourceMainMsg
+  | CommitMainReleaseMsg
   | PollProjectMsg
   | CleanupWorktreeMsg
   | UpdateMainMsg
@@ -209,6 +210,13 @@ export interface OutsourceMainMsg extends BaseMsg {
   agentId: string; // neuer Sub-Stream
   label: string;
   branch: string;
+}
+
+/** Den aktuellen (Deploy-)Stand des Main-Checkouts als Release-Commit festhalten (`chore(release): …`).
+ *  Nur lokal auf dem Default-Branch; Push bleibt separat/explizit. Für den „Als Release committen"-Knopf. */
+export interface CommitMainReleaseMsg extends BaseMsg {
+  type: "commit_main_release";
+  agentId: string; // Integrator
 }
 
 export interface PollProjectMsg extends BaseMsg {
@@ -677,6 +685,7 @@ export type EscalationKind =
   | "ownership_trespass" // Agent editiert eine Region, die einem anderen Stream gehört
   | "secret_detected" // Secret im zu pushenden Diff (LEAK-1: Push fail-closed blockiert)
   | "main_edited" // Integrator hat main direkt geändert → in Sub-Stream auslagern (proaktiver Hinweis)
+  | "main_deploy_dirty" // main-Dirt stammt aus einem gerade gelaufenen Deploy → „Als Release committen" anbieten
   | "max_budget";
 
 export interface SidecarErrorMsg extends BaseMsg {

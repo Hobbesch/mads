@@ -336,6 +336,53 @@ export function isGitCommit(command: string): boolean {
 }
 
 /**
+ * Grobe, projekt-agnostische Erkennung eines Deploy-/Publish-Befehls. Zweck: die main-Dirt, die ein
+ * Deploy-Skript nebenbei erzeugt (typisch ein Versions-Bump), NICHT als versehentlichen main-Edit
+ * melden, sondern „Als Release committen" anbieten. Bewusst tolerant — eine Fehlklassifikation ist in
+ * BEIDE Richtungen mild (nur anderes Framing/Action; beide zeigen dieselbe main-Dirt an, und die
+ * „Als Release committen"-Aktion ist ohnehin immer verfügbar, wenn main dirty ist).
+ * Fängt: Skripte/Programme mit Deploy-Verb im Namen (deploy-test.sh, push.ps1, publish.sh, deploy),
+ * sowie gängige Infra-/Package-Tools mit Deploy-Subcommand (docker push, kubectl apply, helm upgrade,
+ * terraform apply, serverless/sls/fly/vercel/netlify deploy, npm/yarn/pnpm publish|run deploy, gh release).
+ */
+export function isDeployCommand(command: string): boolean {
+  const INTERP = /^(pwsh|powershell|bash|sh|zsh|python3?|node|deno|ruby|perl|npx|env|sudo|command)$/i;
+  const VERB_IN_NAME = /(^|[-_./:])(deploy|publish|release)([-_./:0-9]|$)/i; // wort-begrenzt (inkl. „:" für npm-Scripts) → kein „relationship"
+  const PUSH_SCRIPT = /(^|\/)push\.(ps1|sh|bat|cmd)$/i; // push.ps1/push.sh als klassisches Deploy-Skript
+  const TOOL_SUB: Record<string, RegExp> = {
+    docker: /^push$/, "docker-compose": /^push$/, // NUR push ist ein Publish; compose up/down/logs NICHT
+    kubectl: /^(apply|rollout)$/, helm: /^(upgrade|install)$/,
+    terraform: /^apply$/, pulumi: /^up$/,
+    serverless: /^deploy$/, sls: /^deploy$/, netlify: /^deploy$/,
+    fly: /^deploy$/, flyctl: /^deploy$/, eb: /^deploy$/, cap: /^deploy$/,
+    npm: /^(publish|run)$/, pnpm: /^(publish|run)$/, yarn: /^(publish|deploy|run)$/, bun: /^(publish|run)$/,
+    cargo: /^publish$/, gh: /^release$/, heroku: /^(deploy|releases)$/,
+  };
+  const NEEDS_VERB_ARG = new Set(["vercel", "gcloud", "aws", "ansible-playbook", "ansible"]); // nur mit deploy-Arg
+  for (const toks of segmentCommands(command)) {
+    if (!toks.length) continue;
+    if (toks.some((t) => /^(--dry-run|--dryrun)$/i.test(t))) continue; // Probelauf → kein echter Deploy
+    let i = 0;
+    while (i < toks.length && INTERP.test(toks[i].split("/").pop() ?? toks[i])) i += 1; // Interpreter überspringen
+    const first = toks[i] ?? "";
+    if (!first) continue;
+    const base = (first.split("/").pop() ?? first).toLowerCase();
+    const rest = toks.slice(i + 1);
+    // 1) Skript/Programm mit Deploy-Verb im NAMEN (Basename, nicht Pfad → ein Ordner „deploy/" triggert nicht)
+    if (VERB_IN_NAME.test(base) || PUSH_SCRIPT.test(base)) return true;
+    // 2) Bekanntes Infra-/Package-Tool + Deploy-Subcommand
+    const arg1 = (rest.find((t) => !t.startsWith("-")) ?? "").toLowerCase();
+    if (TOOL_SUB[base]?.test(arg1)) {
+      if (arg1 === "run") return rest.some((t) => VERB_IN_NAME.test(t)); // npm run deploy/publish/release
+      return true;
+    }
+    // 3) Tools, bei denen erst ein deploy-Argument den Ausschlag gibt (vercel --prod, gcloud … deploy)
+    if (NEEDS_VERB_ARG.has(base) && rest.some((t) => /^(deploy|--prod)$/i.test(t))) return true;
+  }
+  return false;
+}
+
+/**
  * „Trusted-Local-Dev": lokale Ausführung läuft still; gefragt wird nur bei echtem Risiko.
  * Reihenfolge der Gates (jedes greift auch, wenn das Risiko in einem Code-String versteckt ist —
  * der DANGER-/Netz-Scan läuft QUOTE-NEUTRALISIERT):

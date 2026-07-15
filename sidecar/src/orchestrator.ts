@@ -13,7 +13,7 @@ import { AgentSession, type PermissionHooks } from "./session.js";
 import { loadApprovedKinds, saveApprovedKinds } from "./permissions.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot } from "./io.js";
-import { autoCommit, createPr, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
+import { autoCommit, commitMainRelease, createPr, detectMainVersionBump, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
@@ -277,6 +277,43 @@ export class Orchestrator {
           agentId: msg.integratorId,
           event: { kind: "assistant_text", text: `↗ Main-Änderungen in neuen Sub-Stream „${msg.label}" ausgelagert (Branch ${msg.branch}).` },
         });
+        break;
+      }
+
+      case "commit_main_release": {
+        if (!this.project) break;
+        const integ = this.pool.get(msg.agentId);
+        if (!integ || !integ.repoRoot) {
+          this.emit({ ...envelope(), type: "agent_event", agentId: msg.agentId, event: { kind: "system", subtype: "⚠ Release-Commit nicht möglich (kein Integrator/Repo)." } });
+          break;
+        }
+        // Nur der Integrator committet auf main (Invariante) — im Core erzwingen, nicht nur die UI verstecken.
+        if (integ.role !== "integrator") {
+          this.emit({ ...envelope(), type: "agent_event", agentId: msg.agentId, event: { kind: "system", subtype: "⚠ Release-Commit nur für den Integrator (main-Checkout) erlaubt." } });
+          break;
+        }
+        const res = await commitMainRelease(integ.repoRoot, this.project.defaultBranch);
+        if (!res.ok && res.secrets?.length) {
+          // Fail-closed: Secret im Diff → als Eskalation sichtbar machen (nicht committen).
+          this.emitError(msg.agentId, "secret_detected", `${res.error} Bitte das Secret entfernen oder gitignoren, dann erneut.`);
+          break;
+        }
+        const skippedNote = res.ok && res.skipped?.length ? ` — übersprungen (Hygiene): ${res.skipped.join(", ")}` : "";
+        this.emit({
+          ...envelope(),
+          type: "agent_event",
+          agentId: msg.agentId,
+          event: {
+            kind: "system",
+            subtype: res.ok
+              ? `✓ Release committet: ${res.message} (lokal auf ${this.project.defaultBranch} — noch nicht gepusht)${skippedNote}`
+              : `⚠ Release-Commit fehlgeschlagen: ${res.error}`,
+          },
+        });
+        if (res.ok) {
+          this.mainDirtyNotified.delete(msg.agentId); // Episode beendet → nächste Dirt meldet wieder
+          await this.pollAgent(integ); // git-Status neu → main jetzt sauber, Banner verschwindet
+        }
         break;
       }
 
@@ -1072,12 +1109,27 @@ export class Orchestrator {
         // (main ändert sich nur über grüne PR-Merges → in Sub-Stream auslagern). Status-neutral.
         if (status.dirty && !this.mainDirtyNotified.has(s.agentId)) {
           this.mainDirtyNotified.add(s.agentId);
-          this.emitError(
-            s.agentId,
-            "main_edited",
-            "Du hast den main-Checkout direkt geändert. main bleibt nur über grün-getestete PR-Merges aktuell — " +
-              "lager die Änderungen aus: Main-Stream wählen → „In Sub-Stream auslagern“.",
-          );
+          // Deploy-Rahmung, wenn (a) ein Deploy-Befehl lief ODER (b) die Dirt wie ein Versions-Bump aussieht.
+          // (b) ist projekt-agnostisch aus dem Diff abgeleitet → fängt auch `npm version`/`make deploy`, die
+          // keinen als Deploy erkennbaren Befehlsnamen haben (Review-Fund).
+          const isDeploy = s.deployedRecently() || (await detectMainVersionBump(s.repoRoot)) !== undefined;
+          if (isDeploy) {
+            // main-Dirt stammt aus einem Deploy/Versions-Bump → kein Fehl-Edit-Alarm, sondern Angebot
+            // „Als Release committen" (Push bleibt separat/explizit).
+            this.emitError(
+              s.agentId,
+              "main_deploy_dirty",
+              "Deploy abgeschlossen — der Versions-Bump liegt uncommittet auf main. „Als Release committen“ (chore(release)) " +
+                "oder in einen Sub-Stream auslagern.",
+            );
+          } else {
+            this.emitError(
+              s.agentId,
+              "main_edited",
+              "Du hast den main-Checkout direkt geändert. main bleibt nur über grün-getestete PR-Merges aktuell — " +
+                "lager die Änderungen aus: Main-Stream wählen → „In Sub-Stream auslagern“.",
+            );
+          }
         } else if (!status.dirty) {
           this.mainDirtyNotified.delete(s.agentId);
         }

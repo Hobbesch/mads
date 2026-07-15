@@ -794,6 +794,86 @@ export async function outsourceMainChanges(
   return { ok: true, conflicted, worktreePath };
 }
 
+/** Aus dem gestageten Diff die neue Release-Version ableiten (typischer Deploy-Versions-Bump).
+ *  Bevorzugt eine hinzugefügte Version, die eine ANDERE ersetzt (echter Bump); sonst die erste +Version. */
+export function deriveReleaseVersion(diff: string): string | undefined {
+  const SEMVER = /\b(\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.]+)?)\b/;
+  const VERSION_KEY = /(^|[^a-z])(version|__version__)\b/i; // Zeile deklariert eine Version (nicht irgendeine Zahl)
+  const LOCKFILE = /(^|\/)([^/]*\.lock|package-lock\.json|pnpm-lock\.yaml)$/i; // Dependency-Versionen ignorieren
+  let inLockfile = false;
+  const keyAdd: string[] = [];
+  const keyRem = new Set<string>();
+  const anyAdd: string[] = [];
+  const anyRem = new Set<string>();
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) {
+      const m = line.match(/^[+-]{3}\s+[ab]\/(.+)$/); // Datei-Header → Kontext (Lockfile?) setzen
+      if (m) inLockfile = LOCKFILE.test(m[1]);
+      continue;
+    }
+    if (line.startsWith("@@") || inLockfile) continue;
+    const m = line.match(SEMVER);
+    if (!m) continue;
+    const isKey = VERSION_KEY.test(line);
+    if (line.startsWith("+")) {
+      anyAdd.push(m[1]);
+      if (isKey) keyAdd.push(m[1]);
+    } else if (line.startsWith("-")) {
+      anyRem.add(m[1]);
+      if (isKey) keyRem.add(m[1]);
+    }
+  }
+  // Bevorzugt: Version aus einer Deklarationszeile, die eine alte ersetzt (echter Bump); dann irgendeine.
+  const keyBump = keyAdd.find((v) => keyRem.size > 0 && !keyRem.has(v));
+  const anyBump = anyAdd.find((v) => anyRem.size > 0 && !anyRem.has(v));
+  return keyBump ?? keyAdd[0] ?? anyBump ?? anyAdd[0];
+}
+
+/** Den aktuellen (Deploy-)Stand des Main-Checkouts als Release-Commit festhalten: `git add -A` +
+ *  `chore(release): <version>` (Version aus dem Diff abgeleitet). NUR lokal, NUR auf dem Default-Branch;
+ *  Push bleibt bewusst separat/explizit (außen-sichtbare Aktion). Gitignorte Secrets werden von
+ *  `git add -A` nicht erfasst. */
+export async function commitMainRelease(
+  repoRoot: string,
+  defaultBranch: string,
+): Promise<{ ok: true; message: string; skipped?: string[] } | { ok: false; error: string; secrets?: SecretHit[] }> {
+  // NUR auf dem Default-Branch (der Integrator sitzt dort; nie auf Detached/Anderem) — vor jedem Staging prüfen.
+  const branch = (await git(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], repoRoot)).stdout.trim();
+  if (branch !== defaultBranch) return { ok: false, error: `Nicht auf ${defaultBranch} (aktuell „${branch}“) — Release-Commit abgebrochen.` };
+  await git(["-C", repoRoot, "add", "-A"], repoRoot);
+  // Hygiene wie autoCommit: nie-zu-committende Artefakte/Symlinks wieder aus dem Index (schützt u. a.
+  // vor dem eingecheckten .venv-Symlink, der jeden Rebase blockiert).
+  const skipped = await unstageUncommittable(repoRoot);
+  const diff = (await git(["-C", repoRoot, "diff", "--cached"], repoRoot)).stdout;
+  if (!diff.trim()) {
+    await git(["-C", repoRoot, "reset", "-q"], repoRoot);
+    return { ok: false, error: "Nichts zu committen — main ist sauber (nach Hygiene-Filter)." };
+  }
+  // Secret-Gate (mads ist PUBLIC — NIE Secrets committen), fail-closed wie autoCommit. Ein nicht-gitignortes
+  // Secret (z. B. eine getrackte config.env) würde sonst in die lokale main-Historie gebacken.
+  const hits = scanSecrets(diff);
+  if (hits.length) {
+    await git(["-C", repoRoot, "reset", "-q"], repoRoot);
+    return { ok: false, error: `Secret im Diff erkannt (${hits.length}) — Release-Commit blockiert.`, secrets: hits };
+  }
+  const version = deriveReleaseVersion(diff);
+  const message = version ? `chore(release): ${version}` : "chore(release)";
+  const commit = await git(["-C", repoRoot, "commit", "-m", message], repoRoot);
+  if (commit.code !== 0) {
+    await git(["-C", repoRoot, "reset", "-q"], repoRoot); // Index nicht gestaged hängen lassen
+    return { ok: false, error: `git commit fehlgeschlagen: ${commit.stderr || commit.stdout}` };
+  }
+  return { ok: true, message, skipped: skipped.length ? skipped : undefined };
+}
+
+/** Sieht die aktuelle main-Dirt nach einem (Deploy-)Versions-Bump aus? Liefert die abgeleitete Version,
+ *  sonst undefined. Projekt-agnostisch: fängt jeden Versions-Bump (npm version, make deploy, push.ps1 …),
+ *  unabhängig vom Befehlsnamen — der Poll nutzt das für die „Als Release committen"-Rahmung. */
+export async function detectMainVersionBump(repoRoot: string): Promise<string | undefined> {
+  const diff = (await git(["-C", repoRoot, "diff", "HEAD"], repoRoot)).stdout; // getrackte Änderungen ggü. HEAD
+  return diff.trim() ? deriveReleaseVersion(diff) : undefined;
+}
+
 /** Lokale Commits, die noch nicht auf origin/<branch> liegen (für „PR aktuell halten"). */
 export async function unpushedCount(worktree: string, branch: string): Promise<number> {
   const r = await git(["-C", worktree, "rev-list", "--count", `origin/${branch}..HEAD`], worktree);

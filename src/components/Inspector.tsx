@@ -33,6 +33,7 @@ export function Inspector() {
   const syncBranch = useStore((s) => s.syncBranch);
   const resolveConflict = useStore((s) => s.resolveConflict);
   const outsourceMain = useStore((s) => s.outsourceMain);
+  const commitMainRelease = useStore((s) => s.commitMainRelease);
   const updateMain = useStore((s) => s.updateMain);
   const continueStream = useStore((s) => s.continueStream);
   const integratePr = useStore((s) => s.integratePr);
@@ -223,6 +224,26 @@ export function Inspector() {
       onConfirm: () => void outsourceMain(selectedId),
     });
 
+  // Deploy-Fall: den aktuellen main-Stand als Release-Commit festhalten (typischer Versions-Bump).
+  const askCommitRelease = () =>
+    setConfirm({
+      title: "Als Release committen?",
+      body: (
+        <>
+          <p>
+            Der aktuelle Stand des <code>main</code>-Checkouts wird als Release-Commit festgehalten (
+            <code>chore(release): &lt;version&gt;</code> — die Version wird aus dem Diff abgeleitet).
+          </p>
+          <p>
+            Nur <strong>lokal</strong> auf <code>main</code> — <strong>kein Push</strong>. Das Pushen bleibt eine
+            bewusste, separate Aktion. Gedacht für den Versions-Bump nach einem Deploy.
+          </p>
+        </>
+      ),
+      confirmLabel: "Als Release committen",
+      onConfirm: () => void commitMainRelease(selectedId),
+    });
+
   const runStep = () => {
     if (step.kind === "commit") void commitAgent(selectedId);
     else if (step.kind === "pr") void createPr(selectedId);
@@ -369,6 +390,16 @@ export function Inspector() {
               onClick={() => askMerge(false)}
             >
               Integrieren &amp; beenden
+            </button>
+          )}
+          {/* Integrator hat uncommittete main-Änderungen: Alternative zum Auslagern — den (Deploy-)Stand
+              als Release-Commit festhalten (chore(release): …). Nur lokal, Push bleibt separat. */}
+          {live && step.kind === "outsource" && (
+            <button
+              title="Den aktuellen (Deploy-)Stand von main als Release-Commit festhalten (chore(release): <version>). Nur lokal — Push bleibt separat."
+              onClick={askCommitRelease}
+            >
+              Als Release committen
             </button>
           )}
           {live && agent.role === "sub" && agent.worktreePath && (

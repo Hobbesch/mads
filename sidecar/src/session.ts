@@ -13,7 +13,7 @@
 import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
 import { createWorktree, removeWorktree } from "./git.js";
-import { classifyToolCall, isGitCommit, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
+import { classifyToolCall, isDeployCommand, isGitCommit, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
 import { scrubbedAgentEnv } from "./agentEnv.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -186,6 +186,9 @@ export class AgentSession {
   // (z. B. zwei Clients tippen dieselbe Karte im Broadcast-Fenster) über den „einzige offene Anfrage"-
   // Fallback fälschlich eine ANDERE offene Anfrage beantwortet — sonst Permission-Gate-Bypass.
   private readonly recentlyResolved = new Set<string>();
+  // Zeitpunkt des letzten erkannten Deploy-Befehls des Integrators (ms). Der Poll wertet damit main-Dirt
+  // als „Deploy-Bump" (→ „Als Release committen") statt als versehentlichen main-Edit.
+  private lastDeployAt = 0;
   // Vom Nutzer per „Immer erlauben" freigegebene WebFetch-Domains (registrierbare Domain, z. B.
   // „sec.gov") → weitere Seiten dort laufen ohne Rückfrage. Pro Stream, in-memory.
   private readonly approvedFetchHosts = new Set<string>();
@@ -233,6 +236,12 @@ export class AgentSession {
    *  „Antwort nicht angekommen"-Meldung bei einer harmlosen Doppel-Antwort.) */
   wasRecentlyResolved(requestId: string): boolean {
     return this.recentlyResolved.has(requestId);
+  }
+
+  /** Lief kürzlich (innerhalb des Fensters) ein Deploy-Befehl? Dann ist main-Dirt ein Deploy-Bump,
+   *  kein versehentlicher Edit. Fenster großzügig, damit ein mehrminütiger Deploy es nicht überschreitet. */
+  deployedRecently(): boolean {
+    return this.lastDeployAt > 0 && Date.now() - this.lastDeployAt < 20 * 60_000;
   }
 
   /** Alle noch offenen Permission-Anfragen als „cancelled" auflösen (Interrupt/Stop/Session-Ende) →
@@ -447,6 +456,12 @@ export class AgentSession {
     input: Record<string, unknown>,
     opts: Record<string, unknown>,
   ): Promise<PermissionResult> {
+    // Deploy-Erkennung (nur Integrator, der im main-Checkout sitzt): merkt sich, dass gerade ein
+    // Deploy-/Publish-Befehl läuft. Der Poll wertet die dadurch entstehende main-Dirt (Versions-Bump)
+    // dann NICHT als versehentlichen main-Edit, sondern bietet „Als Release committen" an.
+    if (this.role === "integrator" && toolName === "Bash" && isDeployCommand(String((input as { command?: unknown })?.command ?? ""))) {
+      this.lastDeployAt = Date.now();
+    }
     // Main-Commit-Gate: Der Integrator-Worktree IST der main-Checkout. Ein `git commit`
     // des Integrators landet also direkt auf main — das soll NIE still passieren (auch nicht
     // im Auto-Modus, wo lokale Commits sonst durchlaufen). Immer Rückfrage, damit der
