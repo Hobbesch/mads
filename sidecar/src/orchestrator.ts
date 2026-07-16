@@ -13,7 +13,7 @@ import { AgentSession, type PermissionHooks } from "./session.js";
 import { loadApprovedKinds, saveApprovedKinds } from "./permissions.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot } from "./io.js";
-import { autoCommit, commitMainRelease, createPr, detectMainVersionBump, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
+import { autoCommit, commitMainRelease, createPr, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
@@ -362,9 +362,35 @@ export class Orchestrator {
       }
 
       case "update_main": {
-        // G5: Integrator-Aktion — main per fast-forward nachziehen (KEIN rebase/force).
+        // G5: Integrator-Aktion — main nachziehen. Zuerst fast-forward (unverfänglich).
         if (!this.project) break;
-        const res = await fastForwardMain(this.project.repoRoot, this.project.defaultBranch);
+        let res = await fastForwardMain(this.project.repoRoot, this.project.defaultBranch);
+        // DIVERGIERT (lokale Commits auf main + origin voraus) war bisher eine Sackgasse: die UI sagte
+        // „Merge/Rebase nötig", bot aber keinen Weg — der Nutzer musste in den Terminal. Das passiert im
+        // Alltag ständig, weil jeder Deploy-Versions-Bump/Release-Commit lokal auf main liegt. Jetzt:
+        // die lokalen Commits verlustfrei auf origin/<base> rebasen (Konflikt → abort, alles bleibt).
+        if (res.blocked === "diverged") {
+          const rb = await rebaseMainOntoOrigin(this.project.repoRoot, this.project.defaultBranch);
+          if (rb.ok) {
+            this.emit({
+              ...envelope(),
+              type: "agent_event",
+              agentId: msg.agentId,
+              event: {
+                kind: "assistant_text",
+                text:
+                  `↻ main war divergiert → deine ${rb.rebased} lokale(n) Commit(s) wurden verlustfrei auf ` +
+                  `origin/${this.project.defaultBranch} rebased. main ist jetzt aktuell (Push bleibt deine Entscheidung).`,
+              },
+            });
+            const st = await gitStatus(this.project.repoRoot, this.project.repoRoot, this.project.defaultBranch, this.project.defaultBranch);
+            this.gitState.set(msg.agentId, st);
+            this.emitGitStatus(msg.agentId, st);
+            break;
+          }
+          this.emitError(msg.agentId, "stale_base", `main aktualisieren fehlgeschlagen: ${rb.error}`);
+          break;
+        }
         if (res.ff > 0) {
           this.emit({
             ...envelope(),
@@ -373,14 +399,13 @@ export class Orchestrator {
             event: { kind: "assistant_text", text: `↻ main per fast-forward auf origin/${this.project.defaultBranch} aktualisiert (+${res.ff} Commits).` },
           });
         } else if (res.blocked) {
+          // "diverged" ist oben bereits per Rebase aufgelöst → hier bleiben nur diese Fälle.
           const why =
             res.blocked === "dirty"
               ? "uncommittete Änderungen an getrackten Dateien"
-              : res.blocked === "diverged"
-                ? "main ist divergiert (lokale Commits) — Merge/Rebase nötig"
-                : res.blocked === "detached"
-                  ? "detached HEAD"
-                  : "unerwartet (git-Status prüfen)";
+              : res.blocked === "detached"
+                ? "detached HEAD"
+                : "unerwartet (git-Status prüfen)";
           this.emitError(msg.agentId, "stale_base", `main konnte nicht vorgezogen werden: ${why} (${res.behind} behind).`);
         } else {
           this.emit({

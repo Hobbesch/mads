@@ -884,6 +884,33 @@ export async function detectMainVersionBump(repoRoot: string): Promise<string | 
   return diff.trim() ? deriveReleaseVersion(diff) : undefined;
 }
 
+/**
+ * Divergierten main auflösen, OHNE etwas wegzuwerfen: die lokalen Commits per Rebase auf
+ * origin/<base> heben. Genau der Fall, in dem `fastForwardMain` „diverged" meldet — bisher eine
+ * Sackgasse in der UI („braucht echten Merge/Rebase → Mensch"), obwohl er im Alltag ständig
+ * auftritt: jeder Deploy-Versions-Bump / Release-Commit liegt als lokaler Commit auf main, und
+ * sobald ein PR gemergt wird, ist main divergiert.
+ * Sicherheit: nur auf dem Default-Branch, nur bei sauberem Tree; Konflikt → `rebase --abort`,
+ * Zustand bleibt exakt wie vorher (nichts geht verloren).
+ */
+export async function rebaseMainOntoOrigin(
+  repoRoot: string,
+  defaultBranch: string,
+): Promise<{ ok: true; rebased: number } | { ok: false; error: string }> {
+  const cur = (await git(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], repoRoot)).stdout.trim();
+  if (cur !== defaultBranch) return { ok: false, error: `Nicht auf ${defaultBranch} (aktuell „${cur}“) — Rebase abgebrochen.` };
+  const trackedDirty = (await git(["-C", repoRoot, "status", "--porcelain", "-uno"], repoRoot)).stdout.trim();
+  if (trackedDirty) return { ok: false, error: "Uncommittete Änderungen im Main-Checkout — erst committen oder auslagern." };
+  const base = `origin/${defaultBranch}`;
+  const ahead = parseInt((await git(["-C", repoRoot, "rev-list", "--count", `${base}..HEAD`], repoRoot)).stdout.trim() || "0", 10);
+  const rb = await git(["-C", repoRoot, "rebase", base], repoRoot);
+  if (rb.code !== 0) {
+    await git(["-C", repoRoot, "rebase", "--abort"], repoRoot); // Zustand unverändert lassen
+    return { ok: false, error: `Rebase-Konflikt — main wurde NICHT verändert: ${(rb.stderr || rb.stdout).trim().slice(0, 200)}` };
+  }
+  return { ok: true, rebased: ahead };
+}
+
 /** Lokale Commits, die noch nicht auf origin/<branch> liegen (für „PR aktuell halten"). */
 export async function unpushedCount(worktree: string, branch: string): Promise<number> {
   const r = await git(["-C", worktree, "rev-list", "--count", `origin/${branch}..HEAD`], worktree);
