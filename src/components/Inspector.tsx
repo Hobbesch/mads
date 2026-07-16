@@ -372,11 +372,16 @@ export function Inspector() {
             </button>
           )}
           {/* Geführter „nächster Schritt": Committen → PR erstellen → Integrieren */}
-          {live && step.kind !== "none" && (
+          {/* Auch bei einem PASSIV wiederhergestellten Stream (nach App-Neustart, live=false) den Schritt
+              ZEIGEN — nur deaktiviert und mit Grund. Vorher war der Knopf komplett ausgeblendet: der
+              „Mergen & weiterarbeiten"-Knopf fehlte nach jedem Neustart spurlos, obwohl ein offener PR
+              da war, und niemand konnte sehen warum. Handeln kann mads erst, wenn der Stream wieder im
+              Pool ist → „Fortsetzen". */}
+          {step.kind !== "none" && (
             <button
               className={`step-primary${step.kind === "cleanup" ? " cleanup" : ""}`}
-              disabled={step.disabled}
-              title={step.hint}
+              disabled={step.disabled || !live}
+              title={live ? step.hint : `${step.label}: erst „Fortsetzen“ — der Stream ist nach dem App-Neustart noch nicht aktiv.`}
               onClick={runStep}
             >
               {step.label}
