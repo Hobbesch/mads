@@ -956,6 +956,17 @@ export class Orchestrator {
         offer.push(c);
         continue;
       }
+      // `.mads/` auch IM WORKTREE selbst-ignorieren, BEVOR unten „dirty" geprüft wird. Oben passiert das
+      // nur für den repoRoot — Worktrees hatten den Schutz nie. Folge: mads' EIGENE Dateien (Paste-
+      // Screenshots unter .mads/attachments/) machten den Worktree „schmutzig", worauf ein gemergter
+      // Stream als „gemergt MIT lokalen Resten" eingestuft und nur noch zum Aufräumen angeboten wurde —
+      // der Nutzer verlor seinen aktiven Stream aus dem Grid. Idempotent; heilt auch Worktrees, die vor
+      // dem createWorktree-Fix entstanden sind.
+      try {
+        ensureMadsDir(c.worktreePath);
+      } catch (e) {
+        log(`[orchestrator] .mads-Schutz im Worktree ${c.worktreePath} fehlgeschlagen: ${String(e)}`);
+      }
       const pr = await prStatus(repoRoot, c.branch).catch(() => null);
       const isDone = pr?.state === "MERGED" || pr?.state === "CLOSED";
       if (!isDone) {
