@@ -93,7 +93,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
               setEffort(clampEffort(m, effort));
             }}
             onEffort={setEffort}
-            className="dialog"
+            variant="dialog"
           />
         </label>
 

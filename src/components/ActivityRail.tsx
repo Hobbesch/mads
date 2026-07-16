@@ -120,7 +120,7 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
             effort={defaultEffort}
             onModel={setDefaultModel}
             onEffort={setDefaultEffort}
-            className="rail"
+            variant="rail"
           />
         </div>
       )}
