@@ -13,9 +13,10 @@
 import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
 import { createWorktree, removeWorktree } from "./git.js";
+import { ensureMadsDir } from "./persistence.js";
 import { classifyToolCall, isDeployCommand, isGitCommit, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
 import { scrubbedAgentEnv } from "./agentEnv.js";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import type {
@@ -23,6 +24,7 @@ import type {
   PermissionDecision,
   AgentStatus,
   ImageInput,
+  TimelineAttachment,
   AutopilotLevel,
   PullRequestInfo,
 } from "../../shared/protocol.js";
@@ -132,6 +134,24 @@ function apiErrorInfo(err: string): { message: string; recoverable: boolean } {
       return { message: `API-Fehler: ${err}`, recoverable: true };
   }
 }
+
+/** Obergrenze für ein Inline-Thumbnail (base64-Länge). Ein 320px-JPEG liegt typisch bei 10–30 KB;
+ *  256 KB ist grosszügig und deckelt zugleich Ringpuffer/Snapshot-Replay/Bridge gegen Missbrauch. */
+const MAX_THUMB_B64 = 256 * 1024;
+
+/** Obergrenze fürs VOLLBILD (base64-Länge, ~27 MB ≈ 20 MB Datei — spiegelt den Frontend-Anhang-Cap).
+ *  Greift vor allem gegen ein gekoppeltes REMOTE, das sonst ungedeckelt auf die Platte schreiben könnte. */
+const MAX_IMAGE_B64 = 27 * 1024 * 1024;
+
+/** Datei-Endung für abgelegte Bild-Anhänge (nur Anzeige/Debug — der mediaType bleibt im Event). */
+const IMG_EXT: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/svg+xml": "svg",
+  "image/bmp": "bmp",
+};
 
 function userMsg(text: string, images?: ImageInput[]): SdkUserMessage {
   if (images && images.length > 0) {
@@ -805,8 +825,56 @@ export class AgentSession {
    *  Timeline-Puffer (Snapshot-Replay für später verbundene Remotes) UND Bridge-Tee. */
   private emitUserText(text: string, images?: ImageInput[]): void {
     const t = text.trim();
-    if (!t) return;
-    this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "user_text", text: t, images: images?.length } });
+    // Vollbilder EINMAL auf Platte legen; ins Event geht nur die Referenz + das kleine Thumbnail.
+    const attachments = (images ?? []).map((im) => this.persistAttachment(im));
+    if (!t && attachments.length === 0) return; // nichts zu zeigen
+    this.emit({
+      ...envelope(),
+      type: "agent_event",
+      agentId: this.agentId,
+      event: { kind: "user_text", text: t, attachments: attachments.length ? attachments : undefined },
+    });
+  }
+
+  /** Das Vollbild eines Anhangs einmal ins (gitignorte) `.mads/attachments/` schreiben und die
+   *  Timeline-Referenz bauen. Bewusst SYNC: so steht das user_text-Event garantiert VOR der Antwort
+   *  des Agenten in der Timeline (emit vor inbox.push). Ohne cwd (Mock/kein Projekt) wird nichts
+   *  geschrieben → Thumbnail ja, Vollbild-Klick nein. Schreibfehler dürfen die Nachricht nie killen. */
+  private persistAttachment(im: ImageInput): TimelineAttachment {
+    // Thumbnail deckeln: send_input kann von einem gekoppelten REMOTE kommen — ein überdimensioniertes
+    // thumbBase64 läge sonst im 500er-Ringpuffer, würde bei JEDEM Snapshot neu ausgespielt und über die
+    // Bridge an alle Geräte geschoben. Ein 320px-JPEG liegt weit darunter; darüber → lieber kein Thumbnail.
+    const thumbOk = typeof im.thumbBase64 === "string" && im.thumbBase64.length <= MAX_THUMB_B64;
+    const mediaType = typeof im.mediaType === "string" && /^image\/[a-z0-9.+-]+$/i.test(im.mediaType) ? im.mediaType : "image/png";
+    const att: TimelineAttachment = {
+      id: randomUUID(),
+      mediaType,
+      thumbBase64: thumbOk ? im.thumbBase64 : undefined,
+      thumbMediaType: thumbOk ? im.thumbMediaType : undefined,
+    };
+    if (!this.cwd) return att;
+    // Vollbild ebenfalls deckeln: dataBase64 landet auf PLATTE und kommt (via Bridge) auch von einem
+    // Remote — ohne Grenze könnte ein Gerät die Platte volllaufen lassen. Darüber: Thumbnail bleibt,
+    // nur der Vollbild-Klick entfällt (bereits unterstützter Degraded-Modus).
+    if (typeof im.dataBase64 !== "string" || im.dataBase64.length > MAX_IMAGE_B64) {
+      log(`[${this.agentId}] Bild-Anhang übersprungen (fehlt oder > ${Math.round(MAX_IMAGE_B64 / 1024 / 1024)} MB base64)`);
+      return att;
+    }
+    try {
+      // `.mads/` im Worktree selbst-ignorieren, BEVOR die erste Datei darin landet — sonst zählt der
+      // Anhang als „dirty" und der Autopilot committet ihn per `git add -A` ins Projekt-Repo.
+      ensureMadsDir(this.cwd);
+      const dir = join(this.cwd, ".mads", "attachments");
+      mkdirSync(dir, { recursive: true });
+      // Object.hasOwn: kein Prototyp-Durchgriff (z. B. mediaType "constructor" → Müll-Dateiname).
+      const ext = Object.hasOwn(IMG_EXT, mediaType) ? IMG_EXT[mediaType] : "png";
+      const p = join(dir, `${att.id}.${ext}`);
+      writeFileSync(p, Buffer.from(im.dataBase64, "base64"));
+      att.path = p;
+    } catch (e) {
+      log(`[${this.agentId}] Bild-Anhang nicht gespeichert: ${String(e)}`);
+    }
+    return att;
   }
 
   private emitText(text: string): void {

@@ -12,7 +12,7 @@ import { MessageTimeline } from "./MessageTimeline";
 import { ModelEffortPicker } from "./ModelEffortPicker";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
-import { blobToBase64 } from "../blob";
+import { blobToBase64, makeThumbnail } from "../blob";
 import { loadUiPrefs, saveUiPrefs } from "../uiPrefs";
 import type { PermissionMode, ImageInput, AutopilotLevel } from "../../shared/protocol";
 
@@ -114,7 +114,11 @@ export function Inspector() {
   const attachImageFiles = async (files: File[]) => {
     const imgs: ImageInput[] = [];
     for (const f of files) {
-      if (f.type.startsWith("image/")) imgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f) });
+      if (!f.type.startsWith("image/")) continue;
+      // Thumbnail gleich hier erzeugen (Canvas gibt's nur im Frontend) → es reist im user_text-Event
+      // mit, damit Mac UND Remote das echte Bild statt eines Zählers zeigen.
+      const thumb = await makeThumbnail(f);
+      imgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f), ...thumb });
     }
     if (imgs.length) setDraftImages(selectedId, [...attached, ...imgs]);
     return imgs.length;
@@ -321,7 +325,7 @@ export function Inspector() {
                 effort={agent.effort}
                 onModel={(m) => void setStreamModel(selectedId, m)}
                 onEffort={(e) => void setStreamEffort(selectedId, e)}
-                className="inspector"
+                variant="inspector"
               />
             </div>
           )}

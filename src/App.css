@@ -1042,19 +1042,19 @@ button.primary:hover {
 }
 /* Modell/Effort im Inspector: kompakt, feste Eigenbreite — KEIN Wachsen (das verursachte die
    Überlappung mit den Buttons). */
-.model-effort.inspector {
+.model-effort.me-inspector {
   gap: 6px;
 }
-.model-effort.inspector select {
+.model-effort.me-inspector select {
   font-size: 12px;
   padding: 5px 8px;
   font-weight: 550;
 }
-.model-effort.inspector .me-model {
+.model-effort.me-inspector .me-model {
   flex: 0 0 auto;
   min-width: 84px;
 }
-.model-effort.inspector .me-effort {
+.model-effort.me-inspector .me-effort {
   flex: 0 0 auto;
   min-width: 78px;
 }
@@ -1182,6 +1182,52 @@ button.primary:hover {
   background: var(--accent-weak);
   padding: 2px 7px;
   border-radius: 10px;
+}
+/* Echte Bild-Anhänge einer User-Nachricht: Thumbnail-Reihe + Klick-Vollbild (Lightbox). */
+.tl-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.tl-thumb {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  cursor: zoom-in;
+  line-height: 0;
+  overflow: hidden;
+}
+.tl-thumb:hover {
+  border-color: var(--accent);
+}
+.tl-thumb img {
+  display: block;
+  max-width: 140px;
+  max-height: 100px;
+  object-fit: cover;
+}
+.tl-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgb(0 0 0 / 78%);
+  cursor: zoom-out;
+}
+.tl-lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+}
+.tl-lightbox-msg {
+  color: #fff;
+  font-size: 13px;
 }
 .tl-row {
   display: flex;
@@ -1678,25 +1724,25 @@ button.primary:hover {
   color: var(--text-faint);
   margin-bottom: 5px;
 }
-.model-effort.rail {
+.model-effort.me-rail {
   flex-wrap: wrap;
 }
-.model-effort.rail select {
+.model-effort.me-rail select {
   font-size: 11px;
   padding: 4px 6px;
 }
-.model-effort.rail .me-model,
-.model-effort.rail .me-effort {
+.model-effort.me-rail .me-model,
+.model-effort.me-rail .me-effort {
   flex: 1 1 100%;
 }
 /* Dialog-Variante: volle Breite im Formularfeld, Modell breiter als Effort. */
-.model-effort.dialog {
+.model-effort.me-dialog {
   width: 100%;
 }
-.model-effort.dialog .me-model {
+.model-effort.me-dialog .me-model {
   flex: 2 1 0;
 }
-.model-effort.dialog .me-effort {
+.model-effort.me-dialog .me-effort {
   flex: 1 1 0;
 }
 

@@ -37,6 +37,23 @@ export type EffortMode = "low" | "medium" | "high" | "xhigh" | "ultracode";
 export interface ImageInput {
   mediaType: string; // z.B. "image/png"
   dataBase64: string;
+  /** Kleines Anzeige-Thumbnail, das das FRONTEND beim Anhängen per Canvas erzeugt. Es reist INLINE im
+   *  user_text-Event mit, damit Mac UND Remote das echte Bild sehen. Das VOLLBILD geht bewusst NICHT
+   *  durch Timeline-Ringpuffer/Snapshot-Replay/Bridge (ein Screenshot sind schnell mehrere MB) —
+   *  es landet auf Platte und wird nur bei Bedarf (Klick) lokal geladen. Das SDK ignoriert diese
+   *  Felder (userMsg liest nur mediaType/dataBase64). */
+  thumbBase64?: string;
+  thumbMediaType?: string; // z.B. "image/jpeg"
+}
+
+/** Ein angehängtes Bild, wie es in der Timeline erscheint: kleines Inline-Thumbnail (überall anzeigbar)
+ *  + Pfad zum Vollbild auf Platte (nur lokal am Mac ladbar; fehlt ohne Projekt/Worktree). */
+export interface TimelineAttachment {
+  id: string;
+  mediaType: string;
+  thumbBase64?: string;
+  thumbMediaType?: string;
+  path?: string;
 }
 
 export interface BaseMsg {
@@ -402,7 +419,7 @@ export type AgentEvent =
   | { kind: "thinking"; text: string }
   // Vom Menschen eingegebene Anweisung (Prompt). Der Sidecar emittiert sie als Event, damit sie
   // auf ALLEN Clients (Mac + Remote) im Verlauf erscheint — nicht nur dort, wo sie getippt wurde.
-  | { kind: "user_text"; text: string; images?: number }
+  | { kind: "user_text"; text: string; attachments?: TimelineAttachment[] }
   | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown> }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; summary?: string; output?: string }
   | { kind: "system"; subtype: string; data?: Record<string, unknown> };

@@ -29,6 +29,7 @@ import type {
   AutopilotLevel,
   EffortMode,
   ImageInput,
+  TimelineAttachment,
 } from "../shared/protocol";
 import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
@@ -36,7 +37,7 @@ import { loadRecentProjects, rememberProject, forgetProject, type RecentProject 
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
 import { notifyOsPermission, dismissOsPermission } from "./osNotify";
 import { toolCommand } from "./toolText";
-import { blobToBase64, base64ToBytes, extForMime, dirname } from "./blob";
+import { blobToBase64, base64ToBytes, extForMime, dirname, makeThumbnail } from "./blob";
 import { openMarkdownWindow } from "./detachWindow";
 
 /** `rel` relativ zu `baseDir` auflösen (mit `..`/`.`-Kollaps). Führendes `/` = absolut. */
@@ -77,7 +78,7 @@ export interface DictationVM {
 }
 
 export type TimelineEvent =
-  | { id: string; kind: "user"; text: string; images?: number }
+  | { id: string; kind: "user"; text: string; attachments?: TimelineAttachment[] }
   | { id: string; kind: "assistant"; text: string }
   | { id: string; kind: "thinking"; text: string }
   | {
@@ -768,7 +769,9 @@ export const useStore = create<MadsState>((set) => {
         if (ev.kind === "user_text") {
           // Vom Menschen eingegebene Anweisung (Mac ODER Remote) — vom Sidecar ausgespielt, damit sie
           // auf ALLEN Clients im Verlauf steht. Ersetzt die frühere rein lokale, optimistische Anzeige.
-          if (ev.text.trim()) pushEvent(msg.agentId, { id: mkId(), kind: "user", text: ev.text, images: ev.images });
+          // Auch eine reine Bild-Nachricht (Text leer) anzeigen.
+          if (ev.text.trim() || ev.attachments?.length)
+            pushEvent(msg.agentId, { id: mkId(), kind: "user", text: ev.text, attachments: ev.attachments });
         } else if (ev.kind === "assistant_text" || ev.kind === "assistant_delta") {
           if (ev.text.trim()) pushEvent(msg.agentId, { id: mkId(), kind: "assistant", text: ev.text });
         } else if (ev.kind === "thinking") {
@@ -1125,7 +1128,9 @@ export const useStore = create<MadsState>((set) => {
           continue;
         }
         if (f.type.startsWith("image/")) {
-          newImgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f) });
+          // Thumbnail mitgeben → die Timeline zeigt später das echte Bild (Mac + Remote), nicht nur „+1 Bild".
+          const thumb = await makeThumbnail(f);
+          newImgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f), ...thumb });
           continue;
         }
         try {
