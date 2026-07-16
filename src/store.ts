@@ -30,6 +30,7 @@ import type {
   EffortMode,
   ImageInput,
   TimelineAttachment,
+  SavedPrompt,
 } from "../shared/protocol";
 import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
@@ -135,6 +136,10 @@ export interface AgentVM {
   behind: number;
   ahead: number;
   dirty: boolean; // uncommitted ODER untracked
+  /** main-Dirt stammt aus einem gerade erkannten Deploy (Eskalation `main_deploy_dirty`) —
+   *  dann ist „Als Release committen" der Primärschritt (nicht „In Sub-Stream auslagern").
+   *  Gelöscht, sobald ein git_status mit dirty=false für diesen Agenten eintrifft. */
+  deployDirty?: boolean;
   syncBlocked?: boolean; // Auto-Sync pausiert (Rebase-Konflikt) — manuelles Eingreifen nötig
   pr?: PullRequestInfo;
   gate?: { ok: boolean; steps: GateStep[] };
@@ -275,6 +280,9 @@ export interface MadsState {
   /** Ergebnis des letzten Handoff-Export/-Imports — treibt einen dismissbaren Banner. */
   handoff?: HandoffResultMsg;
   collisions: Collision[];
+  /** Kuratierte, wiederverwendbare Prompts des Projekts (reiner Spiegel — Persistenz macht
+   *  der Sidecar in `<repoRoot>/.mads/prompts.json`, gemeldet via prompts_update). */
+  prompts: SavedPrompt[];
   // ── Spracheingabe (lokales Whisper) ──
   whisper: WhisperVM;
   dictation: DictationVM;
@@ -353,6 +361,10 @@ export interface MadsState {
   requestParallelAssessment: (req: PermissionRequestMsg) => Promise<void>;
   spawnParallelStreams: (picks: { label: string; brief: string }[]) => Promise<void>;
   cancelParallelPicker: () => void;
+  /** Prompt anlegen/ändern (Upsert per id) — der Sidecar persistiert und spiegelt via prompts_update. */
+  savePrompt: (prompt: SavedPrompt) => Promise<void>;
+  /** Prompt löschen (die Bestätigung macht die UI vorher). */
+  deletePrompt: (id: string) => Promise<void>;
   sendInput: (id: string, text: string, images?: ImageInput[]) => Promise<void>;
   setPermissionMode: (id: string, mode: PermissionMode) => Promise<void>;
   setAutopilot: (id: string, level: AutopilotLevel) => Promise<void>;
@@ -694,7 +706,14 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "git_status":
-        patchAgent(msg.agentId, { behind: msg.behind, ahead: msg.ahead, dirty: msg.dirty, syncBlocked: msg.syncBlocked ?? false });
+        patchAgent(msg.agentId, {
+          behind: msg.behind,
+          ahead: msg.ahead,
+          dirty: msg.dirty,
+          syncBlocked: msg.syncBlocked ?? false,
+          // Deploy-Flag löschen, sobald main wieder sauber ist (Release committet/ausgelagert).
+          ...(msg.dirty ? {} : { deployDirty: false }),
+        });
         break;
 
       case "pr_update":
@@ -747,6 +766,11 @@ export const useStore = create<MadsState>((set) => {
 
       case "collision_warning":
         set({ collisions: msg.collisions });
+        break;
+
+      case "prompts_update":
+        // Vollständige Prompt-Liste des Projekts (bei open_project + nach jeder Änderung) — Spiegel.
+        set({ prompts: msg.prompts });
         break;
 
       case "spawn_substreams_request": {
@@ -865,6 +889,12 @@ export const useStore = create<MadsState>((set) => {
         if (msg.agentId && (msg.code === "main_edited" || msg.code === "main_deploy_dirty")) {
           // Proaktiver Hinweis (kein Fehler-Status): main-Dirt → auslagern ODER (nach Deploy) als Release
           // committen. Status bleibt unberührt; die Aktionen bietet der Inspector an, solange main dirty ist.
+          // Deploy-Fall merken: der geführte nextStep hebt dann „Als Release committen" als Primäraktion
+          // hervor (statt „In Sub-Stream auslagern"). git_status mit dirty=false löscht das Flag wieder.
+          // main_edited löscht das Flag explizit: bleibt main nach einem Deploy DURCHGEHEND dirty
+          // (Bump weg, andere Edits bleiben), würde „Als Release committen" sonst als Primäraktion
+          // für Nicht-Deploy-Dirt kleben — ein chore(release) für beliebige Änderungen.
+          patchAgent(msg.agentId, { deployDirty: msg.code === "main_deploy_dirty" });
           notice(msg.agentId, "accent", `↗ ${msg.message}`);
         } else if (msg.agentId) {
           const a = useStore.getState().agents[msg.agentId];
@@ -933,6 +963,7 @@ export const useStore = create<MadsState>((set) => {
     resumables: [],
     reconcileSummary: undefined,
     collisions: [],
+    prompts: [],
     whisper: { installed: false, checked: false, downloading: false, progress: 0 },
     dictation: { recording: false, transcribing: false },
     autonomy: { autoSync: true, collisionScan: true },
@@ -1203,6 +1234,15 @@ export const useStore = create<MadsState>((set) => {
     },
 
     cancelParallelPicker: () => set({ parallelPicker: undefined }),
+
+    // ── Prompt-Verwaltung: der Store sendet nur die HostMessage — der Sidecar persistiert
+    // (.mads/prompts.json) und spiegelt die neue Liste via prompts_update zurück (SSOT).
+    savePrompt: async (prompt) => {
+      await sendHost({ ...envelope(), type: "prompt_save", prompt });
+    },
+    deletePrompt: async (id) => {
+      await sendHost({ ...envelope(), type: "prompt_delete", id });
+    },
 
     sendInput: async (id, text, images) => {
       const a = useStore.getState().agents[id];

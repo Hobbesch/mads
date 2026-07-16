@@ -67,7 +67,7 @@ export function mergeReadiness(a: AgentVM): MergeGate {
   return preMergeGate(a.pr, a.behind);
 }
 
-export type NextStepKind = "commit" | "pr" | "integrate" | "cleanup" | "outsource" | "none";
+export type NextStepKind = "commit" | "pr" | "integrate" | "cleanup" | "outsource" | "commit_release" | "none";
 export interface NextStep {
   kind: NextStepKind;
   label: string;
@@ -105,6 +105,16 @@ export function isMergedDone(a: AgentVM): boolean {
 export function nextStep(a: AgentVM): NextStep {
   const none: NextStep = { kind: "none", label: "", disabled: true, hint: "" };
   if (a.role === "integrator") {
+    // Deploy-Fall (main_deploy_dirty): das main-Dirt ist ein Deploy-Artefakt (Versions-Bump) —
+    // Primäraktion ist dann „Als Release committen", NICHT auslagern (der frühere Default hob
+    // fälschlich „In Sub-Stream auslagern" hervor). Auslagern bleibt als sekundäre Aktion.
+    if (a.dirty && a.deployDirty)
+      return {
+        kind: "commit_release",
+        label: "Als Release committen",
+        disabled: false,
+        hint: "Versions-Bump als chore(release) direkt auf main committen (Deploy-Artefakt — läuft nicht über einen PR)",
+      };
     // Direkte Edits in main sind nicht vorgesehen (main nur via grünen PR-Merge). Hat der
     // Main-Checkout doch uncommittete Änderungen → in einen neuen Sub-Stream auslagern.
     if (a.dirty)

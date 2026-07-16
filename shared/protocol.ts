@@ -90,6 +90,8 @@ export type HostMessage =
   | StopDevServerMsg
   | HandoffExportMsg
   | HandoffImportMsg
+  | PromptSaveMsg
+  | PromptDeleteMsg
   | RequestSnapshotMsg
   | ShutdownMsg;
 
@@ -106,6 +108,40 @@ export interface StartDevServerMsg extends BaseMsg {
 export interface StopDevServerMsg extends BaseMsg {
   type: "stop_devserver";
   agentId: string;
+}
+
+// ─── Prompt-Verwaltung ────────────────────────────────────────────────────────
+// Kuratierte, wiederverwendbare Anweisungen (z. B. Deploy-Rezepte) je Projekt.
+// Persistenz: `<repoRoot>/.mads/prompts.json`. Sicherheits-Eigenschaften by design:
+// (1) Ein Prompt wird beim Auswählen NUR in den Composer eingefügt (Review vor Senden,
+//     nie Auto-Send). (2) `role` bindet ihn an die Stream-Rolle — Deploy-Prompts z. B.
+//     erscheinen nur beim Integrator, nie bei Subs. (3) Platzhalter sind `{{name}}`-Tokens
+//     im Text; die UI fragt sie beim Einfügen ab (kein Skript-Aufruf ohne explizite Werte).
+export interface SavedPrompt {
+  id: string; // stabiler Slug oder uuid
+  title: string;
+  /** Kurzbeschreibung fürs Auswahlmenü (z. B. Vorbedingungen, Versions-Hinweis). */
+  description?: string;
+  /** An welche Stream-Rolle der Prompt gebunden ist. "any" = überall wählbar. */
+  role: "integrator" | "sub" | "any";
+  /** Der Anweisungstext; `{{name}}`-Tokens werden beim Einfügen abgefragt. */
+  text: string;
+  updatedAt: number;
+}
+
+/** Prompt anlegen/ändern (Upsert per id). */
+export interface PromptSaveMsg extends BaseMsg {
+  type: "prompt_save";
+  prompt: SavedPrompt;
+}
+export interface PromptDeleteMsg extends BaseMsg {
+  type: "prompt_delete";
+  id: string;
+}
+/** Vollständige Prompt-Liste des Projekts (bei open_project und nach jeder Änderung). */
+export interface PromptsUpdateMsg extends BaseMsg {
+  type: "prompts_update";
+  prompts: SavedPrompt[];
 }
 
 export interface ProjectInfo {
@@ -365,7 +401,8 @@ export type SidecarMessage =
   | DevServerLogMsg
   | ProjectLockedMsg
   | SidecarErrorMsg
-  | HandoffResultMsg;
+  | HandoffResultMsg
+  | PromptsUpdateMsg;
 
 /**
  * Öffnen abgelehnt: dieses Projekt ist bereits in einer ANDEREN, laufenden mads-Instanz offen

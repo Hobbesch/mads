@@ -10,6 +10,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
 import { ModelEffortPicker } from "./ModelEffortPicker";
+import { PromptButton, PromptManagerDialog } from "./PromptLibrary";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
 import { blobToBase64, makeThumbnail } from "../blob";
@@ -75,6 +76,9 @@ export function Inspector() {
     null | { title: string; body: React.ReactNode; confirmLabel: string; danger?: boolean; onConfirm: () => void }
   >(null);
   const [dragging, setDragging] = useState(false); // Bild per Drag&Drop in den Composer
+  // Prompt-Verwaltungs-Dialog: HIER (außerhalb des Composer-<form>) gerendert, damit sein
+  // Bearbeiten-Formular kein verschachteltes <form> im Composer wird.
+  const [managePrompts, setManagePrompts] = useState(false);
 
   // Auto-wachsende Composer-Höhe (Textarea): bei jeder Entwurfs-Änderung neu messen.
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -253,7 +257,16 @@ export function Inspector() {
     else if (step.kind === "pr") void createPr(selectedId);
     else if (step.kind === "integrate") askMerge(true); // Default = mergen + Stream BEHALTEN
     else if (step.kind === "outsource") askOutsource();
+    else if (step.kind === "commit_release") askCommitRelease(); // Deploy-Fall: Release-Commit ist primär
     else if (step.kind === "cleanup") void stopAgent(selectedId, true); // bereits gemergt → sicher
+  };
+
+  // Gespeicherten Prompt in den Composer-ENTWURF einfügen (nie automatisch senden — der
+  // Mensch liest und schickt selbst ab): leer → Text, sonst Entwurf + Leerzeile + Text.
+  const insertPromptText = (text: string) => {
+    const cur = draft;
+    setDraft(selectedId, cur.trim() ? `${cur.replace(/\s+$/, "")}\n\n${text}` : text);
+    composerRef.current?.focus();
   };
 
   return (
@@ -409,6 +422,16 @@ export function Inspector() {
               onClick={askCommitRelease}
             >
               Als Release committen
+            </button>
+          )}
+          {/* Deploy-Fall (main_deploy_dirty): „Als Release committen" ist die Primäraktion (oben) —
+              das Auslagern in einen Sub-Stream bleibt als sekundäre Alternative erreichbar. */}
+          {live && step.kind === "commit_release" && (
+            <button
+              title="Deine uncommitteten main-Änderungen stattdessen in einen neuen Sub-Stream verschieben (main bleibt sauber; normaler Commit→PR→Integrate-Fluss)."
+              onClick={askOutsource}
+            >
+              In Sub-Stream auslagern
             </button>
           )}
           {live && agent.role === "sub" && agent.worktreePath && (
@@ -650,6 +673,8 @@ export function Inspector() {
             aria-hidden="true"
             tabIndex={-1}
           />
+          {/* Prompt-Bibliothek: fügt kuratierte Prompts in den ENTWURF ein (nie Auto-Send). */}
+          <PromptButton role={agent.role} onInsert={insertPromptText} onManage={() => setManagePrompts(true)} />
           <button
             type="button"
             className="composer-btn attach"
@@ -742,6 +767,7 @@ export function Inspector() {
           onClose={() => setConfirm(null)}
         />
       )}
+      {managePrompts && <PromptManagerDialog onClose={() => setManagePrompts(false)} />}
     </section>
   );
 }

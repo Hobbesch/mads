@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, renameSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import type { ResumableAgent } from "../../shared/protocol.js";
+import type { ResumableAgent, SavedPrompt } from "../../shared/protocol.js";
 
 export interface RegistryEntry extends ResumableAgent {
   updatedAt: number;
@@ -138,6 +138,32 @@ export function saveRegistry(repoRoot: string, agents: RegistryEntry[]): void {
   ensureMadsDir(repoRoot); // legt .mads/ an + .gitignore (selbst-ignorierend)
   const tmp = `${p}.tmp`;
   writeFileSync(tmp, JSON.stringify({ v: 1, agents }, null, 2), "utf8");
+  renameSync(tmp, p); // atomar (write-temp + rename)
+}
+
+// ─── Gespeicherte Prompts (Prompt-Verwaltung) ───────────────────────────────
+// Kuratierte, wiederverwendbare Anweisungen je Projekt (shared/protocol.ts → SavedPrompt).
+// Gleiche Mechanik wie die Agenten-Registry: <repoRoot>/.mads/prompts.json, atomar
+// geschrieben (tmp + rename), defensiv gelesen (kaputte/fehlende Datei → leere Liste).
+
+function promptsPath(repoRoot: string): string {
+  return join(repoRoot, ".mads", "prompts.json");
+}
+
+export function loadPrompts(repoRoot: string): SavedPrompt[] {
+  try {
+    const j = JSON.parse(readFileSync(promptsPath(repoRoot), "utf8"));
+    return Array.isArray(j?.prompts) ? (j.prompts as SavedPrompt[]) : [];
+  } catch {
+    return []; // fehlend/kaputt → leere Liste (nie werfen)
+  }
+}
+
+export function savePrompts(repoRoot: string, prompts: SavedPrompt[]): void {
+  const p = promptsPath(repoRoot);
+  ensureMadsDir(repoRoot); // legt .mads/ an + .gitignore (selbst-ignorierend)
+  const tmp = `${p}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ v: 1, prompts }, null, 2), "utf8");
   renameSync(tmp, p); // atomar (write-temp + rename)
 }
 

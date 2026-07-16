@@ -544,22 +544,37 @@ export async function fastForwardMain(repoRoot: string, defaultBranch: string): 
   return ff.code === 0 ? { ff: behind, behind, blocked: null } : { ff: 0, behind, blocked: "unknown" };
 }
 
+export interface GitStatusResult {
+  behind: number;
+  ahead: number;
+  dirty: boolean;
+  /**
+   * true, wenn eines der drei git-Subkommandos (behind/ahead/dirty) mit code!==0 endete —
+   * z. B. Worktree gerade entfernt, Branch/Base-Ref weg, Timeout. Ein git-FEHLER darf nie wie
+   * „echte 0 / clean" aussehen: Konsumenten dürfen einen unreliable-Status weder als frischen
+   * Stand cachen noch daraus Eskalationen („Keine Commits") ableiten.
+   */
+  unreliable?: boolean;
+}
+
 export async function gitStatus(
   repoRoot: string,
   worktree: string,
   branch: string,
   defaultBranch: string,
   skipFetch = false,
-): Promise<{ behind: number; ahead: number; dirty: boolean }> {
+): Promise<GitStatusResult> {
   if (!skipFetch) await git(["-C", repoRoot, "fetch", "origin"], repoRoot);
   const base = `origin/${defaultBranch}`;
   const behindR = await git(["-C", worktree, "rev-list", "--count", `${branch}..${base}`], worktree);
   const aheadR = await git(["-C", worktree, "rev-list", "--count", `${base}..${branch}`], worktree);
   const dirtyR = await git(["-C", worktree, "status", "--porcelain"], worktree);
+  const unreliable = behindR.code !== 0 || aheadR.code !== 0 || dirtyR.code !== 0;
   return {
     behind: parseInt(behindR.stdout.trim() || "0", 10),
     ahead: parseInt(aheadR.stdout.trim() || "0", 10),
     dirty: dirtyR.stdout.trim().length > 0,
+    ...(unreliable ? { unreliable: true } : {}),
   };
 }
 

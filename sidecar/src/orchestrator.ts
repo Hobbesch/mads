@@ -12,12 +12,12 @@ import { fileURLToPath } from "node:url";
 import { AgentSession, type PermissionHooks } from "./session.js";
 import { loadApprovedKinds, saveApprovedKinds } from "./permissions.js";
 import type { CommandKind } from "../../shared/safe-command.js";
-import { send, log, envelope, timelineSnapshot } from "./io.js";
-import { autoCommit, commitMainRelease, createPr, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue } from "./git.js";
+import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
+import { autoCommit, commitMainRelease, createPr, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
-import { acquireProjectLock, ensureMadsDir, loadRegistry, mergeRegistry, releaseProjectLock, saveRegistry, type RegistryEntry } from "./persistence.js";
+import { acquireProjectLock, ensureMadsDir, loadPrompts, loadRegistry, mergeRegistry, releaseProjectLock, savePrompts, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
 import { parseDiffRegions, detectCollisions, type AgentRegions } from "../../shared/collision.js";
 import { detectTrespass, pathMatches, type TrespassFinding } from "../../shared/ownership.js";
@@ -33,7 +33,7 @@ const SHARED_LANDFIRST_GLOBS = [
   "**/pnpm-lock.yaml",
   "**/go.sum",
 ];
-import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, ResumableAgent } from "../../shared/protocol.js";
+import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, ResumableAgent, SavedPrompt } from "../../shared/protocol.js";
 
 const POLL_INTERVAL_MS = 25_000;
 
@@ -50,7 +50,7 @@ export class Orchestrator {
   private polling = false;
   // Halb-autonomer Integrator (P-Halb): Auto-Sync + Kollisions-Scan.
   private autonomy: AutonomyConfig = { autoSync: true, collisionScan: true };
-  private readonly gitState = new Map<string, { behind: number; ahead: number; dirty: boolean }>();
+  private readonly gitState = new Map<string, GitStatusResult>();
   private readonly syncing = new Set<string>(); // läuft gerade ein Auto-Sync?
   private readonly autoSyncConflicted = new Set<string>(); // Auto-Sync pausiert bis manuell gelöst
   // Nach „Mergen & weiterarbeiten": die Nummer des gemergten PRs, die der Poll ignoriert,
@@ -59,6 +59,8 @@ export class Orchestrator {
   // Autopilot (Phase 2): PR-Erstellung pro „ahead"-Stand nur einmal versuchen (kein Gate-Spam
   // bei rotem Gate); Secret-Eskalation pro Episode nur einmal melden.
   private readonly autopilotPrTried = new Map<string, number>();
+  /** B3: Zähler aufeinanderfolgender unzuverlässiger Polls je Agent — bei 5 einmalige Nutzer-Notiz. */
+  private readonly unreliablePolls = new Map<string, number>();
   private readonly autopilotSecretNotified = new Set<string>();
   // Proaktiver Hinweis „main direkt geändert" pro Integrator nur einmal je dirty-Episode.
   private readonly mainDirtyNotified = new Set<string>();
@@ -79,6 +81,7 @@ export class Orchestrator {
       case "set_project":
         this.project = msg.project;
         this.reloadApprovedKinds();
+        this.emitPrompts(); // gespeicherte Prompts des Projekts an die Clients
         log(`[orchestrator] project set: ${msg.project.owner}/${msg.project.repo} @ ${msg.project.repoRoot}`);
         this.startPolling();
         break;
@@ -124,6 +127,7 @@ export class Orchestrator {
         }
         this.project = { projectId: msg.projectId, repoRoot: msg.repoRoot, ...info };
         this.reloadApprovedKinds();
+        this.emitPrompts(); // gespeicherte Prompts des Projekts an die Clients
         this.emit({ ...envelope(), type: "project_resolved", project: this.project });
         log(`[orchestrator] project resolved: ${info.owner}/${info.repo} (default ${info.defaultBranch})`);
         void this.offerResumable(msg.repoRoot);
@@ -384,8 +388,11 @@ export class Orchestrator {
               },
             });
             const st = await gitStatus(this.project.repoRoot, this.project.repoRoot, this.project.defaultBranch, this.project.defaultBranch);
-            this.gitState.set(msg.agentId, st);
-            this.emitGitStatus(msg.agentId, st);
+            // B3: git-Fehler nie als frischen Stand cachen/senden — letzter guter Stand bleibt.
+            if (!st.unreliable) {
+              this.gitState.set(msg.agentId, st);
+              this.emitGitStatus(msg.agentId, st);
+            }
             break;
           }
           this.emitError(msg.agentId, "stale_base", `main aktualisieren fehlgeschlagen: ${rb.error}`);
@@ -434,6 +441,55 @@ export class Orchestrator {
         this.emitSnapshot();
         break;
 
+      case "prompt_save": {
+        // Prompt-Verwaltung: Upsert per id in <repoRoot>/.mads/prompts.json. Validierung hier
+        // (nicht nur in der UI), damit auch Remote-Clients keine kaputten Einträge schreiben.
+        if (!this.project) break;
+        const p = msg.prompt;
+        // Whitelist-Kopie statt Spread: ein (Remote-)Client darf weder beliebige Zusatzfelder
+        // in prompts.json persistieren noch mit Nicht-String-Typen den Handler crashen.
+        const title = (typeof p?.title === "string" ? p.title : "").trim();
+        const description = typeof p?.description === "string" ? p.description.slice(0, 500) : undefined;
+        const text = typeof p?.text === "string" ? p.text : "";
+        if (!title || !text.trim()) {
+          log(`[orchestrator] prompt_save verworfen: title/text leer`);
+          break;
+        }
+        if (title.length > 200 || text.length > 20_000) {
+          log(`[orchestrator] prompt_save verworfen: title/text zu lang`);
+          break;
+        }
+        const role: SavedPrompt["role"] = p.role === "integrator" || p.role === "sub" || p.role === "any" ? p.role : "any";
+        const saved: SavedPrompt = {
+          id: typeof p.id === "string" && p.id.trim() ? p.id : randomUUID(),
+          title,
+          ...(description ? { description } : {}),
+          role,
+          text,
+          updatedAt: Date.now(),
+        };
+        const prompts = loadPrompts(this.project.repoRoot);
+        const idx = prompts.findIndex((x) => x.id === saved.id);
+        if (idx >= 0) prompts[idx] = saved;
+        else if (prompts.length >= 100) {
+          log(`[orchestrator] prompt_save verworfen: Limit von 100 Prompts erreicht`);
+          break;
+        } else prompts.push(saved);
+        savePrompts(this.project.repoRoot, prompts);
+        this.emitPrompts();
+        break;
+      }
+
+      case "prompt_delete": {
+        if (!this.project) break;
+        savePrompts(
+          this.project.repoRoot,
+          loadPrompts(this.project.repoRoot).filter((x) => x.id !== msg.id),
+        );
+        this.emitPrompts();
+        break;
+      }
+
       case "handoff_export":
         this.runHandoff("export", ["export", msg.repoRoot, msg.outFile]);
         break;
@@ -462,6 +518,7 @@ export class Orchestrator {
    */
   private emitSnapshot(): void {
     if (this.project) this.emit({ ...envelope(), type: "project_resolved", project: this.project });
+    this.emitPrompts(); // gespeicherte Prompts — sonst fehlt einem neu verbundenen Client die Liste
     for (const s of this.pool.values()) {
       this.emit({ ...envelope(), type: "status_update", agentId: s.agentId, status: s.status, label: s.label, role: s.role });
       this.emit({
@@ -486,6 +543,12 @@ export class Orchestrator {
     }
     // Live-Refresh (git/PR) asynchron nachschieben — blockiert den Snapshot nicht.
     void this.pollAll();
+  }
+
+  /** Vollständige Prompt-Liste des Projekts emitten (nach Projekt-Öffnen und jeder Änderung). */
+  private emitPrompts(): void {
+    if (!this.project) return;
+    this.emit({ ...envelope(), type: "prompts_update", prompts: loadPrompts(this.project.repoRoot) });
   }
 
   /**
@@ -536,6 +599,18 @@ export class Orchestrator {
 
   private async doCreatePr(agentId: string, title?: string, body?: string, draft?: boolean): Promise<void> {
     const s = this.pool.get(agentId);
+    // B2: bereits aufgeräumte Streams (Merge/Cleanup hat den Worktree entfernt) NICHT rot
+    // eskalieren — ein verspäteter Klick/Autopilot-Lauf trifft sonst einen längst fertigen
+    // Stream und erzeugt eine „Geist"-Eskalation. Ehrlicher Hinweis reicht.
+    if (this.removed.has(agentId) || (s?.worktreePath && !existsSync(s.worktreePath))) {
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: { kind: "assistant_text", text: "Kein PR möglich: Dieser Stream ist bereits aufgeräumt — nichts zu tun." },
+      });
+      return;
+    }
     if (!s || !s.repoRoot || !s.branch || !s.worktreePath || !this.project) {
       this.emitError(agentId, "spawn_failed", "Kein Worktree/Projekt für diesen Agenten — PR nicht möglich.");
       return;
@@ -592,6 +667,20 @@ export class Orchestrator {
     // Ohne Commits gegenüber dem Default-Branch scheitert `gh pr create` mit einem
     // kryptischen „No commits between …". Vorab klar prüfen und führen.
     const pre = await gitStatus(s.repoRoot, s.worktreePath, s.branch, this.project.defaultBranch);
+    // B3: git-Fehler (z. B. Worktree/Ref gerade weg) → ahead=0 wäre eine LÜGE. Ehrlich sagen
+    // statt fälschlich „Keine Commits" zu eskalieren.
+    if (pre.unreliable) {
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: {
+          kind: "assistant_text",
+          text: "Kein PR möglich: Der git-Status dieses Streams ist gerade nicht zuverlässig ermittelbar (git-Fehler) — bitte gleich noch einmal versuchen.",
+        },
+      });
+      return;
+    }
     if (pre.ahead === 0) {
       const msg = pre.dirty
         ? `Kein PR möglich: Der Branch ${s.branch} hat noch keine Commits gegenüber ${this.project.defaultBranch} — die Änderungen sind nicht committet. Lass den Agenten zuerst LOKAL committen (git add -A && git commit; KEINE projekteigenen Push-Skripte — die pushen auf main), dann erneut „PR erstellen".`
@@ -685,6 +774,12 @@ export class Orchestrator {
     let behind = 0;
     if (s.worktreePath) {
       const st = await gitStatus(s.repoRoot, s.worktreePath, s.branch, this.project.defaultBranch);
+      // B3: ein erlogenes behind=0 würde den Stale-Base-Check des Merge-Gates aushebeln —
+      // dann merged ein tatsächlich zurückliegender Branch (Kern-Invariante 2). Abbrechen.
+      if (st.unreliable) {
+        this.emitMergeResult(agentId, false, ["git-Status nicht zuverlässig ermittelbar — bitte erneut versuchen."], undefined);
+        return;
+      }
       behind = st.behind;
       this.emitGitStatus(agentId, st);
     }
@@ -719,8 +814,11 @@ export class Orchestrator {
         await run("git", ["-C", s.worktreePath, "fetch", "origin", base], s.worktreePath);
         resyncOk = await this.resyncAfterMerge(agentId, s.worktreePath, base);
         const st = await gitStatus(s.repoRoot, s.worktreePath, s.branch, base);
-        this.gitState.set(agentId, st);
-        this.emitGitStatus(agentId, st);
+        // B3: git-Fehler nie als frischen Stand cachen/senden — letzter guter Stand bleibt.
+        if (!st.unreliable) {
+          this.gitState.set(agentId, st);
+          this.emitGitStatus(agentId, st);
+        }
       }
       this.emit({ ...envelope(), type: "pr_update", agentId, pr: undefined }); // PR-Badge löschen
       this.emit({ ...envelope(), type: "status_update", agentId, status: "waiting_input", currentStep: undefined });
@@ -758,6 +856,12 @@ export class Orchestrator {
       await run("git", ["-C", s.repoRoot, "branch", "-D", s.branch], s.repoRoot);
     }
     await run("git", ["-C", s.repoRoot, "push", "origin", "--delete", s.branch], s.repoRoot);
+    // B1: nach Merge + Aufräumen den git-Status EXPLIZIT auf „fertig" setzen und emitten.
+    // Bisher emittierte dieser Pfad keinen git_status → das UI leitete bis zu 25 s aus dem
+    // stale ahead>0 einen „Geist"-Stream ab, statt sofort „erledigt" anzuzeigen.
+    const doneStatus: GitStatusResult = { behind: 0, ahead: 0, dirty: false };
+    this.gitState.set(agentId, doneStatus);
+    this.emitGitStatus(agentId, doneStatus);
     s.status = "done";
     await s.stop(false); // Query schließen; Karte bleibt als "merged" sichtbar
     this.removed.add(agentId); // gemergt+aufgeräumt → nicht mehr in die Resume-Registry
@@ -1052,11 +1156,32 @@ export class Orchestrator {
       // einmal pro Zyklus fetchen, dann pro Agent rev-list (spart Netz).
       await run("git", ["-C", this.project.repoRoot, "fetch", "origin"], this.project.repoRoot);
       for (const s of this.pool.values()) await this.pollAgent(s, true);
+      await this.pollPassiveIntegrator(); // C: auch der NICHT fortgesetzte Integrator braucht git-Status
       if (this.autonomy.autoSync) await this.autoSyncPass();
       await this.autopilotPass();
       if (this.autonomy.collisionScan) await this.collisionPass();
     } finally {
       this.polling = false;
+    }
+  }
+
+  /**
+   * C: Passiver Integrator (nach App-Neustart `live:false` → NICHT im Sidecar-Pool) wurde nie
+   * gepollt → sein dirty-Zustand blieb unbekannt und der „In Sub-Stream auslagern"-Knopf
+   * erschien erst, nachdem der Mensch „Fortsetzen" drückte. Deshalb: gibt es KEINEN Integrator
+   * im Pool, den Registry-Eintrag heranziehen und den Haupt-Checkout direkt pollen.
+   * KEINE Eskalation aus diesem Pfad (es läuft keine Session) — nur der reine git_status.
+   */
+  private async pollPassiveIntegrator(): Promise<void> {
+    if (!this.project) return;
+    for (const s of this.pool.values()) if (s.role === "integrator") return; // aktiver Integrator pollt sich selbst
+    const entry = loadRegistry(this.project.repoRoot).find((e) => e.role === "integrator");
+    if (!entry) return;
+    try {
+      const st = await gitStatus(this.project.repoRoot, this.project.repoRoot, this.project.defaultBranch, this.project.defaultBranch, true);
+      if (!st.unreliable) this.emitGitStatus(entry.agentId, st); // B3: nie einen git-Fehler als „clean" verkaufen
+    } catch (e) {
+      log(`[orchestrator] poll passiver Integrator fehlgeschlagen: ${String(e)}`);
     }
   }
 
@@ -1070,8 +1195,12 @@ export class Orchestrator {
     if (!this.project) return;
     for (const s of this.pool.values()) {
       if (s.role !== "sub" || !s.worktreePath || !s.branch) continue;
+      // B2: aufgeräumte Streams (Worktree weg) überspringen — der Autopilot darf keine
+      // Aktionen (commit/push/PR) gegen einen nicht mehr existierenden Worktree anstoßen.
+      if (this.removed.has(s.agentId) || !existsSync(s.worktreePath)) continue;
       const st = this.gitState.get(s.agentId);
-      if (!st) continue;
+      // B3: unreliable-Status = git-Fehler → daraus keine Autopilot-Entscheidung ableiten.
+      if (!st || st.unreliable) continue;
       const prOpen = s.lastPr?.state === "OPEN";
       const unpushed = prOpen ? await unpushedCount(s.worktreePath, s.branch) : 0;
       const { action } = autopilotDecision({
@@ -1194,6 +1323,13 @@ export class Orchestrator {
       // merkt der Nutzer nie, dass seine Basis veraltet ist (kein PR für main).
       if (s.role === "integrator") {
         const status = await gitStatus(s.repoRoot, s.repoRoot, defaultBranch, defaultBranch, skipFetch);
+        // B3 gilt auch hier — GERADE hier: im Deploy-Fenster laufen git-Befehle im Haupt-Checkout
+        // (index.lock-Kontention). Ein Fehler-Status {dirty:false} würde deployDirty im Frontend
+        // löschen und mainDirtyNotified resetten → Flackern + doppelte Eskalation beim nächsten Poll.
+        if (status.unreliable) {
+          log(`[orchestrator] poll ${s.agentId} (integrator): git-Status unzuverlässig → letzter guter Stand bleibt`);
+          return;
+        }
         this.gitState.set(s.agentId, status);
         // Proaktiv: direkte Edits am main-Checkout erkennen und EINMAL je Episode darauf hinweisen
         // (main ändert sich nur über grüne PR-Merges → in Sub-Stream auslagern). Status-neutral.
@@ -1205,11 +1341,13 @@ export class Orchestrator {
           const isDeploy = s.deployedRecently() || (await detectMainVersionBump(s.repoRoot)) !== undefined;
           if (isDeploy) {
             // main-Dirt stammt aus einem Deploy/Versions-Bump → kein Fehl-Edit-Alarm, sondern Angebot
-            // „Als Release committen" (Push bleibt separat/explizit).
+            // „Als Release committen" (Push bleibt separat/explizit). D: EHRLICHES Wording — die
+            // Erkennung stempelt beim Befehls-START, der Build kann noch laufen. Also nie
+            // „abgeschlossen" behaupten, nur was sicher ist: erkannt + Bump liegt uncommittet.
             this.emitError(
               s.agentId,
               "main_deploy_dirty",
-              "Deploy abgeschlossen — der Versions-Bump liegt uncommittet auf main. „Als Release committen“ (chore(release)) " +
+              "Deploy erkannt — der Versions-Bump liegt uncommittet auf main. „Als Release committen“ (chore(release)) " +
                 "oder in einen Sub-Stream auslagern.",
             );
           } else {
@@ -1228,6 +1366,29 @@ export class Orchestrator {
       }
       if (!s.branch || !s.worktreePath) return; // Sub ohne Worktree → nichts zu pollen
       const status = await gitStatus(s.repoRoot, s.worktreePath, s.branch, defaultBranch, skipFetch);
+      // B3: git-Fehler (Worktree/Ref weg, Timeout) → der Status ist eine Fata Morgana aus
+      // Nullen. NICHT den letzten guten Stand überschreiben/emitten — sonst kippt das UI
+      // fälschlich auf „clean/erledigt" und Autopilot/Sync entscheiden auf falscher Basis.
+      if (status.unreliable) {
+        log(`[orchestrator] poll ${s.agentId}: git-Status unzuverlässig (git-Fehler) → letzter guter Stand bleibt`);
+        // Dauerhaft unlesbar (Worktree beschädigt/extern entfernt?) → EINMAL sichtbar machen,
+        // statt die Kachel still auf dem letzten guten Stand einfrieren zu lassen.
+        const n = (this.unreliablePolls.get(s.agentId) ?? 0) + 1;
+        this.unreliablePolls.set(s.agentId, n);
+        if (n === 5) {
+          this.emit({
+            ...envelope(),
+            type: "agent_event",
+            agentId: s.agentId,
+            event: {
+              kind: "assistant_text",
+              text: "⚠ Der git-Status dieses Streams ist seit mehreren Minuten nicht ermittelbar (Worktree beschädigt oder extern entfernt?). Die Kachel zeigt den letzten bekannten Stand.",
+            },
+          });
+        }
+        return;
+      }
+      this.unreliablePolls.delete(s.agentId);
       this.gitState.set(s.agentId, status);
       // 3.4: Hat der Branch wieder aufgeholt (behind=0), ist ein zuvor pausierter Sync-Konflikt
       // gelöst (manuell oder vom Agenten rebaset) → Auto-Sync-Pause aufheben (Flag clearen).
@@ -1267,8 +1428,13 @@ export class Orchestrator {
     // nächste Poll nach. (Der Nutzer testet bewusst einen stabilen Stand.)
     if (this.devServer?.agentId === s.agentId) return;
     if (this.syncing.has(s.agentId) || this.autoSyncConflicted.has(s.agentId)) return;
+    // Aufgeräumt/Worktree weg → nie syncBranch gegen einen toten Pfad starten: der gecachte
+    // Status ist dann der LETZTE GUTE (z. B. behind>0) und würde hier eine Falsch-Eskalation
+    // „Auto-Sync gestoppt" erzeugen, die sich nie auflöst (Review-Befund 2).
+    if (this.removed.has(s.agentId) || !existsSync(s.worktreePath)) return;
     const st = this.gitState.get(s.agentId);
-    if (!st || st.behind <= 0 || st.dirty) return; // nur saubere, zurückliegende Branches
+    // B3: unreliable = git-Fehler → kein Rebase auf Basis eines möglicherweise falschen Status.
+    if (!st || st.unreliable || st.behind <= 0 || st.dirty) return; // nur saubere, zurückliegende Branches
     this.syncing.add(s.agentId);
     const res = await syncBranch(s.worktreePath, s.branch, this.project.defaultBranch);
     this.syncing.delete(s.agentId);
@@ -1383,7 +1549,11 @@ export class Orchestrator {
   }
   /** git_status emittieren + den (orchestrator-eigenen) syncBlocked-Zustand mitliefern. */
   private emitGitStatus(agentId: string, st: { behind: number; ahead: number; dirty: boolean }): void {
-    this.emit({ ...envelope(), type: "git_status", agentId, ...st, syncBlocked: this.autoSyncConflicted.has(agentId) });
+    // Explizit destrukturieren statt spreaden: ein GitStatusResult trägt ggf. `unreliable`,
+    // das nicht im Protokoll (GitStatusMsg) definiert ist — strengere Decoder (mads-remote)
+    // dürfen nie unbekannte Felder auf dem Draht sehen.
+    const { behind, ahead, dirty } = st;
+    this.emit({ ...envelope(), type: "git_status", agentId, behind, ahead, dirty, syncBlocked: this.autoSyncConflicted.has(agentId) });
   }
   private emit(obj: unknown): void {
     void send(obj);
