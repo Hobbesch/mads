@@ -152,7 +152,13 @@ export function PromptButton({
             <>
               <div className="prompt-pop-list">
                 {visible.length === 0 ? (
-                  <div className="prompt-pop-empty">Noch keine gespeicherten Prompts.</div>
+                  // Ehrlicher Leer-Zustand: „keine Prompts" und „keine für DIESEN Stream" sind
+                  // verschiedene Wahrheiten — sonst wirkt die Rollen-Bindung wie ein Defekt.
+                  <div className="prompt-pop-empty">
+                    {prompts.length === 0
+                      ? "Noch keine gespeicherten Prompts."
+                      : `Für diesen Stream sind keine Prompts freigegeben — ${prompts.length === 1 ? "einer ist" : `${prompts.length} sind`} an die Rolle ${role === "sub" ? "Integrator" : "Sub"} gebunden (über „Verwalten…" einsehbar).`}
+                  </div>
                 ) : (
                   visible.map((p) => (
                     <button
