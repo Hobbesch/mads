@@ -12,6 +12,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { ensureMadsDir } from "./persistence.js";
 import type { EscalationKind, PullRequestInfo, PrChecksState } from "../../shared/protocol.js";
 import { scanSecrets, type SecretHit } from "../../shared/secrets.js";
 import { log } from "./io.js";
@@ -357,6 +358,15 @@ export async function createWorktree(
   const path = worktreePathFor(repoRoot, agentId);
   const r = await git(["-C", repoRoot, "worktree", "add", "-b", branch, path, baseRef], repoRoot);
   if (r.code !== 0) return { ok: false, error: r.stderr || r.stdout };
+  // mads' eigenes `.mads/` im NEUEN Worktree sofort git-unsichtbar machen (legt `.mads/.gitignore` = `*`).
+  // Das geschah bisher NUR im Haupt-Checkout — in Worktrees waren Anhänge dadurch weder ignoriert noch
+  // gefiltert, und der Autopilot committete sie per `git add -A` bis nach main (echte xlsx-Anhänge sind
+  // so in einem Projekt gelandet). Idempotent; muss VOR dem ersten Anhang passieren.
+  try {
+    ensureMadsDir(path);
+  } catch (e) {
+    log(`[git] .mads-Schutz im Worktree fehlgeschlagen: ${String(e)}`);
+  }
   // Lokale, gitignorte Dev-Config aus dem Haupt-Checkout nachziehen → Stream sofort lauffähig.
   try {
     const seeded = seedLocalDevFiles(repoRoot, path);

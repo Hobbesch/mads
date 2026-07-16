@@ -363,6 +363,23 @@ check("danger gemerkt → rm bleibt ask (nie merkbar)", bash("rm -rf x", ["dange
 check("rm mit erlaubtem network+danger → weiterhin ask", bash("rm -rf x", ["network", "danger"]) === "ask");
 check("ohne isKindApproved-Callback → curl ask (Default sicher)", classifyToolCall("Bash", { command: "curl https://x.com" }, {}).decision === "ask");
 
+// ---- DATENVERLUST-SCHUTZ: arbeitsvernichtende git-Subcommands sind NIE merkbar ----
+// Regression: sie lagen in derselben merkbaren Kategorie "git" wie fetch/push — ein einziges
+// „Immer erlauben (git)" autorisierte damit still `git reset --hard origin/main`. So ging in einem
+// echten Stream Arbeit verloren. Trotz freigegebenem "git" MÜSSEN sie weiterhin fragen.
+check("git reset --hard fragt trotz freigegebenem git", bash("git reset --hard origin/main", ["git"]) === "ask");
+check("git clean -fd fragt trotz freigegebenem git", bash("git clean -fd", ["git"]) === "ask");
+check("git restore fragt trotz freigegebenem git", bash("git restore .", ["git"]) === "ask");
+check("git checkout --force fragt trotz freigegebenem git", bash("git checkout --force main", ["git"]) === "ask");
+check("git branch -D fragt trotz freigegebenem git", bash("git branch -D feature", ["git"]) === "ask");
+check("git stash drop fragt trotz freigegebenem git", bash("git stash drop", ["git"]) === "ask");
+check("auch mit -C fragt reset --hard", bash("git -C /repo reset --hard origin/main", ["git"]) === "ask");
+check("reset ist kind=danger (nie merkbar)", classifyBashCommand("git reset --hard origin/main").kind === "danger");
+// Nicht-vernichtendes Außen-git bleibt merkbar (sonst wäre die Freigabe wertlos):
+check("git push bleibt merkbar → allow bei freigegebenem git", bash("git push origin main", ["git"]) === "allow");
+check("git fetch bleibt merkbar → allow bei freigegebenem git", bash("git fetch origin", ["git"]) === "allow");
+check("git push ohne Freigabe → ask", bash("git push origin main", []) === "ask");
+
 // ---- isDeployCommand: Deploy/Publish erkennen, Alltag NICHT fälschlich ----
 check("deploy-test.sh → deploy", isDeployCommand("./deploy-test.sh"));
 check("echo y | pwsh push.ps1 → deploy", isDeployCommand("echo y | pwsh push.ps1"));

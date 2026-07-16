@@ -689,11 +689,10 @@ export class Orchestrator {
       if (pr) this.suppressedMergedPr.set(agentId, pr.number);
       let resyncOk = true;
       if (s.worktreePath) {
-        await this.stopDevServerIf(agentId); // Dev-Server killen, bevor der Worktree hart resettet wird
+        await this.stopDevServerIf(agentId); // Dev-Server killen, bevor der Worktree bewegt wird
         const base = this.project.defaultBranch;
         await run("git", ["-C", s.worktreePath, "fetch", "origin", base], s.worktreePath);
-        const reset = await run("git", ["-C", s.worktreePath, "reset", "--hard", `origin/${base}`], s.worktreePath);
-        resyncOk = reset.code === 0;
+        resyncOk = await this.resyncAfterMerge(agentId, s.worktreePath, base);
         const st = await gitStatus(s.repoRoot, s.worktreePath, s.branch, base);
         this.gitState.set(agentId, st);
         this.emitGitStatus(agentId, st);
@@ -1093,6 +1092,54 @@ export class Orchestrator {
         log(`[orchestrator] autopilot ${s.agentId} (${action}) failed: ${String(e)}`);
       }
     }
+  }
+
+  /**
+   * Nach „Mergen & weiterarbeiten" den Stream-Worktree auf das frische `main` bringen — OHNE Arbeit zu
+   * vernichten. Früher lief hier bedingungslos `git reset --hard origin/<base>`, in der Annahme, die
+   * Arbeit liege ja als Squash in main. Der Autopilot committet aber WEITER, während der Merge läuft —
+   * belegt im Reflog eines echten Streams: Commit 09:41:20 → reset 09:41:41 → zwei Commits vernichtet
+   * (der Nutzer musste die Änderungen neu bauen). Deshalb jetzt gestaffelt, verlustfrei:
+   *   1. Uncommittete Arbeit im Worktree → NICHT anfassen, eskalieren (erst sichern, dann syncen).
+   *   2. Branch hat noch Inhalt über main hinaus → REBASE darauf (erhält alles; das ist zugleich die
+   *      automatische Auflösung, wenn zwei Streams nacheinander mergen). Konflikt → abbrechen +
+   *      eskalieren, Arbeit bleibt unangetastet.
+   *   3. Sonst (inhaltlich deckungsgleich — der Normalfall direkt nach dem Squash) → reset --hard.
+   * Liefert true, wenn der Worktree danach sauber auf dem neuen main sitzt.
+   */
+  private async resyncAfterMerge(agentId: string, worktree: string, base: string): Promise<boolean> {
+    const dirty = (await run("git", ["-C", worktree, "status", "--porcelain"], worktree)).stdout.trim();
+    if (dirty) {
+      this.emitError(
+        agentId,
+        "stale_base",
+        "Nach dem Merge liegt in diesem Stream noch UNCOMMITTETE Arbeit — mads hat ihn deshalb NICHT auf main " +
+          "zurückgesetzt (das würde die Arbeit vernichten). Bitte committen oder auslagern; danach synchronisiert mads.",
+      );
+      return false;
+    }
+    // Inhaltlicher Vergleich statt Commit-Zählung: nach einem SQUASH-Merge sind die Branch-Commits keine
+    // Vorfahren von main, ihr INHALT aber schon → leerer Diff heißt „alles drin, Reset gefahrlos".
+    const extra = await run("git", ["-C", worktree, "diff", "--quiet", `origin/${base}`, "HEAD"], worktree);
+    if (extra.code !== 0) {
+      // Es liegt Arbeit über main hinaus (typisch: der Autopilot hat während des Merges weiter committet,
+      // oder main ist inzwischen weitergelaufen). NIEMALS wegwerfen → auf das neue main rebasen.
+      const rb = await run("git", ["-C", worktree, "rebase", `origin/${base}`], worktree);
+      if (rb.code !== 0) {
+        await run("git", ["-C", worktree, "rebase", "--abort"], worktree); // definierter Zustand für die Auflösung
+        this.emitError(
+          agentId,
+          "merge_conflict",
+          "Nach dem Merge kollidiert die noch offene Arbeit dieses Streams mit dem neuen main — bitte „Konflikt lösen“. " +
+            "Es wurde NICHTS zurückgesetzt, die Arbeit ist unangetastet.",
+        );
+        return false;
+      }
+      log(`[orchestrator] ${agentId}: Rest-Arbeit auf origin/${base} rebased statt verworfen`);
+      return true;
+    }
+    const reset = await run("git", ["-C", worktree, "reset", "--hard", `origin/${base}`], worktree);
+    return reset.code === 0;
   }
 
   private async pollAgent(s: AgentSession, skipFetch = false): Promise<void> {
