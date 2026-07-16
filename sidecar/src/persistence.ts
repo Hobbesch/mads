@@ -10,6 +10,14 @@ import type { ResumableAgent } from "../../shared/protocol.js";
 
 export interface RegistryEntry extends ResumableAgent {
   updatedAt: number;
+  /**
+   * „Mergen & weiterarbeiten": dieser bereits gemergte PR wird im Poll unterdrückt, damit der Stream
+   * nicht als „erledigt" aus dem aktiven Grid fällt — der Mensch hat ja bewusst WEITERARBEITEN gewählt.
+   * MUSS persistent sein: die Absicht lag früher nur in einer In-Memory-Map, also war sie nach einem
+   * App-Neustart weg → der Poll meldete den PR wieder MERGED, und weil der Branch nach dem Merge exakt
+   * auf main sitzt (ahead 0) und der Worktree sauber ist, griff isMergedDone → der Stream verschwand.
+   */
+  suppressedPr?: number;
 }
 
 function regPath(repoRoot: string): string {

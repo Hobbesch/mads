@@ -857,6 +857,9 @@ export class Orchestrator {
         model: s.model,
         effort: s.effort as ResumableAgent["effort"],
         mock: false,
+        // „Mergen & weiterarbeiten"-Absicht mitschreiben — sonst überlebt sie den Neustart nicht und
+        // der Stream fällt beim ersten Poll als „erledigt" aus dem Grid.
+        suppressedPr: this.suppressedMergedPr.get(s.agentId),
         updatedAt: Date.now(),
       });
     }
@@ -911,6 +914,10 @@ export class Orchestrator {
 
     // 1) Registry-Einträge mit Claude-Session → Kandidaten fürs echte Fortsetzen.
     for (const e of registry) {
+      // „Mergen & weiterarbeiten"-Absicht ZUERST wiederherstellen — sie muss stehen, BEVOR unten
+      // prStatus läuft, sonst meldet der Poll den gemergten PR erneut und der Stream wird als
+      // „erledigt" eingestuft, obwohl der Mensch bewusst weiterarbeiten wollte.
+      if (e.suppressedPr) this.suppressedMergedPr.set(e.agentId, e.suppressedPr);
       if (!e.sessionId || this.pool.has(e.agentId)) continue;
       if (e.worktreePath && !existsSync(e.worktreePath)) continue; // Worktree weg → überspringen
       candidates.push(e);
