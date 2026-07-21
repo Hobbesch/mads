@@ -101,6 +101,15 @@ export function normalizeModelId(id: string): string {
   // `+` strippt auch zusammengesetzte Präfixe wie `us.anthropic.` (mehrere Segmente).
   return id.replace(/^(?:(?:us|eu|apac|anthropic)\.)+/, "").replace(/-\d{8}$/, "");
 }
+/**
+ * Gehört diese SDK-Stream-Nachricht dem HAUPTLOOP (nicht einem Sub-Agenten)? Der Agent-SDK setzt
+ * bei Nachrichten aus einem Task/Explore-Sub-Agenten `parent_tool_use_id` auf dessen tool_use_id;
+ * beim Hauptloop ist es `null`/fehlt. Wichtig fürs Modell-Gegenprüfen: Sub-Agenten laufen bewusst
+ * auf dem schnellen Modell (Haiku) — ihr Modell darf das Stream-Modell nicht als „Haiku" fehlmelden.
+ */
+function isMainLoop(m: Record<string, unknown>): boolean {
+  return m.parent_tool_use_id == null; // deckt null UND undefined (fehlt) ab
+}
 /** Live-Variante fürs applyFlagSettings (Flag-Layer). */
 function effortFlagSettings(effort: string): Record<string, unknown> {
   if (effort === "ultracode") return { effortLevel: "xhigh", ultracode: true };
@@ -734,13 +743,17 @@ export class AgentSession {
           case "system":
             if (m.subtype === "init") {
               this.sessionId = m.session_id as string;
-              this.reconcileActiveModel(m.model as string | undefined); // Doppel-Check: Ist-Modell aus Init
+              // NUR den Hauptloop gegenprüfen: ein Sub-Agent (Task/Explore-Tool) läuft bewusst auf
+              // dem schnellen Modell (Haiku) und emittiert eine EIGENE init mit gesetztem
+              // parent_tool_use_id — die darf das Stream-Modell NICHT als „Haiku" fehlmelden.
+              if (isMainLoop(m)) this.reconcileActiveModel(m.model as string | undefined);
               this.onChange?.();
             }
             break;
           case "assistant": {
-            // Doppel-Check: jede Assistant-Nachricht trägt das real gelaufene Modell — Grundwahrheit.
-            this.reconcileActiveModel((m.message as { model?: string })?.model);
+            // Doppel-Check: jede Assistant-Nachricht des HAUPTLOOPS trägt das real gelaufene Modell.
+            // Sub-Agent-Antworten (parent_tool_use_id gesetzt) überspringen — sie laufen legitim auf Haiku.
+            if (isMainLoop(m)) this.reconcileActiveModel((m.message as { model?: string })?.model);
             const content = ((m.message as { content?: unknown[] })?.content ?? []) as Array<Record<string, unknown>>;
             for (const block of content) {
               if (block.type === "text") {
