@@ -8,6 +8,7 @@
  * „Ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung (SDK-Session-Flag `ultracode`).
  */
 import type { EffortMode } from "../shared/protocol";
+import { DEFAULT_MODEL as SHARED_DEFAULT_MODEL } from "../shared/protocol";
 
 export interface ModelOption {
   id: string;
@@ -47,8 +48,9 @@ export const EFFORT_HINT: Record<EffortMode, string> = {
 
 /** Standard-Effort für neue Streams. */
 export const DEFAULT_EFFORT: EffortMode = "high";
-/** Standard-Modell für neue Streams (Integrator-Default nach CLAUDE.md). */
-export const DEFAULT_MODEL = "claude-opus-4-8";
+/** Standard-Modell für neue Streams (Integrator-Default nach CLAUDE.md). Single Source in
+ *  shared/protocol.ts — dieselbe Konstante, die der Sidecar zur undefined-Coercion nutzt. */
+export const DEFAULT_MODEL = SHARED_DEFAULT_MODEL;
 
 export function modelLabel(id: string | undefined): string {
   if (!id) return "?";

@@ -10,6 +10,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
 import { ModelEffortPicker } from "./ModelEffortPicker";
+import { modelLabel } from "../modelCatalog";
 import { PromptButton, PromptManagerDialog } from "./PromptLibrary";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
@@ -340,6 +341,16 @@ export function Inspector() {
                 onEffort={(e) => void setStreamEffort(selectedId, e)}
                 variant="inspector"
               />
+            </div>
+          )}
+          {/* Doppel-Check: läuft der Stream real auf einem ANDEREN Modell als angefordert (stiller
+              SDK-Default), das laut + sichtbar machen — der Picker allein spiegelt nur den Wunsch. */}
+          {agent.modelMismatch && agent.activeModel && (
+            <div
+              className="insp-model-warn"
+              title="Der SDK lief auf einem anderen Modell als angefordert. mads zieht automatisch nach — bei Bedarf im Picker erneut umstellen."
+            >
+              ⚠ läuft real auf {modelLabel(agent.activeModel)}
             </div>
           )}
           </div>

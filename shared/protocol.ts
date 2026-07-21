@@ -110,6 +110,29 @@ export interface StopDevServerMsg extends BaseMsg {
   agentId: string;
 }
 
+/**
+ * Standard-Modell — SINGLE SOURCE für Frontend UND Sidecar. Der Sidecar coerciert JEDE fehlende
+ * Modell-Angabe hierauf, BEVOR er den Agent-SDK aufruft: gibt man dem SDK `model: undefined`, wählt
+ * er still sein Flaggschiff (Fable 5) — das verbrennt teure Tokens „blind", ohne dass die UI es zeigt
+ * (der Picker spiegelt den WUNSCH, nicht das Ist). Deshalb nie undefined an den SDK. Siehe ModelActiveMsg.
+ */
+export const DEFAULT_MODEL = "claude-opus-4-8";
+
+/**
+ * Doppel-Check gegen „blindes Fahren auf dem falschen Modell": Der Sidecar liest aus JEDER
+ * Assistant-/Init-Nachricht das TATSÄCHLICH gelaufene Modell und meldet es hier. `mismatch=true`
+ * heißt: der SDK lief auf einem anderen Modell als angefordert (z. B. Fable statt Opus) — der Sidecar
+ * hat dann aktiv `setModel(requested)` nachgezogen. Die UI zeigt `active` (nicht mehr nur den Wunsch)
+ * und warnt bei mismatch, damit unerwartete Kosten sofort sichtbar werden.
+ */
+export interface ModelActiveMsg extends BaseMsg {
+  type: "model_active";
+  agentId: string;
+  active: string; // real vom SDK gemeldetes Modell
+  requested?: string; // was mads angefordert hatte
+  mismatch: boolean;
+}
+
 // ─── Prompt-Verwaltung ────────────────────────────────────────────────────────
 // Kuratierte, wiederverwendbare Anweisungen (z. B. Deploy-Rezepte) je Projekt.
 // Persistenz: `<repoRoot>/.mads/prompts.json`. Sicherheits-Eigenschaften by design:
@@ -402,7 +425,8 @@ export type SidecarMessage =
   | ProjectLockedMsg
   | SidecarErrorMsg
   | HandoffResultMsg
-  | PromptsUpdateMsg;
+  | PromptsUpdateMsg
+  | ModelActiveMsg;
 
 /**
  * Öffnen abgelehnt: dieses Projekt ist bereits in einer ANDEREN, laufenden mads-Instanz offen

@@ -125,7 +125,9 @@ export interface AgentVM {
   mock: boolean;
   permissionMode: PermissionMode;
   autopilot: AutopilotLevel; // Autopilot-Stufe dieses Streams (Default „assisted")
-  model?: string; // aktuelles Modell dieses Streams (für Anzeige + pro-Stream-Umschaltung)
+  model?: string; // ANGEFORDERTES Modell dieses Streams (Picker-Wunsch + pro-Stream-Umschaltung)
+  activeModel?: string; // REAL vom SDK gelaufenes Modell (Doppel-Check) — maßgeblich für die Anzeige
+  modelMismatch?: boolean; // true = SDK lief auf einem anderen Modell als angefordert (mads zieht nach)
   effort?: EffortMode; // Reasoning-Effort dieses Streams (undefined = Modell ohne Effort, z. B. Haiku)
   createdAt: number;
   lastEventAt: number;
@@ -771,6 +773,13 @@ export const useStore = create<MadsState>((set) => {
       case "prompts_update":
         // Vollständige Prompt-Liste des Projekts (bei open_project + nach jeder Änderung) — Spiegel.
         set({ prompts: msg.prompts });
+        break;
+
+      case "model_active":
+        // Doppel-Check: das REAL gelaufene Modell (Grundwahrheit aus den SDK-Nachrichten). Die
+        // Anzeige richtet sich hiernach, nicht nach dem Picker-Wunsch — so kann ein stiller
+        // Fable-Default nicht mehr unbemerkt Tokens verbrennen.
+        patchAgent(msg.agentId, { activeModel: msg.active, modelMismatch: msg.mismatch });
         break;
 
       case "spawn_substreams_request": {

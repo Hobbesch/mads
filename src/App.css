@@ -1071,6 +1071,17 @@ button.primary:hover {
   color: var(--text-faint);
   white-space: nowrap;
 }
+/* Doppel-Check: Warnung, wenn der Stream real auf einem anderen Modell läuft als angefordert. */
+.insp-model-warn {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--danger, #d9534f);
+  white-space: nowrap;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--danger, #d9534f) 45%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger, #d9534f) 10%, transparent);
+}
 .inspector-actions button {
   border: 1px solid var(--border-strong);
   background: var(--panel);

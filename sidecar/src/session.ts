@@ -19,6 +19,7 @@ import { scrubbedAgentEnv } from "./agentEnv.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { DEFAULT_MODEL } from "../../shared/protocol.js";
 import type {
   StartAgentMsg,
   PermissionDecision,
@@ -89,6 +90,16 @@ function effortOptions(effort?: string): Record<string, unknown> {
   if (!effort) return {};
   if (effort === "ultracode") return { effort: "xhigh", settings: { ultracode: true } };
   return { effort };
+}
+/**
+ * Modell-IDs fürs Gegenprüfen kanonisieren: Region-Präfix (`us.`/`eu.`/`anthropic.`) und
+ * Datums-Suffix (`-20260722`) strippen. Sonst gälte ein vom SDK echotes
+ * `us.anthropic.claude-opus-4-8-20260722` fälschlich als Mismatch zum kurzen `claude-opus-4-8`
+ * → dauerndes Falsch-Warn-Badge („cries wolf"). Der eigentliche Fall (Fable ≠ Opus) bleibt erkannt.
+ */
+export function normalizeModelId(id: string): string {
+  // `+` strippt auch zusammengesetzte Präfixe wie `us.anthropic.` (mehrere Segmente).
+  return id.replace(/^(?:(?:us|eu|apac|anthropic)\.)+/, "").replace(/-\d{8}$/, "");
 }
 /** Live-Variante fürs applyFlagSettings (Flag-Layer). */
 function effortFlagSettings(effort: string): Record<string, unknown> {
@@ -190,6 +201,11 @@ export class AgentSession {
   role?: "integrator" | "sub";
   model?: string;
   effort?: string;
+  /** Doppel-Check: real vom SDK gelaufenes Modell (normalisiert, aus Init/Assistant-Nachrichten). */
+  activeModel?: string;
+  /** Für welches konkrete Fehl-Modell schon gewarnt+nachgezogen wurde (verhindert Spam, erlaubt
+   *  aber eine neue Warnung, falls der SDK auf ein ANDERES falsches Modell driftet). */
+  private mismatchCorrectedFor?: string;
   lastPrompt?: string;
   mock = false;
   // Autopilot (Phase 2): vom Orchestrator gesetzt/gelesen (treibt autopilotPass). Default
@@ -280,7 +296,10 @@ export class AgentSession {
     this.branch = msg.branch;
     this.label = msg.label;
     this.role = msg.role;
-    this.model = msg.model;
+    // PRÄVENTION (Doppel-Check, Schicht 1): NIE undefined ans SDK — sonst wählt es sein Flaggschiff
+    // (Fable 5) und verbrennt teure Tokens „blind". Ein verlorenes Modell beim Resume (msg.model
+    // undefined) fällt hier auf den Default (Opus) zurück, statt still auf Fable zu laufen.
+    this.model = msg.model || DEFAULT_MODEL;
     this.effort = msg.effort;
     this.lastPrompt = msg.prompt;
     this.permissionMode = msg.permissionMode;
@@ -390,7 +409,7 @@ export class AgentSession {
         options: {
           cwd,
           env: agentEnv.env,
-          model: msg.model,
+          model: this.model, // coerciert (nie undefined) — siehe DEFAULT_MODEL-Zuweisung in start()
           // Effort/Ultracode (SDK-nativ): low/medium/high/xhigh → options.effort;
           // ultracode → effort xhigh + settings.ultracode. Ohne Effort → SDK-Default (high).
           ...effortOptions(msg.effort),
@@ -646,11 +665,49 @@ export class AgentSession {
   async setModelEffort(model?: string, effort?: string): Promise<void> {
     if (model !== undefined && model !== "") {
       this.model = model;
+      this.mismatchCorrectedFor = undefined; // frische Absicht → ein neuer Mismatch darf wieder warnen
       await this.q?.setModel?.(model);
     }
     if (effort !== undefined && effort !== "") {
       this.effort = effort;
       await this.q?.applyFlagSettings?.(effortFlagSettings(effort));
+    }
+  }
+
+  /**
+   * DETEKTION (Doppel-Check, Schicht 2): das REAL vom SDK gelaufene Modell (aus Init-/Assistant-
+   * Nachrichten) gegen das angeforderte prüfen. Weicht es ab (z. B. Fable statt Opus), aktiv
+   * `setModel(angefordert)` nachziehen und den Menschen EINMAL warnen — so verbrennt kein stiller
+   * Modellwechsel unbemerkt Tokens. Meldet den Ist-Stand ans UI (Picker zeigt Ist, nicht Wunsch).
+   */
+  private reconcileActiveModel(actual: string | undefined): void {
+    if (!actual) return;
+    const norm = normalizeModelId(actual);
+    if (norm === this.activeModel) return; // nur bei echter Änderung — drosselt den Emit
+    this.activeModel = norm;
+    const mismatch = !!this.model && norm !== normalizeModelId(this.model);
+    this.emit({ ...envelope(), type: "model_active", agentId: this.agentId, active: norm, requested: this.model, mismatch });
+    if (mismatch) {
+      // Je konkretem Fehl-Modell EINMAL warnen+nachziehen; driftet der SDK auf ein ANDERES falsches
+      // Modell, darf erneut gewarnt werden (mismatchCorrectedFor trackt das zuletzt behandelte).
+      if (this.mismatchCorrectedFor !== norm) {
+        this.mismatchCorrectedFor = norm;
+        log(`[${this.agentId}] MODELL-MISMATCH: SDK lief auf ${norm}, angefordert ${this.model} → versuche nachzuziehen`);
+        this.emit({
+          ...envelope(),
+          type: "agent_event",
+          agentId: this.agentId,
+          event: {
+            kind: "assistant_text",
+            // Bewusst „versucht": setModel ist fire-and-forget; ist das Wunschmodell nicht verfügbar,
+            // bleibt der SDK beim Fallback. Das Badge zeigt dann weiter die Wahrheit (reales Modell).
+            text: `⚠ Modell-Abweichung: Dieser Stream läuft real auf **${norm}**, angefordert war **${this.model}**. mads versucht, auf ${this.model} nachzuziehen.`,
+          },
+        });
+        void this.q?.setModel?.(this.model);
+      }
+    } else {
+      this.mismatchCorrectedFor = undefined; // wieder in Deckung → ein späterer Mismatch darf erneut warnen
     }
   }
 
@@ -677,10 +734,13 @@ export class AgentSession {
           case "system":
             if (m.subtype === "init") {
               this.sessionId = m.session_id as string;
+              this.reconcileActiveModel(m.model as string | undefined); // Doppel-Check: Ist-Modell aus Init
               this.onChange?.();
             }
             break;
           case "assistant": {
+            // Doppel-Check: jede Assistant-Nachricht trägt das real gelaufene Modell — Grundwahrheit.
+            this.reconcileActiveModel((m.message as { model?: string })?.model);
             const content = ((m.message as { content?: unknown[] })?.content ?? []) as Array<Record<string, unknown>>;
             for (const block of content) {
               if (block.type === "text") {
