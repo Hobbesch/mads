@@ -2132,6 +2132,20 @@ button.primary:hover {
   padding: 8px 10px;
   line-height: 1.4;
 }
+/* Wiederhergestellter Entwurf: neutraler (info) statt warnend, mit Inline-„Verwerfen". */
+.modal-hint.draft-restored {
+  color: var(--text-muted, #7a8699);
+  background: color-mix(in srgb, var(--accent, #4a90d9) 12%, transparent);
+}
+.linklike {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent, #4a90d9);
+  text-decoration: underline;
+  cursor: pointer;
+}
 
 /* ---------------- Project box (sidebar) ---------------- */
 .project-box {
