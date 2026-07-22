@@ -691,6 +691,10 @@ export class AgentSession {
    */
   private reconcileActiveModel(actual: string | undefined): void {
     if (!actual) return;
+    // Platzhalter-„Modelle" ignorieren: der SDK taggt synthetische Nachrichten (Kompaktierung,
+    // Fehler-/System-Einschübe) mit `<synthetic>` o. Ä. — das ist KEIN reales Modell und darf das
+    // Stream-Modell nicht als „<synthetic>" fehlmelden (Fehlalarm-Badge). Reale IDs sind `claude-…`.
+    if (actual.startsWith("<") || !/^[a-z]/i.test(actual)) return;
     const norm = normalizeModelId(actual);
     if (norm === this.activeModel) return; // nur bei echter Änderung — drosselt den Emit
     this.activeModel = norm;
