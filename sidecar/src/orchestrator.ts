@@ -140,7 +140,7 @@ export class Orchestrator {
           log(`[orchestrator] agent ${msg.agentId} existiert bereits`);
           return;
         }
-        const session = new AgentSession(msg.agentId, () => this.persist(), this.permHooks());
+        const session = new AgentSession(msg.agentId, () => this.persist(), this.permHooks(), () => this.activeStreamsSummary(msg.agentId));
         this.pool.set(msg.agentId, session);
         await session.start(msg);
         this.persist();
@@ -247,7 +247,7 @@ export class Orchestrator {
           break;
         }
         // Neuen Sub-Stream im ausgelagerten Worktree starten (Autopilot committet/PRt die Änderungen).
-        const session = new AgentSession(msg.agentId, () => this.persist(), this.permHooks());
+        const session = new AgentSession(msg.agentId, () => this.persist(), this.permHooks(), () => this.activeStreamsSummary(msg.agentId));
         this.pool.set(msg.agentId, session);
         await session.start({
           ...envelope(),
@@ -1506,6 +1506,25 @@ export class Orchestrator {
    * (leer = frei zu pushen). Whole-File-Ownership (Symbole unbekannt) wird NICHT erzwungen
    * (vermeidet Über-Blockaden z. B. bei Doku); nur symbol-genau + land_first.
    */
+  /**
+   * LIVE-Zusammenfassung der AKTIVEN Streams für den Agent-System-Prompt (Härtung gegen Fehl-Routing
+   * an geschlossene „Phantom-Streams"): Der Agent lehnte Arbeit ab „gehört zu Stream X", obwohl X
+   * längst gemergt+geschlossen war. Mit dieser Live-Liste sieht er die Grundwahrheit — nur was hier
+   * steht, kann überhaupt etwas besitzen. Wird beim Start jeder Session einmal abgefragt.
+   */
+  private activeStreamsSummary(selfId: string): string {
+    const integ = [...this.pool.values()].find((s) => s.role === "integrator");
+    const subs = [...this.pool.values()].filter((s) => s.role === "sub" && s.status !== "done" && s.branch);
+    const lines = subs.map(
+      (s) => `  - ${s.label ?? s.branch} (Branch ${s.branch})${s.agentId === selfId ? " ← DAS BIST DU" : ""}`,
+    );
+    return (
+      "\nAktuell AKTIVE Streams (NUR diese können etwas besitzen — alle anderen sind geschlossen):\n" +
+      (integ ? `  - ${integ.label ?? "Main-Agent"} (Integrator, main-Checkout)\n` : "") +
+      (lines.length ? lines.join("\n") + "\n" : "  (keine weiteren Sub-Streams aktiv)\n")
+    );
+  }
+
   private async ownershipGate(agentId: string): Promise<TrespassFinding[]> {
     if (!this.project) return [];
     const ids = [...this.pool.keys()];

@@ -241,11 +241,15 @@ export class AgentSession {
   private readonly perms?: PermissionHooks;
   private q?: QueryHandle;
   private readonly onChange?: () => void;
+  /** Liefert (LIVE, beim Start abgefragt) die Zusammenfassung der AKTIVEN Streams — damit der Agent
+   *  weiß, welche Streams existieren, und Arbeit nicht an einen geschlossenen „Phantom-Stream" routet. */
+  private readonly streamsContext?: () => string;
 
-  constructor(agentId: string, onChange?: () => void, perms?: PermissionHooks) {
+  constructor(agentId: string, onChange?: () => void, perms?: PermissionHooks, streamsContext?: () => string) {
     this.agentId = agentId;
     this.onChange = onChange;
     this.perms = perms;
+    this.streamsContext = streamsContext;
   }
 
   /** Wartet eine Permission-Rückfrage? (Autopilot agiert nur, wenn der Stream ruhig ist.) */
@@ -457,6 +461,21 @@ export class AgentSession {
                   "um die vom Menschen gewünschte parallele Sub-Agenten-Arbeit zu erledigen.\n" +
                   "Außen-git (push/pr/merge) macht weiterhin nur mads über die UI; mergen tust nur du."
                 : "") +
+              // Stream-Zuständigkeit ist TRANSIENT (endet beim Merge) — verhindert das Routen an
+              // Phantom-Streams: der Agent lehnte Arbeit ab „gehört zu Stream X", obwohl X längst
+              // geschlossen+gemergt war (dessen Dateien liegen dann in main und gehören NIEMANDEM).
+              "\nStream-Zuständigkeit & Ownership (WICHTIG, verhindert Fehl-Routing):\n" +
+              "• Die Zuordnung Feature-X-gehört-zu-Stream-Y gilt NUR, solange Stream Y AKTIV ist. " +
+              "Ist Y gemergt und geschlossen, liegen seine Dateien in main und gehören KEINEM Stream " +
+              "mehr — du darfst sie in deinem Stream bearbeiten.\n" +
+              "• mads' `ownership_trespass`-Gate greift AUSSCHLIESSLICH zwischen AKTIVEN Parallel-Streams. " +
+              "Für einen geschlossenen Stream kann es NICHT auslösen — sage nie einen Trespass voraus, " +
+              "ohne dass der besitzende Stream in der Liste unten steht.\n" +
+              "• Bevor du Arbeit an einen anderen Stream zurückgibst oder mit Ownership ablehnst: " +
+              "PRÜFE, ob dieser Stream noch lebt — in der Liste unten oder via " +
+              "git branch -a --list 'mads/<name>'. Fehlt der Branch und liegt die Datei schon in " +
+              "main, ist der Stream zu → mach die Arbeit hier.\n" +
+              (this.streamsContext?.() ?? "") +
               loadProjectGuide(cwd),
           },
           // "auto" wird mads-seitig behandelt (Auto-Freigabe im canUseTool); dem SDK
