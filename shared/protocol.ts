@@ -764,6 +764,7 @@ export type EscalationKind =
   | "secret_detected" // Secret im zu pushenden Diff (LEAK-1: Push fail-closed blockiert)
   | "main_edited" // Integrator hat main direkt geändert → in Sub-Stream auslagern (proaktiver Hinweis)
   | "main_deploy_dirty" // main-Dirt stammt aus einem gerade gelaufenen Deploy → „Als Release committen" anbieten
+  | "foreign_edit" // Worktree änderte sich, während der Agent ruhte → Autopilot committet nicht blind mit
   | "max_budget";
 
 export interface SidecarErrorMsg extends BaseMsg {

@@ -9,6 +9,7 @@
  * Siehe docs/research/github-multiagent.md und docs/design/04-sub-agents.md.
  */
 import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -57,6 +58,32 @@ const git = (args: string[], cwd?: string) => run("git", args, cwd);
 const gh = (args: string[], cwd?: string, timeoutMs?: number) => run("gh", args, cwd, timeoutMs);
 /** GitHub-Aufrufe können bei Netzproblemen hängen — der Reconcile darf nie blockieren. */
 const GH_TIMEOUT_MS = 15_000;
+
+/**
+ * Fingerprint des UNCOMMITTETEN Worktree-Zustands (Fremd-Edit-Schutz): kombiniert Datei-Status,
+ * den Inhalt getrackter Änderungen (`diff HEAD`) und den Inhalt untrackter (nicht-ignorierter)
+ * Dateien zu einem Hash. Ändert etwas den Worktree, während der Agent RUHT (Fremd-Edit durch einen
+ * Menschen/anderen Prozess), weicht dieser Fingerprint vom zuletzt beim Turn-Ende erfassten ab —
+ * dann committet der Autopilot NICHT blind mit `git add -A`, sondern hält an. `.git`-Änderungen
+ * (Index/HEAD) zählen bewusst NICHT rein; nur Arbeitsbaum-Inhalt.
+ */
+export async function worktreeFingerprint(wt: string): Promise<string> {
+  const status = (await run("git", ["-C", wt, "status", "--porcelain"], wt)).stdout;
+  const diff = (await run("git", ["-C", wt, "diff", "HEAD"], wt)).stdout;
+  const untracked = (await run("git", ["-C", wt, "ls-files", "--others", "--exclude-standard"], wt)).stdout
+    .split("\n")
+    .filter(Boolean);
+  const h = createHash("sha256").update(status).update("\0").update(diff);
+  for (const f of untracked) {
+    h.update("\0").update(f).update("\0");
+    try {
+      h.update(readFileSync(join(wt, f)));
+    } catch {
+      /* Datei verschwand zwischen ls-files und read — egal, der Status-Teil deckt das ab */
+    }
+  }
+  return h.digest("hex");
+}
 
 export function repoSlug(repoRoot: string): string {
   return basename(repoRoot);

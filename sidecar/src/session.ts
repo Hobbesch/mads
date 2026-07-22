@@ -12,7 +12,7 @@
  */
 import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
-import { createWorktree, removeWorktree } from "./git.js";
+import { createWorktree, removeWorktree, worktreeFingerprint } from "./git.js";
 import { ensureMadsDir } from "./persistence.js";
 import { classifyToolCall, isDeployCommand, isGitCommit, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
 import { scrubbedAgentEnv } from "./agentEnv.js";
@@ -212,6 +212,9 @@ export class AgentSession {
   effort?: string;
   /** Doppel-Check: real vom SDK gelaufenes Modell (normalisiert, aus Init/Assistant-Nachrichten). */
   activeModel?: string;
+  /** Fremd-Edit-Schutz: Worktree-Fingerprint zum ENDE des letzten Agent-Turns. Der Autopilot
+   *  committet nur, wenn der Worktree danach unverändert ist — sonst ist etwas fremdes reingekommen. */
+  turnFingerprint?: string;
   /** Für welches konkrete Fehl-Modell schon gewarnt+nachgezogen wurde (verhindert Spam, erlaubt
    *  aber eine neue Warnung, falls der SDK auf ein ANDERES falsches Modell driftet). */
   private mismatchCorrectedFor?: string;
@@ -850,6 +853,10 @@ export class AgentSession {
               isError: Boolean(m.is_error),
             });
             this.setStatus(m.is_error ? "error" : "done");
+            // Fremd-Edit-Schutz: den Worktree-Zustand JETZT (Turn-Ende, alle Tool-Calls fertig) als
+            // „agent-authored" festhalten. Weicht er beim nächsten Autopilot-Lauf ab, kam etwas von
+            // aussen dazu → nicht blind mitcommitten. Nicht-blockierend (verzögert die Schleife nicht).
+            if (this.worktreePath) void worktreeFingerprint(this.worktreePath).then((fp) => (this.turnFingerprint = fp)).catch(() => {});
             break;
           }
           default:

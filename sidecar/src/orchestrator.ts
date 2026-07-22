@@ -13,7 +13,7 @@ import { AgentSession, type PermissionHooks } from "./session.js";
 import { loadApprovedKinds, saveApprovedKinds } from "./permissions.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
-import { autoCommit, commitMainRelease, createPr, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
+import { autoCommit, commitMainRelease, createPr, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
@@ -62,6 +62,9 @@ export class Orchestrator {
   /** B3: Zähler aufeinanderfolgender unzuverlässiger Polls je Agent — bei 5 einmalige Nutzer-Notiz. */
   private readonly unreliablePolls = new Map<string, number>();
   private readonly autopilotSecretNotified = new Set<string>();
+  /** Fremd-Edit-Schutz: je Agent einmalig gewarnt, dass der Autopilot wegen fremder Worktree-
+   *  Änderungen pausiert (verhindert Warn-Spam; wird bei sauberer Lage wieder gelöscht). */
+  private readonly foreignEditNotified = new Set<string>();
   // Proaktiver Hinweis „main direkt geändert" pro Integrator nur einmal je dirty-Episode.
   private readonly mainDirtyNotified = new Set<string>();
   // Explizit entfernte Agenten (gestoppt/aufgeräumt/gemergt) — mergeRegistry darf sie NICHT
@@ -1219,6 +1222,29 @@ export class Orchestrator {
       if (action === "none") continue;
       try {
         if (action === "commit") {
+          // FREMD-EDIT-SCHUTZ: hat sich der Worktree seit dem Turn-Ende des Agenten geändert, kam
+          // etwas von aussen dazu (Mensch/anderer Prozess editiert im Worktree). Dann NICHT blind
+          // `git add -A` — sonst mischt der Autopilot Fremd-Edits in seinen Checkpoint (realer Vorfall).
+          // Anhalten + einmal warnen; der Mensch committet dann bewusst manuell (oder entfernt den Edit).
+          if (s.turnFingerprint) {
+            const cur = await worktreeFingerprint(s.worktreePath);
+            if (cur !== s.turnFingerprint) {
+              if (!this.foreignEditNotified.has(s.agentId)) {
+                this.foreignEditNotified.add(s.agentId);
+                const changed = (await run("git", ["-C", s.worktreePath, "status", "--porcelain"], s.worktreePath)).stdout.trim();
+                this.emitError(
+                  s.agentId,
+                  "foreign_edit",
+                  "Autopilot pausiert (Fremd-Edit): der Worktree hat sich geändert, seit der Agent seinen Turn " +
+                    "beendet hat — vermutlich hat jemand/etwas hier editiert. mads committet NICHT automatisch, um " +
+                    "keine fremde Arbeit in den Checkpoint zu mischen. Bitte prüfen und bewusst manuell committen. " +
+                    (changed ? `\nGeänderte Dateien:\n${changed}` : ""),
+                );
+              }
+              continue; // diesen Zyklus nicht committen
+            }
+          }
+          this.foreignEditNotified.delete(s.agentId);
           const res = await autoCommit(s.worktreePath, `chore(autopilot): checkpoint — ${s.label ?? s.branch}`);
           if (res.secrets?.length) {
             if (!this.autopilotSecretNotified.has(s.agentId)) {
@@ -1234,6 +1260,10 @@ export class Orchestrator {
           }
           this.autopilotSecretNotified.delete(s.agentId);
           if (res.ok) {
+            // Post-Commit-Zustand als neue „agent-authored"-Basis merken (der Worktree ist jetzt
+            // sauber/rest-committet) — sonst würde der nächste Zyklus die gerade committeten
+            // Änderungen fälschlich als Fremd-Edit sehen.
+            s.turnFingerprint = await worktreeFingerprint(s.worktreePath);
             const skipNote = res.skipped?.length
               ? ` (nicht versioniert, übersprungen: ${res.skipped.slice(0, 4).join(", ")}${res.skipped.length > 4 ? " …" : ""})`
               : "";
