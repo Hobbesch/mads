@@ -10,7 +10,7 @@
  */
 import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { ensureMadsDir } from "./persistence.js";
@@ -74,10 +74,16 @@ export async function worktreeFingerprint(wt: string): Promise<string> {
     .split("\n")
     .filter(Boolean);
   const h = createHash("sha256").update(status).update("\0").update(diff);
+  // Große untrackte Dateien (Dumps/Datasets/Logs, die NICHT gitignored sind) nicht voll in den Hash
+  // lesen — synchroner Read würde den Event-Loop blockieren + Speicher spiken. Ab dem Cap genügt
+  // size+mtime als Änderungssignal (ändert sich der Inhalt, ändert sich i. d. R. beides).
+  const UNTRACKED_HASH_CAP = 2 * 1024 * 1024;
   for (const f of untracked) {
     h.update("\0").update(f).update("\0");
     try {
-      h.update(readFileSync(join(wt, f)));
+      const st = statSync(join(wt, f));
+      if (st.size > UNTRACKED_HASH_CAP) h.update(`__big__:${st.size}:${st.mtimeMs}`);
+      else h.update(readFileSync(join(wt, f)));
     } catch {
       /* Datei verschwand zwischen ls-files und read — egal, der Status-Teil deckt das ab */
     }

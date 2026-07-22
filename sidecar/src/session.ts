@@ -854,9 +854,16 @@ export class AgentSession {
             });
             this.setStatus(m.is_error ? "error" : "done");
             // Fremd-Edit-Schutz: den Worktree-Zustand JETZT (Turn-Ende, alle Tool-Calls fertig) als
-            // „agent-authored" festhalten. Weicht er beim nächsten Autopilot-Lauf ab, kam etwas von
-            // aussen dazu → nicht blind mitcommitten. Nicht-blockierend (verzögert die Schleife nicht).
-            if (this.worktreePath) void worktreeFingerprint(this.worktreePath).then((fp) => (this.turnFingerprint = fp)).catch(() => {});
+            // „agent-authored" festhalten. AWAIT (nicht floating): sonst könnte der 25s-Poll im ms-Fenster
+            // danach mit undefined/veraltetem Fingerprint prüfen → ungeguardeter Commit ODER Falsch-Pause
+            // (Review-Race 4a/b/c). Der Turn ist hier zu Ende → das kurze Warten stört nichts.
+            if (this.worktreePath) {
+              try {
+                this.turnFingerprint = await worktreeFingerprint(this.worktreePath);
+              } catch {
+                /* git-Fehler → Fingerprint bleibt wie er war; Guard fällt im Zweifel auf „kein Vergleich" */
+              }
+            }
             break;
           }
           default:

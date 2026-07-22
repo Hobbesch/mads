@@ -1226,6 +1226,10 @@ export class Orchestrator {
           // etwas von aussen dazu (Mensch/anderer Prozess editiert im Worktree). Dann NICHT blind
           // `git add -A` — sonst mischt der Autopilot Fremd-Edits in seinen Checkpoint (realer Vorfall).
           // Anhalten + einmal warnen; der Mensch committet dann bewusst manuell (oder entfernt den Edit).
+          // Läuft in diesem Worktree ein Dev-Server, verändert er legitim Dateien (Build-Output,
+          // Hot-Reload-Artefakte) — das würde den Fremd-Edit-Guard fälschlich auslösen. Solange der
+          // Nutzer testet, gar nicht auto-committen (wie syncOne den Auto-Rebase aufschiebt).
+          if (this.devServer?.agentId === s.agentId) continue;
           if (s.turnFingerprint) {
             const cur = await worktreeFingerprint(s.worktreePath);
             if (cur !== s.turnFingerprint) {
