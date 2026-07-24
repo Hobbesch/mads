@@ -20,6 +20,9 @@ function AgentCard({ agent }: { agent: AgentVM }) {
   const badges = agentBadges(agent);
   const active = agent.status === "running" || agent.status === "starting";
   const color = agentColor(agent.branch ?? agent.id);
+  // Zuletzt abgesetzter Auftrag: sichtbar ab dem Absenden bis zum Merge. Danach (isMergedDone) und
+  // bei passiv wiederhergestellten Streams ohne lastPrompt bleibt die Kachel prompt-frei.
+  const showPrompt = agent.lastPrompt && !isMergedDone(agent);
 
   return (
     <button
@@ -67,6 +70,12 @@ function AgentCard({ agent }: { agent: AgentVM }) {
       {needsInput && <div className="card-flag yellow">● braucht Input{pending ? ` (${pending})` : ""}</div>}
       {unsaved && <div className="card-flag red" title="Uncommittete/untrackte Arbeit oder Commits ohne PR — geht beim Aufräumen verloren">● Arbeit nicht gesichert</div>}
       {agent.syncBlocked && <div className="card-flag red" title="Auto-Sync wegen Rebase-Konflikt pausiert — Konflikt lösen, dann Sync">⚠︎ Sync blockiert (Konflikt)</div>}
+      {showPrompt && (
+        <div className="card-prompt">
+          <div className="card-prompt-label">Auftrag</div>
+          <div className="card-prompt-body">{agent.lastPrompt}</div>
+        </div>
+      )}
     </button>
   );
 }

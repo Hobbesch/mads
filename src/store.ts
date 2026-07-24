@@ -150,6 +150,10 @@ export interface AgentVM {
   /** true = im Sidecar-Pool aktiv (gestartet/fortgesetzt). false = passiv wiederhergestellt
    *  (Kachel + Verlauf sichtbar, aber KEINE laufende KI — wird beim ersten Senden fortgesetzt). */
   live?: boolean;
+  /** Zuletzt vom Menschen abgesetzter Prompt (Kachel-Übersicht: „was habe ich wem aufgetragen").
+   *  Gesetzt beim user_text-Event, sichtbar bis zum Merge (isMergedDone) — dann gelöscht. Reine
+   *  Laufzeit-Anzeige, NICHT persistiert: passiv wiederhergestellte Streams haben daher keinen. */
+  lastPrompt?: string;
 }
 
 export interface SidecarInfo {
@@ -805,6 +809,9 @@ export const useStore = create<MadsState>((set) => {
           // Auch eine reine Bild-Nachricht (Text leer) anzeigen.
           if (ev.text.trim() || ev.attachments?.length)
             pushEvent(msg.agentId, { id: mkId(), kind: "user", text: ev.text, attachments: ev.attachments });
+          // Kachel-Übersicht: den zuletzt abgesetzten Auftrag merken (nur bei echtem Text — eine
+          // reine Bild-Folgenachricht lässt den vorigen Auftrag stehen). Sichtbar bis zum Merge.
+          if (ev.text.trim()) patchAgent(msg.agentId, { lastPrompt: ev.text.trim() });
         } else if (ev.kind === "assistant_text" || ev.kind === "assistant_delta") {
           if (ev.text.trim()) pushEvent(msg.agentId, { id: mkId(), kind: "assistant", text: ev.text });
         } else if (ev.kind === "thinking") {

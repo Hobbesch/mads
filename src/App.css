@@ -955,6 +955,36 @@ button.primary:hover {
   color: #d33b30;
 }
 
+/* Zuletzt abgesetzter Auftrag — feiner Strich als Abtrennung, höhenbegrenzt + scrollbar.
+   Lebt ab dem Absenden bis zum Merge; danach entfernt die Kachel den Block. */
+.card-prompt {
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.card-prompt-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.card-prompt-body {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* „doppelte Kachelhöhe": der Auftragsteil deckelt bei ~9 Zeilen und scrollt dann. */
+  max-height: 132px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 /* ---------------- Empty state ---------------- */
 .empty-state {
   margin: auto;
