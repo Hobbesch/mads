@@ -1096,7 +1096,7 @@ export async function createPr(
   title: string,
   body: string,
   draft: boolean,
-): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; url: string } | { ok: false; error: string; transient?: boolean }> {
   const pushed = await pushBranch(worktree, branch, base);
   if (!pushed.ok) return { ok: false, error: pushed.error };
   // Idempotent: existiert für den Branch bereits ein OFFENER PR, hat der Push oben ihn
@@ -1107,8 +1107,15 @@ export async function createPr(
   if (existing && existing.state === "OPEN") return { ok: true, url: existing.url };
   const args = ["pr", "create", "--head", branch, "--base", base, "--title", title, "--body", body];
   if (draft) args.push("--draft");
-  const r = await gh(args, repoRoot);
-  if (r.code !== 0) {
+  // GitHub liefert bei internen Störungen einen TRANSIENTEN GraphQL/5xx-Fehler („Something went wrong
+  // while executing your query" mit Referenz-ID, 502/503/504, Timeouts, sekundäre Rate-Limits). Das ist
+  // KEIN Push-/Code-Problem — GitHub empfiehlt Wiederholung. Ohne Retry eskalierte mads schon beim ersten
+  // Schluckauf. Darum: bis zu 3 Versuche mit Backoff; nur wenn es bestehen bleibt, Fehler zurückgeben.
+  let lastErr = "";
+  let transient = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await gh(args, repoRoot);
+    if (r.code === 0) return { ok: true, url: r.stdout.trim().split("\n").pop() ?? "" };
     const err = (r.stderr || r.stdout).trim();
     // Race zwischen Check und create (oder ein PR, den prStatus nicht sah): „already exists" ist
     // KEIN Fehler — den vorhandenen PR (URL aus der Meldung, sonst Nachpoll) übernehmen.
@@ -1117,9 +1124,23 @@ export async function createPr(
       const again = urlInErr ? null : await prStatus(repoRoot, branch);
       return { ok: true, url: urlInErr ?? again?.url ?? existing?.url ?? "" };
     }
-    return { ok: false, error: err };
+    lastErr = err;
+    transient = isTransientGhError(err);
+    if (transient && attempt < 2) {
+      await new Promise((res) => setTimeout(res, 1500 * (attempt + 1))); // 1,5 s / 3 s Backoff
+      continue;
+    }
+    break;
   }
-  return { ok: true, url: r.stdout.trim().split("\n").pop() ?? "" };
+  return { ok: false, error: lastErr, transient };
+}
+
+/** Transiente GitHub-Server-Fehler (GraphQL-500 „Something went wrong", 5xx, Timeouts, sekundäres
+ *  Rate-Limit) — GitHub empfiehlt Wiederholung. NICHT für echte Ablehnungen (Permission, Protection). */
+export function isTransientGhError(err: string): boolean {
+  return /Something went wrong while executing your query|GraphQL:\s*Something went wrong|\b50[234]\b|Bad Gateway|Service Unavailable|Gateway Time-?out|timed? ?out|ETIMEDOUT|EAI_AGAIN|ECONNRESET|ECONNREFUSED|temporarily unavailable|was submitted too quickly|secondary rate limit|abuse detection|try again/i.test(
+    err,
+  );
 }
 
 /** Integrator-Merge: gh pr merge --squash --delete-branch (lineare main). */
@@ -1132,9 +1153,20 @@ export async function mergePr(
   // KEIN --delete-branch: der lokale Branch ist im Worktree ausgecheckt → gh würde beim
   // Löschen scheitern und den (bereits erfolgten) Merge fälschlich als Fehler melden.
   // Worktree + lokalen + Remote-Branch räumt der Orchestrator danach auf (Worktree zuerst).
-  const r = await gh(["pr", "merge", branch, flag], repoRoot);
-  if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout).trim() };
-  return { ok: true, output: r.stdout.trim() };
+  // Transiente GitHub-Server-Fehler (GraphQL-500 o. Ä.) wiederholen — wie bei createPr (dieselbe
+  // Störung trifft `gh pr merge`, und nur der Integrator merged → ein Fehlschlag ist teuer).
+  let lastErr = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await gh(["pr", "merge", branch, flag], repoRoot);
+    if (r.code === 0) return { ok: true, output: r.stdout.trim() };
+    lastErr = (r.stderr || r.stdout).trim();
+    if (isTransientGhError(lastErr) && attempt < 2) {
+      await new Promise((res) => setTimeout(res, 1500 * (attempt + 1)));
+      continue;
+    }
+    break;
+  }
+  return { ok: false, error: lastErr };
 }
 
 function rollupState(rollup: unknown): PrChecksState {

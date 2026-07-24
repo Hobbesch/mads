@@ -725,6 +725,24 @@ export class Orchestrator {
       draft ?? false,
     );
     if (!res.ok) {
+      if (res.transient) {
+        // Der Push war ERFOLGREICH; nur GitHub lieferte beim PR-Anlegen einen transienten Server-Fehler
+        // (GraphQL-500 o. Ä.) — auch nach mehreren Wiederholungen. Das ist KEINE Ablehnung und nicht der
+        // Code des Streams → sichtbarer Hinweis statt roter push_rejected-Eskalation.
+        this.emit({
+          ...envelope(),
+          type: "agent_event",
+          agentId,
+          event: {
+            kind: "assistant_text",
+            text:
+              `⚠ PR-Erstellung: GitHub lieferte einen vorübergehenden Server-Fehler (auch nach mehreren Versuchen). ` +
+              `Der Branch ist gepusht — das liegt an GitHub, nicht an deinem Code. Bitte gleich noch einmal „PR erstellen".\n\n` +
+              `Details: ${res.error}`,
+          },
+        });
+        return;
+      }
       this.emitError(agentId, "push_rejected", `PR-Erstellung fehlgeschlagen: ${res.error}`);
       return;
     }
