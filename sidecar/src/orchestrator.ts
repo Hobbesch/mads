@@ -1187,6 +1187,12 @@ export class Orchestrator {
     for (const s of this.pool.values()) if (s.role === "integrator") return; // aktiver Integrator pollt sich selbst
     const entry = loadRegistry(this.project.repoRoot).find((e) => e.role === "integrator");
     if (!entry) return;
+    // IDENTITÄT des passiven Integrators an ALLE Clients (v. a. Remote): ohne dies kennt der Remote ihn
+    // nur aus diesem git_status-Poll — der trägt WEDER Label NOCH Rolle → der Remote zeigt die rohe
+    // agentId als „Namen" und (weil git_status keinen Status setzt) den Default „starting" (grün). Ein
+    // status_update mit Label + Rolle + zuletzt persistiertem Status (z. B. „done") stellt ihn korrekt
+    // dar. Idempotent; der Desktop-Store patcht nur Label/Status (nie `live`), bleibt also passiv.
+    this.emit({ ...envelope(), type: "status_update", agentId: entry.agentId, status: entry.status, label: entry.label, role: entry.role });
     try {
       const st = await gitStatus(this.project.repoRoot, this.project.repoRoot, this.project.defaultBranch, this.project.defaultBranch, true);
       if (!st.unreliable) this.emitGitStatus(entry.agentId, st); // B3: nie einen git-Fehler als „clean" verkaufen
