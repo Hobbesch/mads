@@ -88,6 +88,7 @@ export type HostMessage =
   | UpdateMainMsg
   | StartDevServerMsg
   | StopDevServerMsg
+  | ConfigureDevServerMsg
   | HandoffExportMsg
   | HandoffImportMsg
   | PromptSaveMsg
@@ -107,6 +108,12 @@ export interface StartDevServerMsg extends BaseMsg {
 }
 export interface StopDevServerMsg extends BaseMsg {
   type: "stop_devserver";
+  agentId: string;
+}
+/** „Dev-Server konfigurieren": stellt `.mads/run.json` sicher (erzeugt/aktualisiert die Vorlage aus
+ *  erkannten Services) und liefert per `devserver_config` den Pfad, den das Frontend im Editor öffnet. */
+export interface ConfigureDevServerMsg extends BaseMsg {
+  type: "configure_devserver";
   agentId: string;
 }
 
@@ -425,6 +432,7 @@ export type SidecarMessage =
   | CollisionWarningMsg
   | SpawnSubstreamsRequestMsg
   | DevServerStatusMsg
+  | DevServerConfigMsg
   | DevServerLogMsg
   | ProjectLockedMsg
   | SidecarErrorMsg
@@ -454,12 +462,22 @@ export interface DevServerService {
 export interface DevServerStatusMsg extends BaseMsg {
   type: "devserver_status";
   agentId: string;
-  state: "installing" | "starting" | "running" | "stopped" | "error";
+  // „unconfigured": kein lauffähiges .mads/run.json (fehlt/leer/nicht erkannt) → Frontend bietet
+  // „Konfigurieren" an, statt einen toten Fehler zu zeigen.
+  state: "installing" | "starting" | "running" | "stopped" | "error" | "unconfigured";
   services?: DevServerService[];
   /** primäre URL zum Öffnen im Browser (i. d. R. das Frontend), sobald bereit. */
   url?: string;
   /** menschenlesbarer Hinweis (Fehlergrund / „Vorlage erzeugt" o. Ä.). */
   message?: string;
+}
+/** Antwort auf `configure_devserver`: Pfad der (sichergestellten) `.mads/run.json`, die der Client
+ *  im Editor öffnet. `detected` = Anzahl automatisch erkannter Services in der frischen Vorlage. */
+export interface DevServerConfigMsg extends BaseMsg {
+  type: "devserver_config";
+  agentId: string;
+  path: string;
+  detected: number;
 }
 /** Eine Ausgabezeile eines Dev-Server-Services (Live-Log im Inspector). */
 export interface DevServerLogMsg extends BaseMsg {

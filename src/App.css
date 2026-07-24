@@ -3837,6 +3837,13 @@ body.col-resizing .tree-resizer {
   border-color: var(--s-green);
   color: var(--s-green);
 }
+/* „Konfigurieren"-Knopf (öffnet .mads/run.json im Editor). Kompaktes Zahnrad, prominent bei „unconfigured". */
+.devserver-config.prominent {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--accent-weak);
+}
 .devserver-open {
   font-family: var(--mono);
   font-size: 11px;

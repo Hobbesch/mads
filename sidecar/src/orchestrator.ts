@@ -15,7 +15,7 @@ import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
 import { autoCommit, commitMainRelease, createPr, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
-import { DevServerRun, ensureRunManifest, loadRunManifest } from "./devserver.js";
+import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
 import { acquireProjectLock, ensureMadsDir, loadPrompts, loadRegistry, mergeRegistry, releaseProjectLock, savePrompts, saveRegistry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
@@ -213,6 +213,10 @@ export class Orchestrator {
 
       case "stop_devserver":
         await this.stopDevServerIf(msg.agentId);
+        break;
+
+      case "configure_devserver":
+        this.handleConfigureDevServer(msg.agentId);
         break;
 
       case "create_pr":
@@ -1627,6 +1631,16 @@ export class Orchestrator {
 
   // ---------------------------------------------------------------- Dev-Server
   /** Dev-Server dieses Streams starten (Front-/Backend im Worktree). Nur ein Stream gleichzeitig. */
+  /** „Dev-Server konfigurieren": `.mads/run.json` sicherstellen (frische Vorlage bei leer/fehlend) und
+   *  dem Frontend den Pfad melden → es öffnet die Datei im mads-Editor, wo der Nutzer sie konstruiert. */
+  private handleConfigureDevServer(agentId: string): void {
+    if (!this.project) return;
+    const repoRoot = this.project.repoRoot;
+    ensureMadsDir(repoRoot); // .mads/ muss existieren, bevor run.json geschrieben wird
+    const scaf = ensureRunManifest(repoRoot);
+    this.emit({ ...envelope(), type: "devserver_config", agentId, path: scaf.path, detected: scaf.services });
+  }
+
   private async handleStartDevServer(agentId: string): Promise<void> {
     if (!this.project) return;
     const repoRoot = this.project.repoRoot;
@@ -1655,18 +1669,20 @@ export class Orchestrator {
     } catch {
       /* best effort */
     }
-    let manifest = loadRunManifest(repoRoot);
+    const manifest = loadRunManifest(repoRoot);
     if (!manifest) {
-      // Keine (gültige) run.json → Vorlage erzeugen und den Nutzer prüfen lassen (nicht blind starten).
+      // Keine lauffähige run.json (fehlt/leer/nicht erkannt) → NICHT blind starten und KEIN toter Fehler,
+      // sondern „unconfigured": Vorlage (frisch) erzeugen und das Frontend „Konfigurieren" anbieten lassen.
       const scaf = ensureRunManifest(repoRoot);
       this.emit({
         ...envelope(),
         type: "devserver_status",
         agentId,
-        state: "error",
-        message: scaf.generated
-          ? `Keine .mads/run.json gefunden — Vorlage mit ${scaf.services} erkannten Service(s) erzeugt. Bitte Befehle/Ports prüfen und erneut starten.`
-          : "Keine gültige .mads/run.json gefunden. Bitte die Datei anlegen/prüfen.",
+        state: "unconfigured",
+        message:
+          scaf.services > 0
+            ? `Dev-Server noch nicht eingerichtet — Vorlage mit ${scaf.services} erkannten Service(s) erzeugt. „Konfigurieren" öffnen, Befehle/Ports prüfen, dann starten.`
+            : `Dev-Server für dieses Projekt noch nicht eingerichtet — „Konfigurieren" öffnen und .mads/run.json ausfüllen.`,
       });
       return;
     }

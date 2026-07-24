@@ -105,7 +105,7 @@ export interface DevLogLine {
 }
 /** Sicht auf den Stream-Dev-Server (Front-/Backend im Worktree, siehe `.mads/run.json`). */
 export interface DevServerVM {
-  state: "installing" | "starting" | "running" | "stopped" | "error";
+  state: "installing" | "starting" | "running" | "stopped" | "error" | "unconfigured";
   url?: string;
   services?: { name: string; ready: boolean; url?: string }[];
   message?: string;
@@ -412,6 +412,7 @@ export interface MadsState {
   runGate: (id: string) => Promise<void>;
   startDevServer: (id: string) => Promise<void>;
   stopDevServer: (id: string) => Promise<void>;
+  configureDevServer: (id: string) => Promise<void>;
   pollProject: () => Promise<void>;
   resumeAgent: (r: ResumableAgent) => Promise<void>;
   resumeAll: () => Promise<void>;
@@ -790,6 +791,18 @@ export const useStore = create<MadsState>((set) => {
         if (msg.state === "running" && msg.url) notice(msg.agentId, "ok", `▶ Dev-Server läuft → ${msg.url}`);
         else if (msg.state === "stopped") notice(msg.agentId, "info", "■ Dev-Server gestoppt");
         else if (msg.state === "error") notice(msg.agentId, "err", `Dev-Server: ${msg.message ?? "Fehler"}`);
+        else if (msg.state === "unconfigured") notice(msg.agentId, "warn", `⚙ ${msg.message ?? "Dev-Server noch nicht eingerichtet — auf Konfigurieren tippen."}`);
+        break;
+
+      case "devserver_config":
+        // Sidecar hat .mads/run.json sichergestellt → im Editor öffnen, damit der Nutzer den
+        // Dev-Server für dieses Projekt konstruiert (Befehle/Ports/Runtime). Danach „Dev-Server" starten.
+        notice(
+          msg.agentId,
+          "accent",
+          `⚙ Dev-Server-Konfig geöffnet (.mads/run.json${msg.detected > 0 ? ` — ${msg.detected} Service(s) erkannt` : " — noch leer, bitte ausfüllen"}).`,
+        );
+        void useStore.getState().openFilePath(msg.path);
         break;
 
       case "devserver_log":
@@ -1516,6 +1529,12 @@ export const useStore = create<MadsState>((set) => {
 
     stopDevServer: async (id) => {
       await sendHost({ ...envelope(), type: "stop_devserver", agentId: id });
+    },
+
+    configureDevServer: async (id) => {
+      // Sidecar stellt .mads/run.json sicher (frische Vorlage bei leer/fehlend) und meldet den Pfad
+      // per devserver_config zurück → dort öffnen wir die Datei im Editor (siehe Reducer).
+      await sendHost({ ...envelope(), type: "configure_devserver", agentId: id });
     },
 
     pollProject: async () => {

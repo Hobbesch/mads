@@ -42,6 +42,7 @@ export function Inspector() {
   const runGate = useStore((s) => s.runGate);
   const startDevServer = useStore((s) => s.startDevServer);
   const stopDevServer = useStore((s) => s.stopDevServer);
+  const configureDevServer = useStore((s) => s.configureDevServer);
   const devLog = useStore((s) => (s.selectedId ? s.devLog[s.selectedId] ?? NO_DEVLOG : NO_DEVLOG));
   const devLogRef = useRef<HTMLDivElement>(null);
   const devLogStickRef = useRef(true); // an den unteren Rand „geklebt"? (nur dann folgen)
@@ -460,7 +461,8 @@ export function Inspector() {
           {agent.role === "sub" && agent.worktreePath && (
             (() => {
               const ds = agent.devServer;
-              const on = !!ds && ds.state !== "stopped" && ds.state !== "error";
+              // „unconfigured" gilt als AUS (nicht laufend) — sonst würde der Knopf fälschlich „stoppen".
+              const on = !!ds && ds.state !== "stopped" && ds.state !== "error" && ds.state !== "unconfigured";
               const label =
                 ds?.state === "running"
                   ? "■ Dev-Server (läuft)"
@@ -470,17 +472,29 @@ export function Inspector() {
                       ? "■ Dev-Server (startet…)"
                       : "▶ Dev-Server";
               return (
-                <button
-                  className={`devserver-btn${on ? " on" : ""}`}
-                  onClick={() => (on ? void stopDevServer(selectedId) : void startDevServer(selectedId))}
-                  title={
-                    on
-                      ? "Dev-Server dieses Streams stoppen"
-                      : "Front-/Backend dieses Streams lokal starten (aus dem Worktree — main bleibt unberührt). Konfig: .mads/run.json"
-                  }
-                >
-                  {label}
-                </button>
+                <>
+                  <button
+                    className={`devserver-btn${on ? " on" : ""}`}
+                    onClick={() => (on ? void stopDevServer(selectedId) : void startDevServer(selectedId))}
+                    title={
+                      on
+                        ? "Dev-Server dieses Streams stoppen"
+                        : "Front-/Backend dieses Streams lokal starten (aus dem Worktree — main bleibt unberührt). Konfig: .mads/run.json"
+                    }
+                  >
+                    {label}
+                  </button>
+                  {/* „Konfigurieren": öffnet .mads/run.json im Editor (mit erkannter Vorlage) — hier
+                      konstruiert der Nutzer projekt-spezifisch, WAS beim Start passiert. Prominent bei
+                      „unconfigured", sonst als dezenter Zahnrad-Knopf immer erreichbar. */}
+                  <button
+                    className={`devserver-config${ds?.state === "unconfigured" ? " prominent" : ""}`}
+                    onClick={() => void configureDevServer(selectedId)}
+                    title="Dev-Server einrichten/anpassen — .mads/run.json im Editor öffnen"
+                  >
+                    {ds?.state === "unconfigured" ? "⚙ Konfigurieren" : "⚙"}
+                  </button>
+                </>
               );
             })()
           )}
