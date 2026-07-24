@@ -214,6 +214,10 @@ export interface StartAgentMsg extends BaseMsg {
   mock?: boolean;
   /** Autopilot-Stufe (Default „assisted"). */
   autopilot?: AutopilotLevel;
+  /** true = automatische „Setze die Arbeit fort"-Anweisung beim Resume (kein echter Nutzer-Auftrag).
+   *  Der Sidecar überschreibt damit NICHT den zuletzt gemerkten Auftrag (`lastPrompt`) — die Kachel
+   *  zeigt weiter den echten Auftrag, den der Mensch abgesetzt hat. */
+  continuation?: boolean;
 }
 
 export interface CreatePrMsg extends BaseMsg {
@@ -480,7 +484,7 @@ export type AgentEvent =
   | { kind: "thinking"; text: string }
   // Vom Menschen eingegebene Anweisung (Prompt). Der Sidecar emittiert sie als Event, damit sie
   // auf ALLEN Clients (Mac + Remote) im Verlauf erscheint — nicht nur dort, wo sie getippt wurde.
-  | { kind: "user_text"; text: string; attachments?: TimelineAttachment[] }
+  | { kind: "user_text"; text: string; attachments?: TimelineAttachment[]; continuation?: boolean }
   | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown> }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; summary?: string; output?: string }
   | { kind: "system"; subtype: string; data?: Record<string, unknown> };
@@ -693,6 +697,11 @@ export interface ResumableAgent {
   merged?: boolean;
   /** Worktree hat ungespeicherte oder ungepushte lokale Reste → nicht still löschen. */
   localChanges?: boolean;
+  /** PR gemergt/geschlossen UND Worktree sauber, keine ungemergte Arbeit (ahead 0): wird zwar noch als
+   *  fortsetzbar angeboten (bleibt im Grid), aber der zugehörige Auftrag ist ERLEDIGT → die Kachel zeigt
+   *  ihn nach dem Neustart NICHT mehr (in-Session verbirgt ihn isMergedDone bereits — hier fehlt nur der
+   *  pr-Kontext, den wir bewusst nicht ins passive VM heben, um die Grid-Platzierung nicht zu ändern). */
+  mergedClean?: boolean;
 }
 export interface ResumableAgentsMsg extends BaseMsg {
   type: "resumable_agents";

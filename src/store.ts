@@ -811,7 +811,8 @@ export const useStore = create<MadsState>((set) => {
             pushEvent(msg.agentId, { id: mkId(), kind: "user", text: ev.text, attachments: ev.attachments });
           // Kachel-Übersicht: den zuletzt abgesetzten Auftrag merken (nur bei echtem Text — eine
           // reine Bild-Folgenachricht lässt den vorigen Auftrag stehen). Sichtbar bis zum Merge.
-          if (ev.text.trim()) patchAgent(msg.agentId, { lastPrompt: ev.text.trim() });
+          // Die automatische Resume-Anweisung (continuation) ist KEIN Nutzer-Auftrag → nicht übernehmen.
+          if (ev.text.trim() && !ev.continuation) patchAgent(msg.agentId, { lastPrompt: ev.text.trim() });
         } else if (ev.kind === "assistant_text" || ev.kind === "assistant_delta") {
           if (ev.text.trim()) pushEvent(msg.agentId, { id: mkId(), kind: "assistant", text: ev.text });
         } else if (ev.kind === "thinking") {
@@ -1566,6 +1567,9 @@ export const useStore = create<MadsState>((set) => {
             ahead: 0,
             dirty: false,
             live: false, // passiv — erst beim Senden / „Fortsetzen" aktivieren
+            // Auftrag überlebt den Neustart — AUSSER der Stream ist bereits gemergt/geschlossen + sauber
+            // (mergedClean): dann ist die Arbeit erledigt und die Kachel bleibt (wie in-Session) auftragsfrei.
+            lastPrompt: r.mergedClean ? undefined : r.lastPrompt,
           };
           if (!order.includes(r.agentId)) order.push(r.agentId);
         }
@@ -1590,6 +1594,7 @@ export const useStore = create<MadsState>((set) => {
         branch: a.branch,
         worktreePath: a.worktreePath,
         status: a.status,
+        lastPrompt: a.lastPrompt, // gemerkten Auftrag ins Resume mitgeben → Kachel behält ihn
         mock: false,
       });
     },
@@ -1666,6 +1671,7 @@ export const useStore = create<MadsState>((set) => {
 
     resumeAgent: async (r) => {
       const project = useStore.getState().project;
+      const existing = useStore.getState().agents[r.agentId]; // ggf. passive Kachel mit gemerktem Auftrag
       const agent: AgentVM = {
         id: r.agentId,
         label: r.label,
@@ -1688,6 +1694,8 @@ export const useStore = create<MadsState>((set) => {
         ahead: 0,
         dirty: false,
         live: true,
+        // Auftrag über das Resume hinweg behalten — der automatische „Fortsetzen"-Nudge ersetzt ihn nicht.
+        lastPrompt: r.lastPrompt ?? existing?.lastPrompt,
       };
       set((s) => ({
         agents: { ...s.agents, [r.agentId]: agent },
@@ -1723,6 +1731,7 @@ export const useStore = create<MadsState>((set) => {
         type: "start_agent",
         agentId: r.agentId,
         prompt,
+        continuation: true, // automatische Fortsetzung — überschreibt den gemerkten Auftrag NICHT
         label: r.label,
         role: r.role,
         model: r.model,

@@ -317,9 +317,12 @@ export class AgentSession {
     // undefined) fällt hier auf den Default (Opus) zurück, statt still auf Fable zu laufen.
     this.model = msg.model || DEFAULT_MODEL;
     this.effort = msg.effort;
-    this.lastPrompt = msg.prompt;
+    // Die automatische „Setze die Arbeit fort"-Anweisung beim Resume ist KEIN Nutzer-Auftrag: sie darf
+    // den zuletzt gemerkten (ggf. via Orchestrator aus der Registry vorgeladenen) Auftrag nicht
+    // überschreiben, sonst zeigt die Kachel nach dem Neustart den Nudge statt des echten Auftrags.
+    if (!msg.continuation) this.lastPrompt = msg.prompt;
     this.permissionMode = msg.permissionMode;
-    this.emitUserText(msg.prompt); // Start-Prompt beidseitig sichtbar machen
+    this.emitUserText(msg.prompt, undefined, msg.continuation); // Start-Prompt beidseitig sichtbar machen
     this.inbox.push(userMsg(msg.prompt));
     this.setStatus("running", "starting up");
 
@@ -673,6 +676,7 @@ export class AgentSession {
   }
 
   sendInput(text: string, images?: ImageInput[]): void {
+    if (text.trim()) this.lastPrompt = text; // Folge-Auftrag merken (Kachel-Übersicht, Resume-fest)
     this.emitUserText(text, images); // Folge-Anweisung beidseitig sichtbar machen
     this.inbox.push(userMsg(text, images));
     this.setStatus("running");
@@ -933,7 +937,7 @@ export class AgentSession {
   /** Die vom Menschen eingegebene Anweisung als Event ausspielen → auf ALLEN Clients (Mac + Remote)
    *  im Verlauf sichtbar, nicht nur dort, wo sie getippt wurde. Geht durch den zentralen Egress →
    *  Timeline-Puffer (Snapshot-Replay für später verbundene Remotes) UND Bridge-Tee. */
-  private emitUserText(text: string, images?: ImageInput[]): void {
+  private emitUserText(text: string, images?: ImageInput[], continuation?: boolean): void {
     const t = text.trim();
     // Vollbilder EINMAL auf Platte legen; ins Event geht nur die Referenz + das kleine Thumbnail.
     const attachments = (images ?? []).map((im) => this.persistAttachment(im));
@@ -942,7 +946,9 @@ export class AgentSession {
       ...envelope(),
       type: "agent_event",
       agentId: this.agentId,
-      event: { kind: "user_text", text: t, attachments: attachments.length ? attachments : undefined },
+      // continuation markiert die automatische Resume-Anweisung — sie steht zwar sichtbar im Verlauf,
+      // darf aber die Kachel-Auftragsanzeige NICHT übernehmen (Frontend überspringt sie dafür).
+      event: { kind: "user_text", text: t, attachments: attachments.length ? attachments : undefined, continuation: continuation || undefined },
     });
   }
 

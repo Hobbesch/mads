@@ -145,6 +145,13 @@ export class Orchestrator {
         }
         const session = new AgentSession(msg.agentId, () => this.persist(), this.permHooks(), () => this.activeStreamsSummary(msg.agentId));
         this.pool.set(msg.agentId, session);
+        // Resume: den zuletzt gemerkten Auftrag aus agents.json in die frische Session vorladen. Sonst
+        // stünde lastPrompt beim automatischen „Fortsetzen" (continuation) auf undefined und das nächste
+        // persist() würde den guten Wert auf der Platte überschreiben — der Auftrag ginge verloren.
+        if (this.project) {
+          const known = loadRegistry(this.project.repoRoot).find((e) => e.agentId === msg.agentId);
+          if (known?.lastPrompt) session.lastPrompt = known.lastPrompt;
+        }
         await session.start(msg);
         this.persist();
         void this.pollAgent(session); // initialer Status
@@ -1116,7 +1123,7 @@ export class Orchestrator {
         // „verschwinden"). Nur ein wirklich schmutziger Worktree (uncommittete Änderungen, unten) ist
         // ein echter Rest. FRÜHER wurde hier zudem AUTOMATISCH aufgeräumt — auch das ist weg:
         // Aufräumen ist ausschließlich ein EXPLIZITER Klick. So schließt/versteckt ein Neustart nie einen Stream.
-        offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url });
+        offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url, mergedClean: true });
         log(`[orchestrator] reconcile: ${c.branch} ${doneWord} + sauberer Worktree (unpushed=${res.unpushed} = Squash-Artefakt, ignoriert) → als fortsetzbar angeboten`);
       } else {
         // gemergt + WIRKLICH schmutziger Worktree (uncommittete/untrackte Änderungen) → Aufräum-Kandidat mit Warnung.
