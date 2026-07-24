@@ -937,6 +937,69 @@ button.primary:hover {
   font-size: 11px;
   color: var(--text-faint);
 }
+/* Teil-Agenten-Panel im Inspector (Hintergrund-Agenten-Übersicht). */
+.subagents-panel {
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--accent-weak);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.subagents-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+.subagent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.subagent-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .subagent-dot { animation: none; }
+}
+.subagent-label {
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.subagent-step {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--panel);
+}
+
+/* Aktive Teil-Agenten (Sub-Agenten) — dezenter Akzent-Hinweis auf der Kachel. */
+.card-subagents {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--accent-weak);
+}
 .card-cost {
   font-variant-numeric: tabular-nums;
 }

@@ -792,7 +792,10 @@ export class AgentSession {
                 const t = String(block.thinking ?? block.text ?? "");
                 if (t) this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "thinking", text: t } });
               } else if (block.type === "tool_use") {
-                this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId: String(block.id), name: String(block.name), input: (block.input ?? {}) as Record<string, unknown> } });
+                // parent_tool_use_id mitgeben: bei einem Sub-Agenten (Task/Agent-Tool) trägt die Nachricht
+                // die tool_use_id ihres Starters → das Frontend ordnet die Aktivität dem Teil-Agenten zu.
+                const parentToolUseId = (m.parent_tool_use_id as string | null) ?? undefined;
+                this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId: String(block.id), name: String(block.name), input: (block.input ?? {}) as Record<string, unknown>, parentToolUseId } });
                 this.setStatus("running", String(block.name));
               }
             }

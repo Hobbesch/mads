@@ -602,6 +602,21 @@ export function Inspector() {
         </div>
       )}
 
+      {Object.keys(agent.subAgents ?? {}).length > 0 && (
+        <div className="subagents-panel">
+          <div className="subagents-title">▶ Teil-Agenten · {Object.keys(agent.subAgents ?? {}).length} aktiv</div>
+          {Object.values(agent.subAgents ?? {})
+            .sort((a, b) => a.startedAt - b.startedAt)
+            .map((sa) => (
+              <div key={sa.id} className="subagent-row">
+                <span className="subagent-dot" title="läuft" />
+                <span className="subagent-label">{sa.label}</span>
+                {sa.currentStep && <span className="subagent-step">{sa.currentStep}</span>}
+              </div>
+            ))}
+        </div>
+      )}
+
       <div className="timeline-wrap">
         <MessageTimeline agentId={selectedId} />
       </div>

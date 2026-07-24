@@ -23,6 +23,7 @@ function AgentCard({ agent }: { agent: AgentVM }) {
   // Zuletzt abgesetzter Auftrag: sichtbar ab dem Absenden bis zum Merge. Danach (isMergedDone) und
   // bei passiv wiederhergestellten Streams ohne lastPrompt bleibt die Kachel prompt-frei.
   const showPrompt = agent.lastPrompt && !isMergedDone(agent);
+  const subCount = Object.keys(agent.subAgents ?? {}).length; // aktive Teil-Agenten (Sub-Agenten dieses Streams)
 
   return (
     <button
@@ -37,6 +38,11 @@ function AgentCard({ agent }: { agent: AgentVM }) {
       </div>
       {agent.branch && <div className="card-branch">⎇ {agent.branch}</div>}
       <div className="card-step">{agent.currentStep ?? STATUS_META[agent.status].label}</div>
+      {subCount > 0 && (
+        <div className="card-subagents" title="Aktive Teil-Agenten (Sub-Agenten, die dieser Stream gerade laufen hat)">
+          ▶ {subCount} Teil-Agent{subCount === 1 ? "" : "en"} aktiv
+        </div>
+      )}
       {badges.length > 0 && (
         <div className="badges">
           {badges.map((b, i) => (

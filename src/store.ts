@@ -154,6 +154,19 @@ export interface AgentVM {
    *  Gesetzt beim user_text-Event, sichtbar bis zum Merge (isMergedDone) — dann gelöscht. Reine
    *  Laufzeit-Anzeige, NICHT persistiert: passiv wiederhergestellte Streams haben daher keinen. */
   lastPrompt?: string;
+  /** Aktive Teil-Agenten (Sub-Agenten via Task/Agent-Tool), die dieser Stream gerade laufen hat —
+   *  Hintergrund-Agenten-Übersicht. Key = tool_use_id des Task-Aufrufs. Aus dem SDK-Strom abgeleitet
+   *  (parent_tool_use_id), reine Laufzeit-Info: bei Abschluss (tool_result) wird der Eintrag entfernt. */
+  subAgents?: Record<string, SubAgentEntry>;
+}
+
+/** Ein laufender Teil-Agent (SDK-Sub-Agent) eines Streams — für die Hintergrund-Aktivitäts-Übersicht. */
+export interface SubAgentEntry {
+  id: string; // tool_use_id des startenden Task/Agent-Aufrufs
+  label: string; // Kurzbeschreibung (description bzw. subagent_type aus dem Task-Input)
+  currentStep?: string; // zuletzt vom Teil-Agenten benutztes Tool (= „was tut er gerade")
+  startedAt: number;
+  lastAt: number;
 }
 
 export interface SidecarInfo {
@@ -524,6 +537,28 @@ export const useStore = create<MadsState>((set) => {
     pushEvent(agentId, { id: mkId(), kind: "notice", tone, text });
   }
 
+  // ── Teil-Agenten (Sub-Agenten via Task/Agent-Tool): Hintergrund-Aktivitäts-Übersicht ──
+  // Aus dem SDK-Strom abgeleitet: Task-tool_use startet einen, parent_tool_use_id-Aktivität hält ihn
+  // aktuell, tool_result auf die Task-id beendet ihn. Rein Laufzeit; sequentiell verarbeitet (kein Race).
+  function upsertSubAgent(agentId: string, subId: string, patch: { label?: string; currentStep?: string }) {
+    const a = useStore.getState().agents[agentId];
+    if (!a) return;
+    const now = Date.now();
+    const cur = a.subAgents ?? {};
+    const prev = cur[subId];
+    const entry: SubAgentEntry = prev
+      ? { ...prev, ...(patch.label ? { label: patch.label } : {}), ...(patch.currentStep ? { currentStep: patch.currentStep } : {}), lastAt: now }
+      : { id: subId, label: patch.label ?? "Teil-Agent", currentStep: patch.currentStep, startedAt: now, lastAt: now };
+    patchAgent(agentId, { subAgents: { ...cur, [subId]: entry } });
+  }
+  function removeSubAgent(agentId: string, subId: string) {
+    const a = useStore.getState().agents[agentId];
+    if (!a?.subAgents || !(subId in a.subAgents)) return;
+    const next = { ...a.subAgents };
+    delete next[subId];
+    patchAgent(agentId, { subAgents: next });
+  }
+
   function appendDevLog(agentId: string, line: DevLogLine) {
     set((s) => {
       const prev = s.devLog[agentId] ?? [];
@@ -688,10 +723,13 @@ export const useStore = create<MadsState>((set) => {
           if (!a) return {};
           const active = msg.status === "running" || msg.status === "starting";
           const workStartedAt = active ? (a.workStartedAt ?? Date.now()) : undefined;
+          // Terminaler Status (fertig/Fehler) → keine Teil-Agenten mehr aktiv (fängt den Rand-Fall ab,
+          // dass ein Stream endet, während ein Sub-Agent noch als „laufend" gemerkt war).
+          const subAgents = msg.status === "done" || msg.status === "error" ? undefined : a.subAgents;
           return {
             agents: {
               ...s.agents,
-              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now() },
+              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now(), subAgents },
             },
           };
         });
@@ -818,6 +856,16 @@ export const useStore = create<MadsState>((set) => {
         } else if (ev.kind === "thinking") {
           pushEvent(msg.agentId, { id: mkId(), kind: "thinking", text: ev.text });
         } else if (ev.kind === "tool_use") {
+          // Hintergrund-Agenten-Übersicht: Aktivität eines Teil-Agenten (parent_tool_use_id) hält seinen
+          // „aktuellen Schritt" aktuell; ein Task/Agent-tool_use startet einen neuen Teil-Agenten.
+          if (ev.parentToolUseId) upsertSubAgent(msg.agentId, ev.parentToolUseId, { currentStep: ev.name });
+          if (ev.name === "Task" || ev.name === "Agent") {
+            const label =
+              typeof ev.input?.description === "string" ? ev.input.description
+              : typeof ev.input?.subagent_type === "string" ? ev.input.subagent_type
+              : "Teil-Agent";
+            upsertSubAgent(msg.agentId, ev.toolUseId, { label });
+          }
           if (ev.name === "TodoWrite") {
             const todos = ((ev.input?.todos as TodoItem[]) ?? []).map((t) => ({
               content: String(t.content ?? ""),
@@ -845,6 +893,7 @@ export const useStore = create<MadsState>((set) => {
           }
         } else if (ev.kind === "tool_result") {
           completeTool(msg.agentId, ev.toolUseId, ev.output ?? ev.summary, ev.ok);
+          removeSubAgent(msg.agentId, ev.toolUseId); // war es der Abschluss eines Teil-Agenten? → aus der Übersicht nehmen
         }
         break;
       }

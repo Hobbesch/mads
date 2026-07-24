@@ -485,7 +485,10 @@ export type AgentEvent =
   // Vom Menschen eingegebene Anweisung (Prompt). Der Sidecar emittiert sie als Event, damit sie
   // auf ALLEN Clients (Mac + Remote) im Verlauf erscheint — nicht nur dort, wo sie getippt wurde.
   | { kind: "user_text"; text: string; attachments?: TimelineAttachment[]; continuation?: boolean }
-  | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown> }
+  // parentToolUseId: gesetzt, wenn dieser tool_use aus einem SUB-AGENTEN (Task/Agent-Tool) stammt —
+  // dann ist es die tool_use_id des Task-Aufrufs, der ihn startete. Erlaubt dem Frontend, die Aktivität
+  // dem richtigen Teil-Agenten zuzuordnen (Hintergrund-Agenten-Übersicht). null/fehlt = Hauptloop.
+  | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown>; parentToolUseId?: string }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; summary?: string; output?: string }
   | { kind: "system"; subtype: string; data?: Record<string, unknown> };
 
