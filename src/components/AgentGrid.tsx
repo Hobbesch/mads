@@ -34,7 +34,11 @@ function AgentCard({ agent }: { agent: AgentVM }) {
       <div className="card-head">
         {active ? <span className="card-spin" title="läuft" /> : <StatusDot status={agent.status} />}
         <span className="card-label">{agent.label}</span>
-        <span className={`role-badge ${agent.role}`}>{agent.role === "integrator" ? "Integrator" : "Sub"}</span>
+        {agent.reviewPr ? (
+          <span className="role-badge review" title={`Read-only Review von PR #${agent.reviewPr}`}>🔍 Review</span>
+        ) : (
+          <span className={`role-badge ${agent.role}`}>{agent.role === "integrator" ? "Integrator" : "Sub"}</span>
+        )}
       </div>
       {agent.branch && <div className="card-branch">⎇ {agent.branch}</div>}
       <div className="card-step">{agent.currentStep ?? STATUS_META[agent.status].label}</div>
@@ -86,6 +90,28 @@ function AgentCard({ agent }: { agent: AgentVM }) {
   );
 }
 
+/** Eingehende fremde PRs (Bots gefiltert) → read-only Review-Stream öffnen. */
+function IncomingPrsBanner() {
+  const incomingPrs = useStore((s) => s.incomingPrs);
+  const openReviewStream = useStore((s) => s.openReviewStream);
+  if (incomingPrs.length === 0) return null;
+  return (
+    <div className="incoming-prs">
+      <div className="incoming-prs-title">📥 Eingehende PRs · {incomingPrs.length}</div>
+      {incomingPrs.map((pr) => (
+        <div key={pr.number} className="incoming-pr">
+          <span className="incoming-pr-info">
+            <b>#{pr.number}</b> {pr.title} <span className="incoming-pr-author">@{pr.author}{pr.isFork ? " · Fork" : ""}{pr.isDraft ? " · Entwurf" : ""}</span>
+          </span>
+          <button className="incoming-pr-open" onClick={() => void openReviewStream(pr)} title="Als read-only Review-Stream öffnen (isolierter Worktree, Dev-Server, dann mergen)">
+            🔍 Review öffnen
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function AgentGrid() {
   const agents = useStore((s) => s.agents);
   const order = useStore((s) => s.order);
@@ -102,7 +128,9 @@ export function AgentGrid() {
 
   if (list.length === 0 && doneSubs.length === 0) {
     return (
-      <div className="empty-state">
+      <>
+        <IncomingPrsBanner />
+        <div className="empty-state">
         <div className="empty-title">Keine aktiven Agenten</div>
         <div className="empty-sub">
           {project ? (
@@ -117,12 +145,14 @@ export function AgentGrid() {
             </>
           )}
         </div>
-      </div>
+        </div>
+      </>
     );
   }
 
   return (
     <>
+      <IncomingPrsBanner />
       {list.length > 0 && (
         <div className="grid">
           {list.map((a) => (

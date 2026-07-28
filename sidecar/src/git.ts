@@ -1135,6 +1135,65 @@ export async function createPr(
   return { ok: false, error: lastErr, transient };
 }
 
+/** Offene PRs des Repos (roh) — für die „eingehende PRs"-Erkennung. Bot-/mads-Filter macht der Aufrufer. */
+export async function listOpenPrs(
+  repoRoot: string,
+): Promise<Array<{ number: number; title: string; author: string; headRefName: string; url: string; isFork: boolean; isDraft: boolean }>> {
+  const r = await gh(
+    ["pr", "list", "--state", "open", "--limit", "50", "--json", "number,title,author,headRefName,isCrossRepository,url,isDraft"],
+    repoRoot,
+    GH_TIMEOUT_MS,
+  );
+  if (r.code !== 0) return [];
+  try {
+    const arr = JSON.parse(r.stdout) as Array<Record<string, unknown>>;
+    return arr.map((p) => ({
+      number: Number(p.number),
+      title: String(p.title ?? ""),
+      author: String((p.author as { login?: string })?.login ?? ""),
+      headRefName: String(p.headRefName ?? ""),
+      url: String(p.url ?? ""),
+      isFork: p.isCrossRepository === true,
+      isDraft: p.isDraft === true,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** Isolierten READ-ONLY Worktree auf dem Stand eines PRs anlegen — fork-sicher über den `pull/<#>/head`-
+ *  Ref (existiert für JEDEN PR). Lokaler Review-Branch `mads-review/pr-<#>`; kein Remote-Tracking, damit
+ *  nie versehentlich auf den fremden Branch gepusht wird. Merge läuft später über die PR-Nummer. */
+export async function createReviewWorktree(
+  repoRoot: string,
+  agentId: string,
+  prNumber: number,
+): Promise<{ ok: true; path: string; branch: string } | { ok: false; error: string }> {
+  const branch = `mads-review/pr-${prNumber}`;
+  const path = worktreePathFor(repoRoot, agentId);
+  // Idempotent: einen Rest aus einer früheren Sitzung (Worktree/Branch liegen noch da) forciert wegräumen,
+  // damit ein erneutes Öffnen desselben PR-Reviews sauber startet.
+  if (existsSync(path)) await git(["-C", repoRoot, "worktree", "remove", "--force", path], repoRoot);
+  await git(["-C", repoRoot, "worktree", "prune"], repoRoot); // verwaiste Registrierung (Pfad manuell gelöscht) lösen
+  await git(["-C", repoRoot, "branch", "-D", branch], repoRoot); // egal ob vorhanden
+  const f = await git(["-C", repoRoot, "fetch", "origin", "--force", `pull/${prNumber}/head:${branch}`], repoRoot);
+  if (f.code !== 0) return { ok: false, error: (f.stderr || f.stdout).trim() };
+  const w = await git(["-C", repoRoot, "worktree", "add", path, branch], repoRoot);
+  if (w.code !== 0) {
+    await git(["-C", repoRoot, "branch", "-D", branch], repoRoot); // Branch angelegt, Worktree nicht → kein Müll
+    return { ok: false, error: (w.stderr || w.stdout).trim() };
+  }
+  try {
+    ensureMadsDir(path);
+  } catch {
+    /* best effort */
+  }
+  // BEWUSST KEIN seedLocalDevFiles: ein Review-Worktree hält FREMDEN (bei Forks beliebigen) PR-Code.
+  // Würde man die lokalen Secrets (.env/appsettings/credentials …) hineinseeden, könnten die vom PR-Autor
+  // kontrollierten Dev-/Postinstall-Skripte sie lesen/exfiltrieren. Read-only Review bleibt secret-frei.
+  return { ok: true, path, branch };
+}
+
 /** Transiente GitHub-Server-Fehler (GraphQL-500 „Something went wrong", 5xx, Timeouts, sekundäres
  *  Rate-Limit) — GitHub empfiehlt Wiederholung. NICHT für echte Ablehnungen (Permission, Protection). */
 export function isTransientGhError(err: string): boolean {

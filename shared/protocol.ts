@@ -89,6 +89,9 @@ export type HostMessage =
   | StartDevServerMsg
   | StopDevServerMsg
   | ConfigureDevServerMsg
+  | OpenReviewStreamMsg
+  | MergeReviewMsg
+  | CloseReviewMsg
   | HandoffExportMsg
   | HandoffImportMsg
   | PromptSaveMsg
@@ -115,6 +118,54 @@ export interface StopDevServerMsg extends BaseMsg {
 export interface ConfigureDevServerMsg extends BaseMsg {
   type: "configure_devserver";
   agentId: string;
+}
+
+// ─── Review-Streams: eingehende (fremde) PRs read-only prüfen ────────────────
+/** Ein eingehender PR (nicht von mads erstellt) — Kandidat für einen Review-Stream. */
+export interface IncomingPr {
+  number: number;
+  title: string;
+  author: string;
+  headRefName: string;
+  url: string;
+  isFork: boolean;
+  isDraft: boolean;
+}
+/** „Eingehende PRs" — Liste fremder offener PRs (Bots gefiltert), die mads zum Review anbietet. */
+export interface IncomingPrsMsg extends BaseMsg {
+  type: "incoming_prs";
+  prs: IncomingPr[];
+}
+/** Einen eingehenden PR als READ-ONLY Review-Stream öffnen (isolierter Worktree auf dem PR-Stand,
+ *  keine KI-Session, Autopilot AUS — mads pusht NIE auf den fremden Branch). */
+export interface OpenReviewStreamMsg extends BaseMsg {
+  type: "open_review_stream";
+  prNumber: number;
+  headRefName: string;
+  title: string;
+  author: string;
+  url: string;
+}
+/** Den Review-PR über den Standard-Merge-Weg annehmen (`gh pr merge <#> --squash`) + Stream schließen. */
+export interface MergeReviewMsg extends BaseMsg {
+  type: "merge_review";
+  agentId: string;
+}
+/** Review-Stream verwerfen (ohne Merge): Worktree entfernen, Kachel schließen. Der fremde PR bleibt. */
+export interface CloseReviewMsg extends BaseMsg {
+  type: "close_review";
+  agentId: string;
+}
+/** Host→Client: ein gerade geöffneter Review-Stream (passive Kachel) — Descriptor zum Anlegen. */
+export interface ReviewStreamMsg extends BaseMsg {
+  type: "review_stream";
+  agentId: string;
+  label: string;
+  branch: string;
+  worktreePath: string;
+  reviewPr: number;
+  author: string;
+  url: string;
 }
 
 /**
@@ -433,6 +484,8 @@ export type SidecarMessage =
   | SpawnSubstreamsRequestMsg
   | DevServerStatusMsg
   | DevServerConfigMsg
+  | IncomingPrsMsg
+  | ReviewStreamMsg
   | DevServerLogMsg
   | ProjectLockedMsg
   | SidecarErrorMsg

@@ -22,6 +22,7 @@ import type {
   PullRequestInfo,
   GateStep,
   ResumableAgent,
+  IncomingPr,
   ReconcileSummaryMsg,
   HandoffResultMsg,
   AutonomyConfig,
@@ -158,6 +159,11 @@ export interface AgentVM {
    *  Hintergrund-Agenten-Übersicht. Key = tool_use_id des Task-Aufrufs. Aus dem SDK-Strom abgeleitet
    *  (parent_tool_use_id), reine Laufzeit-Info: bei Abschluss (tool_result) wird der Eintrag entfernt. */
   subAgents?: Record<string, SubAgentEntry>;
+  /** Gesetzt = dies ist ein READ-ONLY Review-Stream für einen FREMDEN PR (kein KI-Stream): PR-Nummer,
+   *  Autor, URL. Die Kachel zeigt statt „Fortsetzen" ein „PR mergen" + „Verwerfen". */
+  reviewPr?: number;
+  reviewAuthor?: string;
+  reviewUrl?: string;
 }
 
 /** Ein laufender Teil-Agent (SDK-Sub-Agent) eines Streams — für die Hintergrund-Aktivitäts-Übersicht. */
@@ -294,6 +300,8 @@ export interface MadsState {
   permissions: PermissionRequestMsg[];
   escalations: SidecarErrorMsg[];
   resumables: ResumableAgent[];
+  /** Eingehende fremde PRs (Bots gefiltert), die mads zum read-only Review anbietet. */
+  incomingPrs: IncomingPr[];
   /** Einmaliger GitHub-Abgleich beim Öffnen (FF main / aufgeräumt / Reste) — dismissbar. */
   reconcileSummary?: ReconcileSummaryMsg;
   /** Ergebnis des letzten Handoff-Export/-Imports — treibt einen dismissbaren Banner. */
@@ -413,6 +421,12 @@ export interface MadsState {
   startDevServer: (id: string) => Promise<void>;
   stopDevServer: (id: string) => Promise<void>;
   configureDevServer: (id: string) => Promise<void>;
+  /** Einen eingehenden PR als read-only Review-Stream öffnen. */
+  openReviewStream: (pr: IncomingPr) => Promise<void>;
+  /** Review-PR annehmen (squash-merge) + Stream schließen. */
+  mergeReview: (id: string) => Promise<void>;
+  /** Review-Stream verwerfen (ohne Merge) + Worktree entfernen. */
+  closeReview: (id: string) => Promise<void>;
   pollProject: () => Promise<void>;
   resumeAgent: (r: ResumableAgent) => Promise<void>;
   resumeAll: () => Promise<void>;
@@ -521,6 +535,23 @@ export const useStore = create<MadsState>((set) => {
       const a = s.agents[id];
       if (!a) return {};
       return { agents: { ...s.agents, [id]: { ...a, ...patch, lastEventAt: Date.now() } } };
+    });
+  }
+
+  /** Eine Kachel lokal entfernen (Agent + Verlauf + Diff-Panes + Dev-Log). Genutzt von stopAgent,
+   *  Review-Merge/-Verwerfen. */
+  function removeAgentLocal(id: string) {
+    set((s) => {
+      const agents = { ...s.agents };
+      delete agents[id];
+      const events = { ...s.events };
+      delete events[id];
+      const order = s.order.filter((x) => x !== id);
+      const prefix = `${id}::`;
+      const editsByFile = Object.fromEntries(Object.entries(s.editsByFile).filter(([k]) => !k.startsWith(prefix)));
+      const devLog = { ...s.devLog };
+      delete devLog[id];
+      return { agents, events, order, editsByFile, devLog, selectedId: s.selectedId === id ? order[0] : s.selectedId };
     });
   }
 
@@ -765,7 +796,7 @@ export const useStore = create<MadsState>((set) => {
         patchAgent(msg.agentId, { pr: msg.pr });
         break;
 
-      case "merge_result":
+      case "merge_result": {
         notice(
           msg.agentId,
           msg.ok ? "ok" : "err",
@@ -773,7 +804,49 @@ export const useStore = create<MadsState>((set) => {
             ? `✔ PR${msg.prNumber ? ` #${msg.prNumber}` : ""} nach main gemerged`
             : `⛔ Merge blockiert: ${msg.reasons.join(" · ")}`,
         );
+        // Review-Stream erfolgreich gemerged → Kachel entfernen (Sidecar hat den Worktree abgeräumt).
+        if (msg.ok && useStore.getState().agents[msg.agentId]?.reviewPr) removeAgentLocal(msg.agentId);
         break;
+      }
+
+      case "incoming_prs":
+        set({ incomingPrs: msg.prs });
+        break;
+
+      case "review_stream": {
+        // Neuer READ-ONLY Review-Stream (fremder PR) → als passive Kachel anlegen (keine KI-Session).
+        const id = msg.agentId;
+        set((s) => {
+          if (s.agents[id]) return {}; // schon da
+          const vm: AgentVM = {
+            id,
+            label: msg.label,
+            role: "sub",
+            status: "done",
+            costUsd: 0,
+            numTurns: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            mock: false,
+            permissionMode: "auto",
+            autopilot: "manual", // Review-Stream committet/pusht NIE
+            createdAt: Date.now(),
+            lastEventAt: Date.now(),
+            branch: msg.branch,
+            worktreePath: msg.worktreePath,
+            behind: 0,
+            ahead: 0,
+            dirty: false,
+            live: false,
+            reviewPr: msg.reviewPr,
+            reviewAuthor: msg.author,
+            reviewUrl: msg.url,
+          };
+          return { agents: { ...s.agents, [id]: vm }, order: [...s.order, id], selectedId: id };
+        });
+        notice(id, "accent", `🔍 Review-Stream für PR #${msg.reviewPr} (@${msg.author}) geöffnet — Dev-Server starten, prüfen, dann „PR mergen".`);
+        break;
+      }
 
       case "gate_result":
         patchAgent(msg.agentId, { gate: { ok: msg.ok, steps: msg.steps } });
@@ -1040,6 +1113,7 @@ export const useStore = create<MadsState>((set) => {
     permissions: [],
     escalations: [],
     resumables: [],
+    incomingPrs: [],
     reconcileSummary: undefined,
     collisions: [],
     prompts: [],
@@ -1535,6 +1609,28 @@ export const useStore = create<MadsState>((set) => {
       // Sidecar stellt .mads/run.json sicher (frische Vorlage bei leer/fehlend) und meldet den Pfad
       // per devserver_config zurück → dort öffnen wir die Datei im Editor (siehe Reducer).
       await sendHost({ ...envelope(), type: "configure_devserver", agentId: id });
+    },
+
+    openReviewStream: async (pr) => {
+      await sendHost({
+        ...envelope(),
+        type: "open_review_stream",
+        prNumber: pr.number,
+        headRefName: pr.headRefName,
+        title: pr.title,
+        author: pr.author,
+        url: pr.url,
+      });
+    },
+
+    mergeReview: async (id) => {
+      await sendHost({ ...envelope(), type: "merge_review", agentId: id });
+      // Kachel bleibt bis merge_result(ok) stehen (Merge kann fehlschlagen → dann keine falsche Entfernung).
+    },
+
+    closeReview: async (id) => {
+      await sendHost({ ...envelope(), type: "close_review", agentId: id });
+      removeAgentLocal(id); // Verwerfen ist sofortig — Kachel gleich weg
     },
 
     pollProject: async () => {

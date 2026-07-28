@@ -13,7 +13,7 @@ import { AgentSession, type PermissionHooks } from "./session.js";
 import { loadApprovedKinds, saveApprovedKinds } from "./permissions.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
-import { autoCommit, commitMainRelease, createPr, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
+import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
@@ -33,9 +33,14 @@ const SHARED_LANDFIRST_GLOBS = [
   "**/pnpm-lock.yaml",
   "**/go.sum",
 ];
-import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, ResumableAgent, SavedPrompt } from "../../shared/protocol.js";
+import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, ResumableAgent, SavedPrompt, OpenReviewStreamMsg } from "../../shared/protocol.js";
 
 const POLL_INTERVAL_MS = 25_000;
+
+/** Bot-Autoren (Renovate/Dependabot/…) — deren PRs gehören NICHT in die „eingehende PRs zum Review"-Liste. */
+function isBotAuthor(login: string): boolean {
+  return /\[bot\]$/i.test(login) || /^(renovate|dependabot|github-actions|copilot|snyk|greenkeeper)/i.test(login);
+}
 
 export class Orchestrator {
   private readonly pool = new Map<string, AgentSession>();
@@ -78,6 +83,10 @@ export class Orchestrator {
   // Höchstens EIN Stream-Dev-Server gleichzeitig (Standard-Ports → kein Konflikt). Ein Start
   // stoppt einen zuvor laufenden; jeder Teardown-Pfad (stop/cleanup/merge/switch/shutdown) killt ihn.
   private devServer?: DevServerRun;
+  // Offene READ-ONLY Review-Streams (fremde PRs), Key = agentId (`review-pr-<#>`). In-Memory (v1):
+  // beim Merge/Verwerfen sauber abgeräumt; ein Restart lässt evtl. Worktrees liegen (Discovery
+  // überspringt `mads-review/*`, damit sie nicht als Geister-Streams auftauchen).
+  private reviewStreams = new Map<string, { prNumber: number; branch: string; worktreePath: string; url: string; label: string; author: string }>();
 
   async dispatch(msg: HostMessage): Promise<void> {
     switch (msg.type) {
@@ -126,6 +135,10 @@ export class Orchestrator {
           this.gitState.clear();
           this.removed.clear();
           this.autoSyncConflicted.clear();
+          // Review-Streams gehören zum ALTEN Repo — Map leeren, sonst unterdrückt ein alter
+          // `review-pr-<#>`-Key einen gleichnummerierten PR im neuen Projekt. (Worktree-Rest ist
+          // harmlos: Discovery überspringt `mads-review/*`.)
+          this.reviewStreams.clear();
           log(`[orchestrator] project switch → previous pool stopped & cleared`);
         }
         this.project = { projectId: msg.projectId, repoRoot: msg.repoRoot, ...info };
@@ -217,6 +230,18 @@ export class Orchestrator {
 
       case "configure_devserver":
         this.handleConfigureDevServer(msg.agentId);
+        break;
+
+      case "open_review_stream":
+        await this.handleOpenReviewStream(msg);
+        break;
+
+      case "merge_review":
+        await this.handleMergeReview(msg.agentId);
+        break;
+
+      case "close_review":
+        await this.handleCloseReview(msg.agentId);
         break;
 
       case "create_pr":
@@ -1066,6 +1091,8 @@ export class Orchestrator {
       const reg = new Map(registry.map((e) => [e.agentId, e]));
       for (const wt of await discoverWorktrees(repoRoot)) {
         if (seen.has(wt.agentId) || this.pool.has(wt.agentId)) continue;
+        if (wt.branch.startsWith("mads-review/")) continue; // Review-Worktree-Rest → kein Geister-Stream
+
         const known = reg.get(wt.agentId);
         candidates.push({
           agentId: wt.agentId,
@@ -1189,6 +1216,7 @@ export class Orchestrator {
       await run("git", ["-C", this.project.repoRoot, "fetch", "origin"], this.project.repoRoot);
       for (const s of this.pool.values()) await this.pollAgent(s, true);
       await this.pollPassiveIntegrator(); // C: auch der NICHT fortgesetzte Integrator braucht git-Status
+      await this.pollIncomingPrs(); // eingehende fremde PRs → Review-Angebot
       if (this.autonomy.autoSync) await this.autoSyncPass();
       await this.autopilotPass();
       if (this.autonomy.collisionScan) await this.collisionPass();
@@ -1659,6 +1687,79 @@ export class Orchestrator {
     this.emit({ ...envelope(), type: "devserver_config", agentId, path: scaf.path, detected: scaf.services });
   }
 
+  // ─── Review-Streams: eingehende (fremde) PRs read-only prüfen ──────────────
+  /** Eingehende PRs erkennen (fremd, kein Bot, kein mads-Stream, nicht schon als Review offen) und dem
+   *  Frontend melden. Läuft im normalen Poll-Zyklus mit. */
+  private async pollIncomingPrs(): Promise<void> {
+    if (!this.project) return;
+    const prs = await listOpenPrs(this.project.repoRoot);
+    const incoming = prs.filter(
+      (p) =>
+        !isBotAuthor(p.author) &&
+        !p.headRefName.startsWith("mads/") &&
+        !p.headRefName.startsWith("mads-review/") &&
+        !this.reviewStreams.has(`review-pr-${p.number}`),
+    );
+    this.emit({ ...envelope(), type: "incoming_prs", prs: incoming });
+  }
+
+  /** Einen eingehenden PR als READ-ONLY Review-Stream öffnen: isolierter Worktree auf dem PR-Stand,
+   *  keine KI-Session, kein Autopilot → mads pusht NIE auf den fremden Branch. */
+  private async handleOpenReviewStream(msg: OpenReviewStreamMsg): Promise<void> {
+    if (!this.project) return;
+    const agentId = `review-pr-${msg.prNumber}`;
+    if (this.reviewStreams.has(agentId)) return; // schon offen
+    const res = await createReviewWorktree(this.project.repoRoot, agentId, msg.prNumber);
+    if (!res.ok) {
+      this.emitError(agentId, "spawn_failed", `Review-Stream für PR #${msg.prNumber} konnte nicht geöffnet werden: ${res.error}`);
+      return;
+    }
+    const label = `PR #${msg.prNumber}: ${msg.title}`.slice(0, 80);
+    this.reviewStreams.set(agentId, { prNumber: msg.prNumber, branch: res.branch, worktreePath: res.path, url: msg.url, label, author: msg.author });
+    this.emit({ ...envelope(), type: "review_stream", agentId, label, branch: res.branch, worktreePath: res.path, reviewPr: msg.prNumber, author: msg.author, url: msg.url });
+    // Kachel-Git-Status füllen (behind/ahead ggü. main) — rein informativ fürs Review.
+    const st = await gitStatus(this.project.repoRoot, res.path, res.branch, this.project.defaultBranch);
+    if (!st.unreliable) this.emitGitStatus(agentId, st);
+    log(`[orchestrator] Review-Stream geöffnet: PR #${msg.prNumber} (${res.branch}) in ${res.path}`);
+  }
+
+  /** Review-PR über den Standard-Weg annehmen: `gh pr merge <#> --squash` (fork-sicher, mit Retry gegen
+   *  transiente GitHub-Fehler), danach Review-Stream abräumen. */
+  private async handleMergeReview(agentId: string): Promise<void> {
+    const rv = this.reviewStreams.get(agentId);
+    if (!rv || !this.project) {
+      this.emitMergeResult(agentId, false, ["Kein Review-Stream für diese Kachel."]);
+      return;
+    }
+    const res = await mergePr(this.project.repoRoot, String(rv.prNumber), "squash");
+    if (!res.ok) {
+      this.emitMergeResult(agentId, false, [res.error], rv.prNumber);
+      return;
+    }
+    log(`[orchestrator] Review-PR #${rv.prNumber} gemerged (squash)`);
+    this.emitMergeResult(agentId, true, [], rv.prNumber);
+    await this.teardownReview(agentId, rv);
+  }
+
+  /** Review-Stream verwerfen (ohne Merge): Worktree + lokaler Review-Branch weg, Kachel schließt. Der
+   *  fremde PR bleibt unberührt. */
+  private async handleCloseReview(agentId: string): Promise<void> {
+    const rv = this.reviewStreams.get(agentId);
+    if (rv) await this.teardownReview(agentId, rv);
+  }
+
+  private async teardownReview(agentId: string, rv: { branch: string; worktreePath: string }): Promise<void> {
+    if (!this.project) return;
+    await this.stopDevServerIf(agentId); // Dev-Server hält den Worktree offen → erst killen
+    try {
+      await removeWorktree(this.project.repoRoot, rv.worktreePath, rv.branch);
+    } catch (e) {
+      log(`[orchestrator] Review-Teardown (${agentId}) fehlgeschlagen: ${String(e)}`);
+    }
+    this.reviewStreams.delete(agentId);
+    this.removed.add(agentId); // falls Discovery diesen agentId je sähe → nicht wiederbeleben
+  }
+
   private async handleStartDevServer(agentId: string): Promise<void> {
     if (!this.project) return;
     const repoRoot = this.project.repoRoot;
@@ -1679,13 +1780,28 @@ export class Orchestrator {
       });
       return;
     }
-    // Lokale, gitignorte Dev-Config sicherstellen (v. a. bei Worktrees VOR dem Seeding-Feature oder
-    // wenn seither Config dazukam) — idempotent, überschreibt nie eine vorhandene Datei.
-    try {
-      const seeded = seedLocalDevFiles(repoRoot, worktree);
-      if (seeded.length) log(`[orchestrator] devserver: ${seeded.length} lokale Config-Datei(en) nachgeseedet (${seeded.slice(0, 5).join(", ")})`);
-    } catch {
-      /* best effort */
+    const isReview = this.reviewStreams.has(agentId);
+    if (isReview) {
+      // Sicherheit: Ein Review-Worktree hält FREMDEN PR-Code. NIE Secrets hineinseeden (sonst könnten
+      // die vom PR-Autor kontrollierten Dev-Skripte sie lesen). Und WARNEN: der Start führt fremden Code aus.
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: {
+          kind: "assistant_text",
+          text: "⚠ Achtung: Der Dev-Server führt den Code dieses FREMDEN PR aus. Es werden bewusst keine lokalen Secrets in den Review-Worktree kopiert. Prüfe den Diff, bevor du startest.",
+        },
+      });
+    } else {
+      // Lokale, gitignorte Dev-Config sicherstellen (v. a. bei Worktrees VOR dem Seeding-Feature oder
+      // wenn seither Config dazukam) — idempotent, überschreibt nie eine vorhandene Datei.
+      try {
+        const seeded = seedLocalDevFiles(repoRoot, worktree);
+        if (seeded.length) log(`[orchestrator] devserver: ${seeded.length} lokale Config-Datei(en) nachgeseedet (${seeded.slice(0, 5).join(", ")})`);
+      } catch {
+        /* best effort */
+      }
     }
     const manifest = loadRunManifest(repoRoot);
     if (!manifest) {

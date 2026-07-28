@@ -43,6 +43,8 @@ export function Inspector() {
   const startDevServer = useStore((s) => s.startDevServer);
   const stopDevServer = useStore((s) => s.stopDevServer);
   const configureDevServer = useStore((s) => s.configureDevServer);
+  const mergeReview = useStore((s) => s.mergeReview);
+  const closeReview = useStore((s) => s.closeReview);
   const devLog = useStore((s) => (s.selectedId ? s.devLog[s.selectedId] ?? NO_DEVLOG : NO_DEVLOG));
   const devLogRef = useRef<HTMLDivElement>(null);
   const devLogStickRef = useRef(true); // an den unteren Rand „geklebt"? (nur dann folgen)
@@ -357,10 +359,43 @@ export function Inspector() {
           </div>
           {/* Cluster 2 — Aktions-Buttons (kontextabhängig). Bricht als eigene Einheit um. */}
           <div className="insp-ops">
+          {/* Review-Stream (fremder PR, read-only): PR annehmen ODER verwerfen — KEIN „Fortsetzen"
+              (es ist keine KI-Session). Dev-Server-Knopf steht separat weiter unten. */}
+          {agent.reviewPr && (
+            <>
+              <button
+                className="step-primary"
+                title={`PR #${agent.reviewPr} squash-mergen und Review-Stream schließen`}
+                onClick={() =>
+                  setConfirm({
+                    title: `PR #${agent.reviewPr} nach main mergen?`,
+                    body: (
+                      <p>
+                        Squash-merged den fremden PR nach <code>main</code> und schließt den Review-Stream. Außen-sichtbar.
+                        <br />
+                        <small>Kein automatischer CI-Check — deine Prüfung (Dev-Server/Diff) entscheidet.</small>
+                      </p>
+                    ),
+                    confirmLabel: "PR mergen",
+                    onConfirm: () => void mergeReview(selectedId),
+                  })
+                }
+              >
+                ✓ PR #{agent.reviewPr} mergen
+              </button>
+              <button
+                className="step-primary cleanup"
+                title="Review verwerfen (Worktree entfernen) — der fremde PR bleibt unberührt"
+                onClick={() => void closeReview(selectedId)}
+              >
+                ✕ Verwerfen
+              </button>
+            </>
+          )}
           {/* Passiv wiederhergestellt → erst reaktivieren, bevor Git-Aktionen möglich sind.
               Beim INTEGRATOR (Leitstelle) erst rückfragen: reaktivieren kann sofort Aktionen
               auslösen (versehentliches „Fortsetzen" hat genau das getan). */}
-          {!live && (
+          {!live && !agent.reviewPr && (
             <button
               className="step-primary"
               title="Stream fortsetzen (Session reaktivieren, dann weiterarbeiten)"
@@ -547,13 +582,24 @@ export function Inspector() {
               PR #{agent.pr.number} ↗
             </button>
           )}
-          <button
-            className="danger"
-            onClick={askStop}
-            title="Stoppen + aufräumen (Worktree/Branch entfernen bei Sub)"
-          >
-            Stop
-          </button>
+          {agent.reviewPr ? (
+            // Review-Stream: die generische „Stop" (pool-only stop_agent) greift hier NICHT und würde
+            // den Worktree lecken + den PR dauerhaft ausblenden. Stattdessen der PR-Link; Verwerfen/Mergen
+            // stehen unten als eigene Aktionen.
+            agent.reviewUrl && (
+              <button onClick={() => void openUrl(agent.reviewUrl!)} title="PR auf GitHub öffnen">
+                PR #{agent.reviewPr} ↗
+              </button>
+            )
+          ) : (
+            <button
+              className="danger"
+              onClick={askStop}
+              title="Stoppen + aufräumen (Worktree/Branch entfernen bei Sub)"
+            >
+              Stop
+            </button>
+          )}
           </div>
         </div>
       </header>
