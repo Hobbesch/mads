@@ -1729,7 +1729,9 @@ export const useStore = create<MadsState>((set) => {
             worktreePath: r.worktreePath,
             behind: 0,
             ahead: 0,
-            dirty: false,
+            // localChanges (gemergt + schmutziger Worktree = ungesicherte Arbeit) → dirty, damit die
+            // „Arbeit nicht gesichert"-Warnung sofort auf der Kachel steht (vor dem ersten Poll).
+            dirty: r.localChanges === true,
             live: false, // passiv — erst beim Senden / „Fortsetzen" aktivieren
             // Auftrag überlebt den Neustart — AUSSER der Stream ist bereits gemergt/geschlossen + sauber
             // (mergedClean): dann ist die Arbeit erledigt und die Kachel bleibt (wie in-Session) auftragsfrei.

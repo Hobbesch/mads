@@ -1175,10 +1175,13 @@ export class Orchestrator {
         offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url, mergedClean: true });
         log(`[orchestrator] reconcile: ${c.branch} ${doneWord} + sauberer Worktree (unpushed=${res.unpushed} = Squash-Artefakt, ignoriert) → als fortsetzbar angeboten`);
       } else {
-        // gemergt + WIRKLICH schmutziger Worktree (uncommittete/untrackte Änderungen) → Aufräum-Kandidat mit Warnung.
-        offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url, merged: true, localChanges: true });
-        residue.push(c.label);
-        log(`[orchestrator] reconcile: ${c.branch} ${doneWord}, aber schmutziger Worktree (dirty=${res.dirty} unpushed=${res.unpushed}) → zur Prüfung`);
+        // gemergt + WIRKLICH schmutziger Worktree (uncommittete/untrackte Änderungen): der „Rest" ist
+        // sehr oft AKTIVE, ungespeicherte Arbeit (nicht Müll — z. B. ein weitergebautes deploy.sh) und
+        // darf NICHT aus dem aktiven Grid in die Aufräum-Leiste verschwinden. Darum als AKTIVEN,
+        // fortsetzbaren Stream anbieten (localChanges → „Arbeit nicht gesichert"-Flag); Aufräumen bleibt
+        // ein EXPLIZITER manueller Schritt (Stop im Inspector). KEIN merged-Flag, KEIN residue.
+        offer.push({ ...c, prState: pr?.state, prNumber: pr?.number, prUrl: pr?.url, localChanges: true });
+        log(`[orchestrator] reconcile: ${c.branch} ${doneWord}, aber schmutziger Worktree (dirty=${res.dirty}) → aktiver Stream mit ungesicherter Arbeit (nicht Aufräum-Rest)`);
       }
     }
 
