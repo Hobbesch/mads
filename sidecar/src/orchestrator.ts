@@ -1917,6 +1917,22 @@ export class Orchestrator {
       });
       return;
     }
+    // Review-Stream: der Worktree hält FREMDEN PR-Code. NIEMALS automatisch „reparieren" (kein Agent
+    // auf fremdem Code, kein Push auf fremde Branches) — nur erklären. Ein Backend, das DB/Mail-Config
+    // braucht, scheitert hier erwartungsgemäß, weil bewusst KEINE lokalen Secrets geseedet werden; zum
+    // Ansehen des PR genügt meist das Frontend (läuft dank Survivor-Logik weiter, falls vorhanden).
+    if (this.reviewStreams.has(agentId)) {
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: {
+          kind: "assistant_text",
+          text: `⚠ Dev-Server „${service}" im Review-Stream beendet (exit ${code ?? "?"}). Im Review-Worktree werden bewusst KEINE lokalen Secrets geseedet — ein Backend, das DB/Mail-Config braucht, scheitert hier erwartungsgemäß. Zum Ansehen des PR genügt meist das Frontend (läuft weiter, falls vorhanden). Keine automatische Behebung an fremdem PR-Code.`,
+        },
+      });
+      return;
+    }
     const key = `${agentId}:${service}`;
     const tries = (this.devHealAttempts.get(key) ?? 0) + 1;
     this.devHealAttempts.set(key, tries);

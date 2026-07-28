@@ -269,6 +269,8 @@ export class DevServerRun {
   private readyTimer?: ReturnType<typeof setTimeout>;
   private readonly onCrash?: DevCrashHandler;
   private crashReported = false;
+  private degraded = false; // true, sobald ein Service abstürzte, andere aber weiterlaufen (Survivor-Modus)
+  private started = false; // true erst NACH der Spawn-Schleife — nie „running" melden, solange noch Services fehlen
   private readonly recentLogs = new Map<string, string[]>(); // pro Service, für die Crash-Diagnose
 
   constructor(agentId: string, worktree: string, manifest: RunManifest, onCrash?: DevCrashHandler) {
@@ -288,9 +290,19 @@ export class DevServerRun {
     send({ ...envelope(), type: "devserver_log", agentId: this.agentId, service, stream, line: capped });
   }
 
+  /** Alle NOCH lebenden (gespawnten, nicht abgestürzten) Services bereit? Nach einem Absturz das
+   *  richtige „läuft"-Kriterium — {@link allUp} zählt den toten Prozess mit und wäre nie wieder true. */
+  private liveAllReady(): boolean {
+    const live = this.procs.filter((p) => p.child?.pid != null);
+    return live.length > 0 && live.every((p) => p.ready);
+  }
+
   private primaryUrl(): string | undefined {
-    const openable = this.procs.filter((p) => p.spec.open && p.url);
-    const pool = openable.length ? openable : this.procs.filter((p) => p.url);
+    // Nur LEBENDE Services dürfen die „im Browser öffnen"-URL stellen — sonst würde nach einem Absturz
+    // (Survivor-Modus) der tote Service (dessen `url` gesetzt bleibt) einen Connection-refused-Link liefern.
+    const live = this.procs.filter((p) => p.child?.pid != null && p.url);
+    const openable = live.filter((p) => p.spec.open);
+    const pool = openable.length ? openable : live;
     return (pool.find((p) => p.ready) ?? pool[0])?.url;
   }
 
@@ -387,7 +399,13 @@ export class DevServerRun {
       this.emitLog(p.spec.name, stream, line);
       if (!p.ready && p.spec.ready && line.includes(p.spec.ready)) {
         p.ready = true;
-        if (this.state !== "running" && this.allUp()) {
+        // Normalstart: ALLE Services müssen leben+bereit sein (allUp verhindert ein verfrühtes „running",
+        // solange spätere Services noch nicht gespawnt sind). Im Survivor-Modus (degraded, nach einem
+        // Absturz) zählt allUp den toten Prozess mit und würde nie mehr true — dann reicht: alle LEBENDEN
+        // bereit, ABER erst wenn die Spawn-Schleife durch ist (`started`), sonst würde ein noch nicht
+        // gestarteter Service übersehen und verfrüht „running" gemeldet.
+        const promotable = this.degraded ? this.started && this.liveAllReady() : this.allUp();
+        if (this.state !== "running" && promotable) {
           this.state = "running";
           if (this.readyTimer) clearTimeout(this.readyTimer);
         }
@@ -411,14 +429,27 @@ export class DevServerRun {
       p.child = undefined;
       p.ready = false;
       if (this.stopping) return; // erwartetes Beenden (wir stoppen gerade)
-      // Unerwarteter Tod eines Service (z. B. Port belegt, Build-Fehler) → alles stoppen + melden.
       this.emitLog(p.spec.name, "stderr", `⚠ Prozess beendet (exit ${code ?? "?"}${signal ? `, ${signal}` : ""}).`);
-      this.state = "error";
-      this.emitStatus(`Service „${p.spec.name}" unerwartet beendet — siehe Log.`);
       const crashLog = [...(this.recentLogs.get(p.spec.name) ?? [])];
       const firstCrash = !this.crashReported; // nur EINMAL heilen (Kaskaden nicht doppelt anstoßen)
       this.crashReported = true;
-      void this.stop();
+      // Ein EINZELNER Service-Absturz reißt NICHT den ganzen Dev-Server ab: laufen noch andere Dienste
+      // (typisch das Frontend), bleiben sie am Leben. Sonst ließe sich z. B. ein reiner Frontend-PR nicht
+      // ansehen, nur weil das Backend scheitert — im Review-Worktree passiert das systematisch, weil dort
+      // bewusst KEINE lokalen Secrets geseedet werden (DB/Mail-Config fehlt). Erst wenn NICHTS mehr
+      // läuft → Fehler + Stop. onCrash feuert weiterhin (Selbstheilung/Meldung entscheidet der Aufrufer).
+      const survivors = this.procs.filter((x) => x.child?.pid != null);
+      if (survivors.length > 0) {
+        this.degraded = true; // ab jetzt zählt für „running" nur noch, ob alle LEBENDEN Dienste bereit sind
+        // „running", sobald alle NOCH laufenden Dienste bereit sind; sonst „starting" lassen, damit der
+        // Ready-Marker (degraded-Pfad in onLine) bzw. der Fallback-Timer sie hochstuft (readyTimer NICHT abbrechen).
+        this.state = this.liveAllReady() ? "running" : "starting";
+        this.emitStatus(`Service „${p.spec.name}" beendet (exit ${code ?? "?"}) — die übrigen Dienste laufen weiter, siehe Log.`);
+      } else {
+        this.state = "error";
+        this.emitStatus(`Service „${p.spec.name}" unerwartet beendet — siehe Log.`);
+        void this.stop();
+      }
       if (firstCrash) this.onCrash?.(p.spec.name, code, crashLog);
     });
   }
@@ -432,6 +463,8 @@ export class DevServerRun {
   async start(): Promise<void> {
     this.state = "starting";
     this.crashReported = false; // frischer Start → Selbstheilung wieder scharf
+    this.degraded = false; // frischer Start → wieder Normalstart-Semantik (allUp), kein Survivor-Modus
+    this.started = false; // Spawn-Schleife läuft noch → „running" frühestens nach der Schleife
     this.emitStatus();
     for (const p of this.procs) {
       if (this.stopping) return;
@@ -455,16 +488,19 @@ export class DevServerRun {
       if (this.stopping) return;
       this.spawnService(p);
     }
-    // „running", sobald alle Services mit Ready-Marker bereit sind (die ohne gelten sofort).
-    // (Ein früher gestorbener Service hätte via seinen Exit-Handler `stopping` gesetzt → oben return.)
-    this.state = this.allUp() ? "running" : "starting";
+    // Spawn-Schleife durch → ab jetzt darf „running" gemeldet werden (kein noch fehlender Service).
+    this.started = true;
+    // „running", sobald alle Services mit Ready-Marker bereit sind (die ohne gelten sofort). Ist während
+    // des Startens schon ein Service abgestürzt (degraded, aber andere leben weiter), zählen nur die
+    // LEBENDEN — sonst bliebe es wegen des toten Prozesses fälschlich in „starting".
+    this.state = (this.degraded ? this.liveAllReady() : this.allUp()) ? "running" : "starting";
     this.emitStatus();
     // Fallback: greift ein Ready-Marker nach 15 s nicht (z. B. Serilog formatiert die Kestrel-Zeile
     // anders), Bereitschaft annehmen — die Server laufen, nur die Erkennung schlug fehl.
     if (this.state === "starting") {
       this.readyTimer = setTimeout(() => {
         if (this.stopping || this.state !== "starting") return;
-        for (const p of this.procs) p.ready = true;
+        for (const p of this.procs) if (p.child?.pid != null) p.ready = true; // nur LEBENDE Dienste
         this.state = "running";
         this.emitStatus("Bereitschaft angenommen (Ready-Marker nicht erkannt) — siehe Log.");
       }, 15_000);
