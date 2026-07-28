@@ -83,9 +83,9 @@ export class Orchestrator {
   // Höchstens EIN Stream-Dev-Server gleichzeitig (Standard-Ports → kein Konflikt). Ein Start
   // stoppt einen zuvor laufenden; jeder Teardown-Pfad (stop/cleanup/merge/switch/shutdown) killt ihn.
   private devServer?: DevServerRun;
-  // Offene READ-ONLY Review-Streams (fremde PRs), Key = agentId (`review-pr-<#>`). In-Memory (v1):
-  // beim Merge/Verwerfen sauber abgeräumt; ein Restart lässt evtl. Worktrees liegen (Discovery
-  // überspringt `mads-review/*`, damit sie nicht als Geister-Streams auftauchen).
+  // Offene READ-ONLY Review-Streams (fremde PRs), Key = agentId (`review-pr-<#>`). Laufzeit-Spiegel;
+  // in agents.json persistiert (persistReviewEntry) und beim Start wiederhergestellt (hydrateReviewStreams).
+  // Beim Merge/Verwerfen wird Worktree + Registry-Eintrag abgeräumt.
   private reviewStreams = new Map<string, { prNumber: number; branch: string; worktreePath: string; url: string; label: string; author: string }>();
 
   async dispatch(msg: HostMessage): Promise<void> {
@@ -1200,6 +1200,7 @@ export class Orchestrator {
       this.emit({ ...envelope(), type: "reconcile_summary", mainFastForwarded, mainBehind, mainBlocked, cleaned, residue, seedGenerated });
     }
     log(`[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length} seed=${seedGenerated}`);
+    await this.hydrateReviewStreams(); // persistierte Review-Streams (fremde PRs) als Kacheln wiederherstellen
   }
 
   // ---------------------------------------------------------------- Polling
@@ -1709,6 +1710,7 @@ export class Orchestrator {
     if (!this.project) return;
     const agentId = `review-pr-${msg.prNumber}`;
     if (this.reviewStreams.has(agentId)) return; // schon offen
+    this.removed.delete(agentId); // evtl. Tombstone aus einem früheren Teardown derselben Sitzung lösen
     const res = await createReviewWorktree(this.project.repoRoot, agentId, msg.prNumber);
     if (!res.ok) {
       this.emitError(agentId, "spawn_failed", `Review-Stream für PR #${msg.prNumber} konnte nicht geöffnet werden: ${res.error}`);
@@ -1716,6 +1718,7 @@ export class Orchestrator {
     }
     const label = `PR #${msg.prNumber}: ${msg.title}`.slice(0, 80);
     this.reviewStreams.set(agentId, { prNumber: msg.prNumber, branch: res.branch, worktreePath: res.path, url: msg.url, label, author: msg.author });
+    this.persistReviewEntry(agentId); // in agents.json sichern → überlebt den App-Neustart
     this.emit({ ...envelope(), type: "review_stream", agentId, label, branch: res.branch, worktreePath: res.path, reviewPr: msg.prNumber, author: msg.author, url: msg.url });
     // Kachel-Git-Status füllen (behind/ahead ggü. main) — rein informativ fürs Review.
     const st = await gitStatus(this.project.repoRoot, res.path, res.branch, this.project.defaultBranch);
@@ -1757,7 +1760,58 @@ export class Orchestrator {
       log(`[orchestrator] Review-Teardown (${agentId}) fehlgeschlagen: ${String(e)}`);
     }
     this.reviewStreams.delete(agentId);
-    this.removed.add(agentId); // falls Discovery diesen agentId je sähe → nicht wiederbeleben
+    saveRegistry(this.project.repoRoot, loadRegistry(this.project.repoRoot).filter((e) => e.agentId !== agentId));
+    this.removed.add(agentId); // falls Discovery/persist diesen agentId je sähe → nicht wiederbeleben
+  }
+
+  /** Einen offenen Review-Stream als Registry-Eintrag persistieren (überlebt den App-Neustart). Kein
+   *  sessionId → offerResumable behandelt ihn NICHT als normalen Resume-Kandidaten; hydrateReviewStreams
+   *  stellt beim Start daraus die Kachel wieder her. */
+  private persistReviewEntry(agentId: string): void {
+    if (!this.project) return;
+    const rv = this.reviewStreams.get(agentId);
+    if (!rv) return;
+    const root = this.project.repoRoot;
+    const entry: RegistryEntry = {
+      agentId,
+      label: rv.label,
+      role: "sub",
+      branch: rv.branch,
+      worktreePath: rv.worktreePath,
+      reviewPr: rv.prNumber,
+      reviewAuthor: rv.author,
+      reviewUrl: rv.url,
+      status: "done",
+      mock: false,
+      updatedAt: Date.now(),
+    };
+    saveRegistry(root, [...loadRegistry(root).filter((e) => e.agentId !== agentId), entry]);
+  }
+
+  /** Persistierte Review-Streams beim Projekt-Öffnen wiederherstellen: Map füllen + Kachel + git_status
+   *  emittieren. Verwaiste Einträge (Worktree weg) aus der Registry entfernen. */
+  private async hydrateReviewStreams(): Promise<void> {
+    if (!this.project) return;
+    const root = this.project.repoRoot;
+    for (const e of loadRegistry(root).filter((r) => r.reviewPr != null)) {
+      if (this.reviewStreams.has(e.agentId)) continue;
+      if (!e.worktreePath || !existsSync(e.worktreePath)) {
+        saveRegistry(root, loadRegistry(root).filter((x) => x.agentId !== e.agentId)); // Worktree weg → Eintrag verwerfen
+        continue;
+      }
+      const branch = e.branch ?? `mads-review/pr-${e.reviewPr}`;
+      this.reviewStreams.set(e.agentId, {
+        prNumber: e.reviewPr!,
+        branch,
+        worktreePath: e.worktreePath,
+        url: e.reviewUrl ?? "",
+        label: e.label,
+        author: e.reviewAuthor ?? "",
+      });
+      this.emit({ ...envelope(), type: "review_stream", agentId: e.agentId, label: e.label, branch, worktreePath: e.worktreePath, reviewPr: e.reviewPr!, author: e.reviewAuthor ?? "", url: e.reviewUrl ?? "" });
+      const st = await gitStatus(root, e.worktreePath, branch, this.project.defaultBranch);
+      if (!st.unreliable) this.emitGitStatus(e.agentId, st);
+    }
   }
 
   private async handleStartDevServer(agentId: string): Promise<void> {

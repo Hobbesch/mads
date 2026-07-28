@@ -771,6 +771,11 @@ export interface ResumableAgent {
   merged?: boolean;
   /** Worktree hat ungespeicherte oder ungepushte lokale Reste → nicht still löschen. */
   localChanges?: boolean;
+  /** Gesetzt = persistierter READ-ONLY Review-Stream (fremder PR). Beim Start wird daraus die
+   *  Review-Kachel wiederhergestellt (nicht als normaler Resume-Kandidat behandelt). */
+  reviewPr?: number;
+  reviewAuthor?: string;
+  reviewUrl?: string;
   /** PR gemergt/geschlossen UND Worktree sauber, keine ungemergte Arbeit (ahead 0): wird zwar noch als
    *  fortsetzbar angeboten (bleibt im Grid), aber der zugehörige Auftrag ist ERLEDIGT → die Kachel zeigt
    *  ihn nach dem Neustart NICHT mehr (in-Session verbirgt ihn isMergedDone bereits — hier fehlt nur der
