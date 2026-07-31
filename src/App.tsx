@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useStore } from "./store";
 import { ensureNotificationPermission } from "./osNotify";
@@ -15,7 +16,11 @@ import { AboutDialog } from "./components/AboutDialog";
 import { ParallelDialog } from "./components/ParallelDialog";
 import { SaveToast } from "./components/SaveToast";
 import { StalenessBanner } from "./components/StalenessBanner";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import "./App.css";
+
+/** Status, die einen aktiven Stream markieren — vor dem Schließen des Hauptfensters wird davor gewarnt. */
+const ACTIVE_ON_CLOSE = new Set(["starting", "running", "waiting_input", "escalation"]);
 
 export default function App() {
   const init = useStore((s) => s.init);
@@ -40,6 +45,8 @@ export default function App() {
   const openRecentProject = useStore((s) => s.openRecentProject);
   const [showNew, setShowNew] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
+  // Sicherheits-Rückfrage vor dem Schließen des Hauptfensters (aktive Streams / ungesendeter Entwurf).
+  const [closeGuard, setCloseGuard] = useState<{ activeCount: number; hasDraft: boolean } | null>(null);
 
   useEffect(() => {
     void init();
@@ -62,6 +69,39 @@ export default function App() {
     const unlisten = listen("show-about", () => setShowAbout(true));
     return () => {
       void unlisten.then((un) => un());
+    };
+  }, []);
+
+  // Sicherheits-Warnung vor dem Schließen des HAUPTFENSTERS: laufen noch Streams ODER steht
+  // ungesendeter Text/Anhang im Composer, erst rückfragen — sonst geht der (nur im Fenster gehaltene)
+  // Composer-Entwurf verloren. Nur das Hauptfenster rendert <App/>, der Handler greift also
+  // ausschließlich hier; losgelöste Markdown-Fenster (md-*) sind unberührt. preventDefault MUSS synchron
+  // vor jedem await passieren (sonst schließt das Fenster trotzdem) → State erst danach setzen.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void getCurrentWindow()
+      .onCloseRequested((event) => {
+        const s = useStore.getState();
+        const activeCount = s.order.reduce((n, id) => {
+          const a = s.agents[id];
+          return a && ACTIVE_ON_CLOSE.has(a.status) ? n + 1 : n;
+        }, 0);
+        const hasDraft =
+          Object.values(s.drafts).some((t) => (t ?? "").trim().length > 0) ||
+          Object.values(s.draftImages).some((imgs) => (imgs?.length ?? 0) > 0) ||
+          Object.values(s.draftFiles).some((f) => (f?.length ?? 0) > 0);
+        if (activeCount === 0 && !hasDraft) return; // nichts zu verlieren → normal schließen
+        event.preventDefault(); // Schließen abfangen; erst nach Bestätigung wirklich zerstören
+        setCloseGuard({ activeCount, hasDraft });
+      })
+      .then((un) => {
+        if (disposed) un();
+        else unlisten = un;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -471,6 +511,32 @@ export default function App() {
 
       {showNew && <NewStreamDialog onClose={() => setShowNew(false)} />}
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
+      {closeGuard && (
+        <ConfirmDialog
+          title="mads-Hauptfenster schließen?"
+          danger
+          confirmLabel="Trotzdem schließen"
+          cancelLabel="Offen lassen"
+          body={
+            <>
+              {closeGuard.hasDraft && (
+                <p>Im Composer steht ungesendeter Text/Anhang — beim Schließen geht er verloren.</p>
+              )}
+              {closeGuard.activeCount > 0 && (
+                <p>
+                  {closeGuard.activeCount === 1
+                    ? "1 Stream ist noch aktiv"
+                    : `${closeGuard.activeCount} Streams sind noch aktiv`}{" "}
+                  — läuft im Hintergrund weiter, aber das Fenster verschwindet.
+                </p>
+              )}
+              <p>Zurückholen später über „Fenster → Hauptfenster" (⌘0) oder das Dock-Icon.</p>
+            </>
+          }
+          onConfirm={() => void getCurrentWindow().destroy()}
+          onClose={() => setCloseGuard(null)}
+        />
+      )}
       <PermissionDialog />
       <ParallelDialog />
       <ChangeOverlay />

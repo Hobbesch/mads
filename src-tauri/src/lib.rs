@@ -52,8 +52,18 @@ fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
         .select_all()
         .build()?;
 
+    // „Hauptfenster" holt das (evtl. versehentlich geschlossene) Hauptfenster zurück — neu erstellt,
+    // falls es nicht mehr existiert, sonst nur gezeigt/fokussiert. „Alle Fenster nach vorne holen" zeigt
+    // + entminimiert + fokussiert JEDES offene Fenster (auch versteckte/verdeckte Markdown-Fenster).
+    // Damit kann ein geschlossenes/verstecktes Fenster künftig selbstständig zurückgeholt werden.
+    let main_window_item = MenuItem::with_id(app, "main_window", "Hauptfenster", true, Some("CmdOrCtrl+0"))?;
+    let all_windows_item = MenuItem::with_id(app, "all_windows", "Alle Fenster nach vorne holen", true, None::<&str>)?;
+
     let window_menu = SubmenuBuilder::new(app, "Fenster")
         .minimize()
+        .separator()
+        .item(&main_window_item)
+        .item(&all_windows_item)
         .separator()
         .close_window()
         .build()?;
@@ -89,6 +99,8 @@ pub fn run() {
                 let _ = app.emit("show-about", ());
             }
             "new_instance" => open_new_instance(),
+            "main_window" => show_or_create_main(app),
+            "all_windows" => show_all_windows(app),
             "quit" => graceful_exit(app),
             _ => {}
         })
@@ -117,12 +129,16 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
+        .run(|app_handle, event| match event {
             // Jeder reguläre Exit-Pfad (Dock-Beenden, letztes Fenster zu …) wird abgefangen
             // und über graceful_exit beendet — sonst crasht der ggml-metal-Teardown.
-            if let tauri::RunEvent::Exit = event {
-                graceful_exit(app_handle);
-            }
+            tauri::RunEvent::Exit => graceful_exit(app_handle),
+            // macOS: Klick aufs Dock-Icon → Hauptfenster zurückholen/erstellen, auch wenn noch ein
+            // Doc-Fenster sichtbar ist (has_visible_windows). So ist ein versehentlich geschlossenes
+            // Hauptfenster mit der gewohnten Geste sofort wieder da (ohne App-Neustart).
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_or_create_main(app_handle),
+            _ => {}
         });
 }
 
@@ -218,6 +234,46 @@ fn open_new_instance() {
                 let _ = std::process::Command::new("open").arg("-n").arg(bundle).spawn();
             }
         }
+    }
+}
+
+/// Holt das Hauptfenster (Label „main") nach vorne — und erstellt es NEU, falls es (versehentlich)
+/// geschlossen wurde. Das Schließen eines Fensters lässt den Sidecar am Leben (nur der App-Quit
+/// beendet ihn) und `start_sidecar` ist idempotent → das neu erstellte Fenster hängt sich wieder an
+/// den laufenden Orchestrator, alle Streams sind sofort zurück. Ohne diesen Weg gäbe es keine
+/// Möglichkeit, ein geschlossenes Hauptfenster ohne kompletten App-Neustart zurückzuholen.
+fn show_or_create_main(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+    // Neu erstellen — spiegelt die Fenster-Konfig aus tauri.conf.json. Label „main" → erbt die
+    // Capabilities aus default.json/fs.json, sodass fs/Sidecar/Fenster-APIs sofort wieder greifen.
+    let _ = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .title("mads")
+        .inner_size(1280.0, 832.0)
+        .min_inner_size(900.0, 600.0)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        // dragDropEnabled:false spiegeln — sonst fängt der OS-Handler Datei-Drops ab und die
+        // HTML5-Drag&Drop-Ablage im Composer („Drag&Drop für Dateien") funktioniert im neuen Fenster nicht.
+        .disable_drag_drop_handler()
+        .build();
+}
+
+/// Zeigt + entminimiert + fokussiert JEDES offene Fenster — bringt versteckte/verdeckte Fenster
+/// (z. B. losgelöste Markdown-Fenster) zuverlässig wieder nach vorne — und stellt sicher, dass das
+/// Hauptfenster existiert. Gegenstück zum versehentlichen „Fenster weg".
+fn show_all_windows(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    show_or_create_main(app);
+    for win in app.webview_windows().into_values() {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
     }
 }
 
