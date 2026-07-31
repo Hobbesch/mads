@@ -37,9 +37,14 @@ import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, Resumabl
 
 const POLL_INTERVAL_MS = 25_000;
 
-/** Bot-Autoren (Renovate/Dependabot/…) — deren PRs gehören NICHT in die „eingehende PRs zum Review"-Liste. */
+/** Bot-Autoren (Renovate/Dependabot/…) — deren PRs gehören NICHT in die „eingehende PRs zum Review"-Liste.
+ *  `gh pr list --json author` liefert GitHub-App-Actors mit „app/"-Präfix (z. B. „app/github-actions",
+ *  „app/dependabot") — deshalb reicht die alte, auf den Namensanfang verankerte Prüfung nicht: „app/" ist
+ *  ausschließlich Apps/Bots vorbehalten, also gilt jedes „app/…" als Bot; zusätzlich „[bot]"-Suffix und die
+ *  bekannten Namen (auch NACH einem evtl. „app/"-Präfix). */
 function isBotAuthor(login: string): boolean {
-  return /\[bot\]$/i.test(login) || /^(renovate|dependabot|github-actions|copilot|snyk|greenkeeper)/i.test(login);
+  const name = login.replace(/^app\//i, "");
+  return /^app\//i.test(login) || /\[bot\]$/i.test(login) || /^(renovate|dependabot|github-actions|copilot|snyk|greenkeeper)/i.test(name);
 }
 
 export class Orchestrator {
