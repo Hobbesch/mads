@@ -24,13 +24,22 @@ function AgentCard({ agent }: { agent: AgentVM }) {
   // bei passiv wiederhergestellten Streams ohne lastPrompt bleibt die Kachel prompt-frei.
   const showPrompt = agent.lastPrompt && !isMergedDone(agent);
   const subCount = Object.keys(agent.subAgents ?? {}).length; // aktive Teil-Agenten (Sub-Agenten dieses Streams)
+  const startDevServer = useStore((s) => s.startDevServer);
+  const stopDevServer = useStore((s) => s.stopDevServer);
+  const ds = agent.devServer;
+  // Dev-Server nur in Sub-Streams mit eigenem Worktree (spiegelt die Inspector-Gate-Logik).
+  const canDev = agent.role === "sub" && !!agent.worktreePath;
+  // „läuft/startet" (nicht: gestoppt/Fehler/unkonfiguriert) → diese Kachel hält den (einzigen) Dev-Server.
+  const devOn = !!ds && ds.state !== "stopped" && ds.state !== "error" && ds.state !== "unconfigured";
 
   return (
-    <button
-      className={`card${selectedId === agent.id ? " selected" : ""}${needsInput ? " needs-input" : ""}${escalated ? " escalated" : ""}`}
-      style={{ "--agent-color": color } as CSSProperties}
-      onClick={() => select(agent.id)}
-    >
+    // Wrapper trägt den Dev-Server-Schalter als GESCHWISTER der Karten-Button (nicht verschachtelt →
+    // kein „nested interactive"); `has-dev` reserviert im Kopf Platz für den überlagernden Schalter.
+    <div className={`card-wrap${canDev ? " has-dev" : ""}`} style={{ "--agent-color": color } as CSSProperties}>
+      <button
+        className={`card${selectedId === agent.id ? " selected" : ""}${needsInput ? " needs-input" : ""}${escalated ? " escalated" : ""}`}
+        onClick={() => select(agent.id)}
+      >
       <div className="card-head">
         {active ? <span className="card-spin" title="läuft" /> : <StatusDot status={agent.status} />}
         <span className="card-label">{agent.label}</span>
@@ -86,7 +95,27 @@ function AgentCard({ agent }: { agent: AgentVM }) {
           <div className="card-prompt-body">{agent.lastPrompt}</div>
         </div>
       )}
-    </button>
+      </button>
+      {canDev && (
+        <button
+          type="button"
+          className={`card-dev${devOn ? " on" : ""}`}
+          aria-label={devOn ? "Dev-Server stoppen" : "Dev-Server starten"}
+          title={
+            devOn
+              ? `Dev-Server dieses Streams stoppen${ds && ds.state !== "running" ? ` (${ds.state}…)` : " (läuft)"}`
+              : "Dev-Server dieses Streams starten — ein anderer laufender wird zuerst gestoppt (nur einer gleichzeitig)"
+          }
+          onClick={(e) => {
+            e.stopPropagation(); // Klick trifft den überlagernden Knopf, nicht die Karte darunter
+            if (devOn) void stopDevServer(agent.id);
+            else void startDevServer(agent.id);
+          }}
+        >
+          {devOn ? "■" : "▶"}
+        </button>
+      )}
+    </div>
   );
 }
 

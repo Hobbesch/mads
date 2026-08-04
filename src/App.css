@@ -862,6 +862,20 @@ button.primary:hover {
   transition: border-color 0.15s, box-shadow 0.15s, transform 0.05s;
   color: var(--text);
 }
+/* Wrapper (Grid-Element): trägt die Karten-Button + den absolut überlagernden Dev-Server-Schalter als
+   GESCHWISTER → keine verschachtelten interaktiven Elemente, und der Schalter löst kein .card:active aus. */
+.card-wrap {
+  position: relative;
+  display: flex;
+}
+.card-wrap > .card {
+  flex: 1;
+  min-width: 0;
+}
+/* Platz oben rechts, damit der überlagernde Schalter das Rollen-Badge nicht verdeckt. */
+.card-wrap.has-dev .card-head {
+  padding-right: 28px;
+}
 .card:hover {
   border-color: var(--border-strong);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.07);
@@ -883,6 +897,39 @@ button.primary:hover {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+/* Dev-Server-Schalter auf der Kachel: ▶ startet / ■ stoppt. „on" (grün) = diese Kachel hält den einen
+   Stream-Dev-Server → sofort sichtbar, welcher Stream läuft. Absolut oben rechts, Geschwister der Karte. */
+.card-dev {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1;
+  transition: border-color 0.12s, color 0.12s, background 0.12s, transform 0.05s;
+}
+.card-dev:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.card-dev:active {
+  transform: scale(0.92);
+}
+.card-dev.on {
+  background: var(--s-green);
+  border-color: var(--s-green);
+  color: #fff;
 }
 /* Laufend-Spinner auf der Agent-Karte (nutzt @keyframes spin). */
 .card-spin {

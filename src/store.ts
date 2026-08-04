@@ -1595,8 +1595,13 @@ export const useStore = create<MadsState>((set) => {
     },
 
     startDevServer: async (id) => {
+      // NUR den geklickten Stream optimistisch auf „starting" setzen. Andere laufende NICHT vorab auf
+      // „stopped" spiegeln: der Orchestrator stoppt einen evtl. anderen erst NACH seinen Vorab-Checks
+      // (existiert der Worktree? gibt es eine run.json?) — schlägt der Start dort fehl, bleibt der alte
+      // Server am Leben. Nur sein echtes „stopped"-Event (das genau dann kommt, wenn er wirklich
+      // gestoppt wird) räumt die UI — so lügt die Kachel nie über einen noch laufenden Dev-Server.
       set((s) => ({ devLog: { ...s.devLog, [id]: [] } })); // altes Log verwerfen
-      patchAgent(id, { devServer: { state: "starting" } }); // optimistisch
+      patchAgent(id, { devServer: { state: "starting" } }); // optimistisch (nur dieser Stream)
       notice(id, "accent", "▶ Dev-Server startet…");
       await sendHost({ ...envelope(), type: "start_devserver", agentId: id });
     },
