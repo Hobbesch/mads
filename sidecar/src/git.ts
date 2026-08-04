@@ -1015,6 +1015,27 @@ export async function syncBranch(
   defaultBranch: string,
 ): Promise<{ ok: true; renamedAdrs?: { num: string; to: string }[] } | { ok: false; kind: EscalationKind; error: string }> {
   await run("git", ["-C", worktree, "fetch", "origin"], worktree);
+  // Der Worktree MUSS auf seinem Branch stehen, bevor rebased wird. Ein detached HEAD (der Zustand, den
+  // mads nach einer sauberen Integration hinterlässt) würde sonst den LOSEN Commit rebasen (No-Op) statt
+  // den Branch — der Branch-Ref bliebe „behind", und Auto-Sync liefe endlos. Reattach, verlustfrei:
+  //  - Branch ist Vorfahre des (detached) HEAD → Branch per `checkout -B` auf HEAD ziehen (KEINE
+  //    Working-Tree-Bewegung, keine eigenen Commits vorhanden); der folgende Rebase ist dann No-Op/FF.
+  //  - sonst (Branch hat eigene Commits) → Branch auschecken; der Rebase spielt seine Commits auf origin/<default>.
+  const headRef = await git(["-C", worktree, "symbolic-ref", "-q", "HEAD"], worktree);
+  if (headRef.code !== 0 || headRef.stdout.trim() !== `refs/heads/${branch}`) {
+    const branchIsAncestor = await git(["-C", worktree, "merge-base", "--is-ancestor", branch, "HEAD"], worktree);
+    const reattach =
+      branchIsAncestor.code === 0
+        ? await git(["-C", worktree, "checkout", "-B", branch, "HEAD"], worktree)
+        : await git(["-C", worktree, "checkout", branch], worktree);
+    if (reattach.code !== 0) {
+      return {
+        ok: false,
+        kind: "merge_conflict",
+        error: `Worktree ließ sich nicht auf ${branch} setzen (HEAD steht nicht auf dem Branch — z. B. detached HEAD, kollidierende Working-Tree-Änderungen oder Branch in einem anderen Worktree aktiv): ${(reattach.stderr || reattach.stdout).trim()}`,
+      };
+    }
+  }
   const rebase = await git(["-C", worktree, "rebase", `origin/${defaultBranch}`], worktree);
   if (rebase.code !== 0) {
     const errText = rebase.stderr || rebase.stdout;
