@@ -315,6 +315,9 @@ export interface MadsState {
   dictation: DictationVM;
   autonomy: AutonomyConfig;
   selectedId?: string;
+  /** Signal an App, den „Neuer Stream"-Dialog zu öffnen (z. B. Integrator-Guard → „Als Sub-Stream starten"
+   *  öffnet ihn vorbefüllt aus dem newStreamDraft). App setzt es beim Schließen zurück. */
+  newStreamRequested: boolean;
   debugLog: string[];
   /** Offener „Parallel starten"-Picker (nach Anforderung der Integrator-Einschätzung). */
   parallelPicker?: { agentId: string; options: { label: string; description: string }[] };
@@ -377,6 +380,7 @@ export interface MadsState {
     permissionMode?: PermissionMode;
   }) => Promise<void>;
   selectAgent: (id: string) => void;
+  requestNewStream: () => void;
   dismissEscalations: () => void;
   setDraft: (agentId: string, text: string) => void;
   setDraftImages: (agentId: string, images: ImageInput[]) => void;
@@ -1121,6 +1125,7 @@ export const useStore = create<MadsState>((set) => {
     dictation: { recording: false, transcribing: false },
     autonomy: { autoSync: true, collisionScan: true },
     selectedId: undefined,
+    newStreamRequested: false,
     debugLog: [],
     parallelPicker: undefined,
     drafts: {},
@@ -1273,6 +1278,8 @@ export const useStore = create<MadsState>((set) => {
             : {}),
       });
     },
+
+    requestNewStream: () => set({ newStreamRequested: true }),
 
     selectAgent: (id) => {
       set({ selectedId: id });

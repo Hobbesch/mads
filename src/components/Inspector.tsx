@@ -7,6 +7,7 @@ import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { agentBadges, nextStep, unsavedWork, gateDisabledReason, syncDisabledReason } from "../derive";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { saveNewStreamDraft, loadNewStreamDraft, draftHasContent } from "../newStreamDraft";
 import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
 import { ModelEffortPicker } from "./ModelEffortPicker";
@@ -80,6 +81,7 @@ export function Inspector() {
     null | { title: string; body: React.ReactNode; confirmLabel: string; danger?: boolean; onConfirm: () => void }
   >(null);
   const [dragging, setDragging] = useState(false); // Bild per Drag&Drop in den Composer
+  const [integratorGuard, setIntegratorGuard] = useState(false); // Rückfrage vor dem Senden an den Integrator (main)
   // Prompt-Verwaltungs-Dialog: HIER (außerhalb des Composer-<form>) gerendert, damit sein
   // Bearbeiten-Formular kein verschachteltes <form> im Composer wird.
   const [managePrompts, setManagePrompts] = useState(false);
@@ -102,12 +104,10 @@ export function Inspector() {
     );
   }
 
-  const submit = (e?: { preventDefault: () => void }) => {
-    e?.preventDefault();
+  // Der eigentliche Versand (nach evtl. Guard). Datei-Anhänge (Nicht-Bilder) als lesbare Referenzen in
+  // den Prompt hängen — der Agent liest sie über den Pfad (in `.mads/attachments/`, im cwd → keine Rückfrage).
+  const doSend = () => {
     let text = draft.trim();
-    if (!text && attached.length === 0 && attachedFiles.length === 0) return;
-    // Datei-Anhänge (Nicht-Bilder) als lesbare Referenzen in den Prompt hängen — der Agent
-    // liest sie über den Pfad (liegen in `.mads/attachments/`, im cwd → keine Rückfrage).
     if (attachedFiles.length) {
       const list = attachedFiles.map((f) => `- ${f.relPath}`).join("\n");
       text = `${text ? text + "\n\n" : ""}📎 Angehängte Dateien (bitte lesen):\n${list}`;
@@ -116,6 +116,38 @@ export function Inspector() {
     setDraft(selectedId, "");
     setDraftImages(selectedId, []);
     setDraftFiles(selectedId, []);
+  };
+
+  // Integrator-Guard „Als Sub-Stream starten": den getippten Text in einen frischen Sub-Stream-Entwurf
+  // legen und den „Neuer Stream"-Dialog vorbefüllt öffnen — so beginnt die Arbeit gleich im richtigen
+  // Sub-Stream statt (versehentlich) auf main. VERLUSTFREI: liegt bereits ein (nicht gespeicherter)
+  // „Neuer Stream"-Entwurf vor, wird er NICHT überschrieben — dann öffnet nur der Dialog, und der
+  // Integrator-Text bleibt im Composer. Bild-/Datei-Anhänge bleiben ohnehin im Composer (der Dialog
+  // kann sie nicht übernehmen). So geht in keinem Fall Text verloren.
+  const redirectToSubStream = () => {
+    const s = useStore.getState();
+    const existing = loadNewStreamDraft();
+    const hasPending = !!existing && draftHasContent({ label: existing.label ?? "", prompt: existing.prompt ?? "", branch: existing.branch ?? "" });
+    if (!hasPending) {
+      saveNewStreamDraft({ label: "", prompt: draft.trim(), role: "sub", model: s.defaultModel, effort: s.defaultEffort, branch: "", mode: "auto" });
+      setDraft(selectedId, ""); // Text lebt jetzt im persistenten Entwurf → übersteht Abbrechen des Dialogs
+    }
+    s.requestNewStream();
+  };
+
+  const submit = (e?: { preventDefault: () => void }) => {
+    e?.preventDefault();
+    if (!draft.trim() && attached.length === 0 && attachedFiles.length === 0) return;
+    // Guard gegen versehentliches Arbeiten im INTEGRATOR (main): er soll nur integrieren, nicht direkt
+    // umsetzen — Umsetzungen gehören in einen Sub-Stream. Greift bei jedem TEXT an den Integrator
+    // (nur-Anhänge ohne Text → direkt senden, ein Redirect wäre sinnlos). Der Integrator wartet
+    // Rückfragen NICHT im Composer ab (das läuft über den Permission-/Frage-Dialog), daher keine
+    // Status-Ausnahme. Beide Guard-Aktionen sind verlustfrei.
+    if (agent.role === "integrator" && !!draft.trim()) {
+      setIntegratorGuard(true);
+      return;
+    }
+    doSend();
   };
 
   // Bild-Dateien (aus Paste ODER Drag&Drop) als Anhänge übernehmen (base64, ImageInput).
@@ -854,6 +886,25 @@ export function Inspector() {
         />
       )}
       {managePrompts && <PromptManagerDialog onClose={() => setManagePrompts(false)} />}
+      {integratorGuard && (
+        <ConfirmDialog
+          title="Im Integrator (main) arbeiten?"
+          confirmLabel="Als Sub-Stream starten"
+          cancelLabel="Abbrechen"
+          secondary={{ label: "An Integrator senden", onClick: doSend }}
+          body={
+            <>
+              <p>
+                Das ist der <b>Integrator</b> (main) — er soll nur <b>integrieren</b>, nicht direkt umsetzen.
+                Umsetzungen gehören in einen Sub-Stream (main bleibt nur über grün-getestete PR-Merges aktuell).
+              </p>
+              <p>Deinen Text als neuen <b>Sub-Stream</b> starten — oder trotzdem an den Integrator senden?</p>
+            </>
+          }
+          onConfirm={redirectToSubStream}
+          onClose={() => setIntegratorGuard(false)}
+        />
+      )}
     </section>
   );
 }

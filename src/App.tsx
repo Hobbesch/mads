@@ -43,6 +43,7 @@ export default function App() {
   const handoff = useStore((s) => s.handoff);
   const dismissHandoff = useStore((s) => s.dismissHandoff);
   const openRecentProject = useStore((s) => s.openRecentProject);
+  const newStreamRequested = useStore((s) => s.newStreamRequested);
   const [showNew, setShowNew] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   // Sicherheits-Rückfrage vor dem Schließen des Hauptfensters (aktive Streams / ungesendeter Entwurf).
@@ -509,7 +510,14 @@ export default function App() {
         </div>
       </div>
 
-      {showNew && <NewStreamDialog onClose={() => setShowNew(false)} />}
+      {(showNew || newStreamRequested) && (
+        <NewStreamDialog
+          onClose={() => {
+            setShowNew(false);
+            if (newStreamRequested) useStore.setState({ newStreamRequested: false });
+          }}
+        />
+      )}
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {closeGuard && (
         <ConfirmDialog
