@@ -72,6 +72,9 @@ export class Orchestrator {
   /** B3: Zähler aufeinanderfolgender unzuverlässiger Polls je Agent — bei 5 einmalige Nutzer-Notiz. */
   private readonly unreliablePolls = new Map<string, number>();
   private readonly autopilotSecretNotified = new Set<string>();
+  /** Auto-Commit ist pausiert, solange der Dev-Server dieses Streams läuft — je Dev-Server-Sitzung
+   *  einmal erklären, damit „nichts passiert" nicht rätselhaft wirkt (cleared beim Dev-Server-Stopp). */
+  private readonly autopilotDevserverDeferred = new Set<string>();
   /** Fremd-Edit-Schutz: je Agent einmalig gewarnt, dass der Autopilot wegen fremder Worktree-
    *  Änderungen pausiert (verhindert Warn-Spam; wird bei sauberer Lage wieder gelöscht). */
   private readonly foreignEditNotified = new Set<string>();
@@ -1300,8 +1303,24 @@ export class Orchestrator {
           // Anhalten + einmal warnen; der Mensch committet dann bewusst manuell (oder entfernt den Edit).
           // Läuft in diesem Worktree ein Dev-Server, verändert er legitim Dateien (Build-Output,
           // Hot-Reload-Artefakte) — das würde den Fremd-Edit-Guard fälschlich auslösen. Solange der
-          // Nutzer testet, gar nicht auto-committen (wie syncOne den Auto-Rebase aufschiebt).
-          if (this.devServer?.agentId === s.agentId) continue;
+          // Nutzer testet, gar nicht auto-committen (wie syncOne den Auto-Rebase aufschiebt). Einmal
+          // je Dev-Server-Sitzung erklären, sonst wirkt das ausbleibende Auto-Commit rätselhaft.
+          if (this.devServer?.agentId === s.agentId) {
+            if (!this.autopilotDevserverDeferred.has(s.agentId)) {
+              this.autopilotDevserverDeferred.add(s.agentId);
+              this.emit({
+                ...envelope(),
+                type: "agent_event",
+                agentId: s.agentId,
+                event: {
+                  kind: "assistant_text",
+                  text: "⏸ Auto-Commit pausiert, solange der Dev-Server dieses Streams läuft (er verändert beim Testen legitim Dateien). Stoppe den Dev-Server → Auto-Commit läuft weiter, oder committe jetzt mit „Committen“.",
+                },
+              });
+            }
+            continue;
+          }
+          this.autopilotDevserverDeferred.delete(s.agentId); // Dev-Server nicht (mehr) aktiv → Hinweis wieder scharf
           if (s.turnFingerprint) {
             const cur = await worktreeFingerprint(s.worktreePath);
             if (cur !== s.turnFingerprint) {
@@ -1898,6 +1917,7 @@ export class Orchestrator {
     if (!ds) return;
     if (agentId !== undefined && ds.agentId !== agentId) return;
     await ds.stop();
+    this.autopilotDevserverDeferred.delete(ds.agentId); // Dev-Server aus → „Auto-Commit pausiert"-Hinweis wieder scharf
     this.devServer = undefined;
   }
 
