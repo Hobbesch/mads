@@ -13,7 +13,7 @@ import { AgentSession, type PermissionHooks } from "./session.js";
 import { loadApprovedKinds, saveApprovedKinds } from "./permissions.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
-import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
+import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
@@ -1036,7 +1036,12 @@ export class Orchestrator {
       // NICHT den Pool über die Registry drüberbügeln: passiv wiederhergestellte Kacheln
       // (v.a. der Integrator, der beim Reopen live:false ist → NICHT im Pool) blieben sonst
       // nicht erhalten und „main" verschwindet. mergeRegistry bewahrt sie (siehe persistence.ts).
-      const merged = mergeRegistry(loadRegistry(this.project.repoRoot), poolEntries, this.removed, existsSync);
+      const merged = mergeRegistry(loadRegistry(this.project.repoRoot), poolEntries, this.removed, existsSync, (e) =>
+        log(
+          `[orchestrator] persist: Sub „${e.label}" (${e.agentId}) hat keinen Worktree mehr unter ${e.worktreePath} → aus Registry entfernt ` +
+            `(Branch/Transcripts bleiben; Worktree-Discovery bietet ihn beim nächsten Öffnen ggf. erneut an)`,
+        ),
+      );
       saveRegistry(this.project.repoRoot, merged);
     } catch (e) {
       log(`[orchestrator] persist failed: ${String(e)}`);
@@ -1076,6 +1081,11 @@ export class Orchestrator {
     const defaultBranch = this.project?.defaultBranch ?? "main";
     const ff = await fastForwardMain(repoRoot, defaultBranch);
     const mainFastForwarded = ff.ff;
+
+    // Cross-Machine-Härtung: Registry-Subs, deren worktreePath unter einem FREMDEN Home liegt (Repo
+    // zwischen zwei Macs kopiert), auf den lokalen Kanon-Pfad umziehen — MUSS vor dem Kandidaten-Loop
+    // laufen (der existsSync(worktreePath) prüft) und vor jedem persist, das sie sonst still verwürfe.
+    const relocated = await this.relocateForeignWorktrees(repoRoot);
 
     const registry = loadRegistry(repoRoot);
     const seen = new Set<string>();
@@ -1207,11 +1217,58 @@ export class Orchestrator {
     const mainBehind = ff.blocked ? ff.behind : 0;
     const mainBlocked = ff.blocked;
     if (offer.length > 0) this.emit({ ...envelope(), type: "resumable_agents", agents: offer });
-    if (mainFastForwarded > 0 || mainBehind > 0 || cleaned.length > 0 || residue.length > 0 || seedGenerated > 0) {
-      this.emit({ ...envelope(), type: "reconcile_summary", mainFastForwarded, mainBehind, mainBlocked, cleaned, residue, seedGenerated });
+    if (mainFastForwarded > 0 || mainBehind > 0 || cleaned.length > 0 || residue.length > 0 || seedGenerated > 0 || relocated.length > 0) {
+      this.emit({ ...envelope(), type: "reconcile_summary", mainFastForwarded, mainBehind, mainBlocked, cleaned, residue, seedGenerated, relocated });
     }
-    log(`[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length} seed=${seedGenerated}`);
+    log(`[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length} seed=${seedGenerated} relocated=${relocated.length}`);
     await this.hydrateReviewStreams(); // persistierte Review-Streams (fremde PRs) als Kacheln wiederherstellen
+  }
+
+  /**
+   * Cross-Machine-Härtung: Registry-Einträge, deren `worktreePath` unter einem FREMDEN Home liegt
+   * (das Repo wurde zwischen zwei Macs mit verschiedenen Home-Verzeichnissen kopiert — /Users/amedici
+   * ↔ /Users/alessandromedici), auf den lokalen Kanon-Pfad umziehen, STATT sie später still zu
+   * verlieren. Ohne das griff die Kette: fremder Pfad → existsSync(false) → aus Kandidaten UND (beim
+   * nächsten persist) aus der Registry gefallen → „branch mads/<name> already exists" beim Neuanlegen.
+   * Branch (`mads/<name>` bzw. `mads-review/pr-<#>`) und Transcripts (per agentId) wurden mitkopiert
+   * und sind intakt; nur der Worktree fehlt lokal und wird aus dem Branch neu ausgecheckt. Der
+   * aktualisierte `worktreePath` wird zurück in die Registry geschrieben. Liefert die Labels der
+   * umgezogenen Streams (für die Reconcile-Summary/Banner).
+   */
+  private async relocateForeignWorktrees(repoRoot: string): Promise<string[]> {
+    const registry = loadRegistry(repoRoot);
+    const foreign = registry.filter((e) => e.worktreePath && isForeignMadsWorktree(e.worktreePath, repoRoot, e.agentId));
+    if (foreign.length === 0) return []; // Normalfall: nichts Fremdes → keine git-Operationen
+    const relocated: string[] = [];
+    let changed = false;
+    for (const e of foreign) {
+      // Branch ableiten: Sub → e.branch; persistierter Review-Stream → mads-review/pr-<#>.
+      const branch = e.branch ?? (e.reviewPr != null ? `mads-review/pr-${e.reviewPr}` : undefined);
+      if (!branch) {
+        log(`[orchestrator] relocate: „${e.label}" (${e.agentId}) hat fremden Worktree-Pfad, aber keinen Branch → übersprungen`);
+        continue;
+      }
+      const res = await relocateWorktree(repoRoot, e.agentId, branch);
+      if (res.ok) {
+        log(
+          `[orchestrator] relocate: „${e.label}" (${e.agentId}) ${e.worktreePath} → ${res.path} ` +
+            `(${res.recreated ? "aus Branch neu ausgecheckt" : "lokal vorhanden, Admin-Link repariert"})`,
+        );
+        e.worktreePath = res.path; // mutiert den frisch geladenen Registry-Eintrag → unten persistiert
+        changed = true;
+        relocated.push(e.label);
+      } else {
+        log(`[orchestrator] relocate: „${e.label}" (${e.agentId}) konnte nicht umgezogen werden: ${res.error}`);
+      }
+    }
+    if (changed) {
+      try {
+        saveRegistry(repoRoot, registry);
+      } catch (err) {
+        log(`[orchestrator] relocate: Registry-Update fehlgeschlagen: ${String(err)}`);
+      }
+    }
+    return relocated;
   }
 
   // ---------------------------------------------------------------- Polling

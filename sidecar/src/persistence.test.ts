@@ -41,6 +41,24 @@ const exists = (p: string) => p === "/wt/a2"; // nur /wt/a2 existiert noch
   check("Integrator bleibt auch hier", out.some((e) => e.agentId === "integ-1"));
 }
 
+// Drop wird NICHT mehr still verworfen: onDrop meldet den verwaisten Sub (nur diesen, nicht den Integrator)
+{
+  const dropped: string[] = [];
+  const out = mergeRegistry([integ, subLive, subGone], [], new Set(), exists, (e) => dropped.push(e.agentId));
+  check("onDrop feuert für den verwaisten Sub", dropped.includes("sub-gone"));
+  check("onDrop feuert NICHT für den lebenden Sub", !dropped.includes("sub-live"));
+  check("onDrop feuert NICHT für den Integrator (kein worktreePath)", !dropped.includes("integ-1"));
+  check("genau EIN Drop gemeldet", dropped.length === 1);
+  check("verwaister Sub trotzdem raus", !out.some((e) => e.agentId === "sub-gone"));
+}
+
+// explizit entfernter Sub mit fehlendem Worktree → onDrop feuert NICHT (removed hat Vorrang)
+{
+  const dropped: string[] = [];
+  mergeRegistry([subGone], [], new Set(["sub-gone"]), exists, (e) => dropped.push(e.agentId));
+  check("removed-Eintrag löst KEIN onDrop aus", dropped.length === 0);
+}
+
 // explizit entfernt (removed) → raus, selbst der Integrator
 {
   const out = mergeRegistry([integ, subLive], [], new Set(["integ-1"]), exists);

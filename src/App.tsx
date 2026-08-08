@@ -28,6 +28,7 @@ export default function App() {
   const sidecar = useStore((s) => s.sidecar);
   const project = useStore((s) => s.project);
   const projectLocked = useStore((s) => s.projectLocked);
+  const authReloginNeeded = useStore((s) => s.authReloginNeeded);
   const pollProject = useStore((s) => s.pollProject);
   const resumables = useStore((s) => s.resumables);
   const resumeAgent = useStore((s) => s.resumeAgent);
@@ -336,6 +337,30 @@ export default function App() {
           </div>
         )}
 
+        {authReloginNeeded && (
+          <div className="escalation-banner">
+            <span className="escalation-text">
+              ✖ Authentifizierung fehlgeschlagen. Oft nur vorübergehend — sende den betroffenen Stream
+              einfach erneut. Bleibt es, ist dein Claude-Login abgelaufen: hier neu anmelden (kein Neustart nötig).
+            </span>
+            <button
+              className="banner-action"
+              title="Öffnet ein Terminal mit dem Befehl claude auth login (Browser-OAuth). mads sieht deinen Token nie."
+              onClick={() => void useStore.getState().reloginClaude()}
+            >
+              Bei Claude neu anmelden
+            </button>
+            <button
+              className="banner-close"
+              title="Hinweis schließen"
+              aria-label="Hinweis schließen"
+              onClick={() => useStore.getState().dismissAuthRelogin()}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {lastEscalation && (
           <div className="escalation-banner">
             <span className="escalation-text">
@@ -359,6 +384,7 @@ export default function App() {
             const rc = reconcileSummary;
             const hasGit = rc.mainFastForwarded > 0 || rc.cleaned.length > 0 || rc.residue.length > 0 || rc.mainBehind > 0;
             const seed = rc.seedGenerated ?? 0;
+            const relocated = rc.relocated ?? [];
             return (
               <div className={`reconcile-banner${rc.mainBehind > 0 ? " warn" : ""}`}>
                 <span className="reconcile-text">
@@ -383,6 +409,8 @@ export default function App() {
                   )}
                   {seed > 0 &&
                     `${hasGit ? " · " : ""}📦 ${seed} lokale Config-Datei(en) erkannt → werden in neue Streams kopiert (.mads/worktree-seed)`}
+                  {relocated.length > 0 &&
+                    `${hasGit || seed > 0 ? " · " : ""}🔀 ${relocated.length} Stream(s) von einem anderen Rechner wiederhergestellt (Worktree neu angelegt): ${relocated.join(", ")}`}
                 </span>
                 <button
                   className="banner-close"

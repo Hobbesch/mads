@@ -131,6 +131,63 @@ export async function discoverWorktrees(
   return out;
 }
 
+/**
+ * Erkennt einen mads-Worktree-Pfad, der zur kanonischen Struktur `…/mads-worktrees/<slug>/<agentId>`
+ * gehört, aber NICHT dem lokalen Kanon-Pfad (`worktreePathFor`) entspricht — der klassische
+ * Cross-Machine-Fall: das Repo wurde von einem Mac (`/Users/amedici/…`) auf einen anderen mit anderem
+ * Home (`/Users/alessandromedici/…`) kopiert. Der eingebackene absolute `worktreePath` (Registry +
+ * `.git/worktrees/<id>/gitdir`) zeigt dann ins Leere, obwohl Branch (`mads/<name>`) und Transcripts
+ * (per agentId) intakt mitkopiert wurden. Separator-sicher über die letzten drei Pfad-Segmente
+ * statt String-Präfixen — der lokale Worktree lässt sich vollständig aus repoRoot+agentId ableiten.
+ */
+export function isForeignMadsWorktree(worktreePath: string, repoRoot: string, agentId: string): boolean {
+  if (!worktreePath || worktreePath === worktreePathFor(repoRoot, agentId)) return false; // schon lokal-kanonisch
+  const p = worktreePath.replace(/[/\\]+$/, "");
+  return (
+    basename(p) === agentId &&
+    basename(dirname(p)) === repoSlug(repoRoot) &&
+    basename(dirname(dirname(p))) === "mads-worktrees"
+  );
+}
+
+/**
+ * Cross-Machine-Reparatur eines Sub-/Review-Streams: den unter einem fremden Home verwaisten Worktree
+ * auf den LOKALEN Kanon-Pfad (`worktreePathFor`) umziehen. Branch + Transcripts sind kopiert und
+ * intakt — nur das Arbeitsverzeichnis fehlt lokal. Vorgehen:
+ *   • Existiert der lokale Pfad bereits (z. B. `~/mads-worktrees` wurde mitkopiert) → nur den
+ *     git-Admin-Link reparieren (`worktree repair`) und den lokalen Pfad zurückgeben.
+ *   • Sonst: verwaiste (fremde) Worktree-Admin-Einträge prunen — das gibt den Branch frei, sonst
+ *     scheitert `worktree add` an „already used by worktree at …fremder Pfad" — und den lokalen
+ *     Worktree aus dem BESTEHENDEN Branch neu auschecken (`worktree add`, KEIN `-b`).
+ * Fehlt der Branch lokal, ist nichts wiederherstellbar → `{ ok:false }`. Best-effort git; wirft nie.
+ */
+export async function relocateWorktree(
+  repoRoot: string,
+  agentId: string,
+  branch: string,
+): Promise<{ ok: true; path: string; recreated: boolean } | { ok: false; error: string }> {
+  const local = worktreePathFor(repoRoot, agentId);
+  if (existsSync(local)) {
+    // Lokaler Worktree ist vorhanden (mitkopiert) — nur der Admin-Link kann noch aufs fremde Home zeigen.
+    // `worktree repair` richtet die Zwei-Wege-Verknüpfung (repo ↔ Worktree) wieder ein; No-Op, wenn heil.
+    await git(["-C", repoRoot, "worktree", "repair", local], repoRoot);
+    return { ok: true, path: local, recreated: false };
+  }
+  // Fremde gitdir-Zeiger (…/amedici/… existiert lokal nicht) → prune entfernt die Admin-Einträge und
+  // gibt den Branch frei. Ohne prune: „fatal: '<branch>' is already used by worktree at …".
+  await git(["-C", repoRoot, "worktree", "prune"], repoRoot);
+  const hasBranch = await git(["-C", repoRoot, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repoRoot);
+  if (hasBranch.code !== 0) return { ok: false, error: `Branch ${branch} existiert lokal nicht` };
+  const add = await git(["-C", repoRoot, "worktree", "add", local, branch], repoRoot);
+  if (add.code !== 0) return { ok: false, error: add.stderr || add.stdout };
+  try {
+    ensureMadsDir(local); // mads' eigenes .mads/ im neuen Worktree sofort git-unsichtbar machen (wie createWorktree)
+  } catch (e) {
+    log(`[git] relocate: .mads-Schutz im Worktree ${local} fehlgeschlagen: ${String(e)}`);
+  }
+  return { ok: true, path: local, recreated: true };
+}
+
 export async function getRepoInfo(
   repoRoot: string,
 ): Promise<{ owner: string; repo: string; defaultBranch: string } | null> {

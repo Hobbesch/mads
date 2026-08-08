@@ -823,6 +823,13 @@ export interface ReconcileSummaryMsg extends BaseMsg {
    * (> 0), wenn die Liste gerade generiert wurde UND ≥ 1 Datei erkannt wurde. Rein informativ.
    */
   seedGenerated?: number;
+  /**
+   * Cross-Machine-Reparatur: Streams, deren Worktree-Pfad unter einem FREMDEN Home eingebacken war
+   * (Repo zwischen zwei Macs kopiert), wurden auf den lokalen Kanon-Pfad umgezogen und der Worktree
+   * aus dem bestehenden Branch neu ausgecheckt — Labels der umgezogenen Streams. Früher fielen diese
+   * Subs beim Öffnen still aus dem Grid; jetzt sind sie zurück + der Nutzer sieht, dass es passiert ist.
+   */
+  relocated?: string[];
 }
 
 /** Laufzeit-Kollisionen zwischen aktiven Agenten (leeres Array = aufgeräumt). */

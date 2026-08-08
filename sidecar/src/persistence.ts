@@ -175,17 +175,29 @@ export function savePrompts(repoRoot: string, prompts: SavedPrompt[]): void {
  * (ohne Worktree) NICHT → „main verschwindet". Daher: bestehende Einträge bewahren, den Pool
  * drüberlegen (frischer Stand gewinnt), nur explizit entfernte (`removed`) oder mit
  * verschwundenem Worktree verwerfen.
+ *
+ * Der Worktree-weg-Drop war früher STILL — genau der Datenverlust-Pfad beim Cross-Machine-Copy:
+ * ein fremder (auf einem anderen Home eingebackener) `worktreePath` existiert lokal nicht → der Sub
+ * flog wortlos raus, obwohl Branch + Transcripts intakt waren. Seit dem Öffnen relocatet die
+ * Orchestration solche Einträge auf den lokalen Kanon-Pfad (siehe relocateForeignWorktrees), daher
+ * ist dieser Drop nur noch Ultima Ratio (Worktree WIRKLICH weg). Er wird jetzt über `onDrop`
+ * sichtbar gemacht (Aufrufer loggt), statt lautlos zu verschwinden — Branch/Transcripts bleiben ohnehin,
+ * die Worktree-Discovery kann den Stream beim nächsten Öffnen erneut anbieten.
  */
 export function mergeRegistry(
   existing: RegistryEntry[],
   poolEntries: RegistryEntry[],
   removed: ReadonlySet<string>,
   worktreeExists: (path: string) => boolean,
+  onDrop?: (entry: RegistryEntry) => void,
 ): RegistryEntry[] {
   const byId = new Map<string, RegistryEntry>();
   for (const e of existing) {
     if (removed.has(e.agentId)) continue; // gestoppt/aufgeräumt → nicht wiederbeleben
-    if (e.worktreePath && !worktreeExists(e.worktreePath)) continue; // verwaister Sub → raus
+    if (e.worktreePath && !worktreeExists(e.worktreePath)) {
+      onDrop?.(e); // verwaister Sub → raus, aber NICHT mehr still: Aufrufer surfaced/loggt es
+      continue;
+    }
     byId.set(e.agentId, e); // Integrator (kein worktreePath) bleibt IMMER erhalten
   }
   for (const e of poolEntries) {
