@@ -16,7 +16,8 @@ import { createWorktree, removeWorktree, worktreeFingerprint } from "./git.js";
 import { ensureMadsDir } from "./persistence.js";
 import { classifyToolCall, isDeployCommand, isGitCommit, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
 import { scrubbedAgentEnv } from "./agentEnv.js";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { DEFAULT_MODEL } from "../../shared/protocol.js";
@@ -350,6 +351,25 @@ export class AgentSession {
 
     this.cwd = cwd;
 
+    // Cross-Machine-Härtung (Session-Schicht): Eine fortzusetzende Claude-Session liegt lokal unter
+    // ~/.claude/projects/<enc(cwd)>/<sessionId>.jsonl — PRO RECHNER, NICHT im Repo. Kopiert man ein
+    // mads-Repo auf einen anderen Mac, fehlt sie dort → der SDK-Resume scheitert hart mit „No conversation
+    // found with session ID" (consume_failed) und der Stream ist unbrauchbar. Ist die Session lokal nicht
+    // vorhanden, setzen wir stattdessen mit einer FRISCHEN Session im selben Worktree/Branch fort (die
+    // Anzeige-Historie kommt weiterhin aus .mads/transcripts). Best effort — die On-disk-Ablage ist
+    // Claude-intern; schlägt der Check fehl, bleibt der harte consume-Fehler als Backstop.
+    let resume = msg.resumeSessionId;
+    if (resume && !this.claudeSessionExists(cwd, resume)) {
+      log(`[${this.agentId}] Resume-Session ${resume} lokal nicht gefunden (Repo von anderem Rechner kopiert?) → frische Session im selben Worktree`);
+      this.emitText(
+        "ℹ Die frühere Konversation dieses Streams ist auf diesem Rechner nicht vorhanden " +
+          "(vermutlich von einem anderen Mac kopiert — Claude-Sessions liegen pro Rechner in ~/.claude, " +
+          "nicht im Repo). Ich setze im selben Worktree/Branch mit einer neuen Session fort; die bisherige " +
+          "Verlaufsanzeige bleibt erhalten.",
+      );
+      resume = undefined;
+    }
+
     try {
       const sdk = (await import("@anthropic-ai/claude-agent-sdk")) as unknown as {
         query: (args: { prompt: AsyncIterable<SdkUserMessage>; options: Record<string, unknown> }) => QueryHandle;
@@ -490,7 +510,7 @@ export class AgentSession {
           includePartialMessages: false,
           allowedTools: msg.allowedTools,
           disallowedTools: msg.disallowedTools,
-          resume: msg.resumeSessionId,
+          resume, // vorvalidiert: fehlt die Session lokal (Cross-Machine), ist dies undefined → frischer Start
           forkSession: msg.forkSession,
           stderr: (d: string) => log(`[claude ${this.agentId}]`, d),
           canUseTool: (toolName: string, input: Record<string, unknown>, opts: Record<string, unknown>) =>
@@ -994,6 +1014,22 @@ export class AgentSession {
       log(`[${this.agentId}] Bild-Anhang nicht gespeichert: ${String(e)}`);
     }
     return att;
+  }
+
+  /**
+   * Existiert die Claude-Code-Session `sessionId` lokal für dieses `cwd`? Claude legt Sessions unter
+   * `~/.claude/projects/<enc(cwd)>/<sessionId>.jsonl` ab, wobei `enc` den absoluten cwd-Pfad kodiert,
+   * indem `/` und `.` durch `-` ersetzt werden (z. B. `/Users/x/coding/Boba` → `-Users-x-coding-Boba`).
+   * Best effort: bei jedem Fehler/Unsicherheit `false` → der Stream startet lieber frisch, statt am
+   * Resume einer nicht vorhandenen Session hart zu scheitern.
+   */
+  private claudeSessionExists(cwd: string, sessionId: string): boolean {
+    try {
+      const enc = cwd.replace(/[/.]/g, "-");
+      return existsSync(join(homedir(), ".claude", "projects", enc, `${sessionId}.jsonl`));
+    } catch {
+      return false;
+    }
   }
 
   private emitText(text: string): void {
