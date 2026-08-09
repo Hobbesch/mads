@@ -25,6 +25,7 @@ const ACTIVE_ON_CLOSE = new Set(["starting", "running", "waiting_input", "escala
 export default function App() {
   const init = useStore((s) => s.init);
   const escalations = useStore((s) => s.escalations);
+  const agents = useStore((s) => s.agents);
   const sidecar = useStore((s) => s.sidecar);
   const project = useStore((s) => s.project);
   const projectLocked = useStore((s) => s.projectLocked);
@@ -243,6 +244,8 @@ export default function App() {
   }, []);
 
   const lastEscalation = escalations[escalations.length - 1];
+  // Eskalation stammt aus einem konkreten Stream (agentId) → dessen Klartext-Namen für die Meldung auflösen.
+  const escStreamLabel = lastEscalation?.agentId ? agents[lastEscalation.agentId]?.label : undefined;
   const defaultBranch = project?.defaultBranch ?? "main";
   // Echt fortsetzbare Streams vs. erledigte (gemergte) mit lokalen Resten → getrennt anbieten.
   const liveResumables = resumables.filter((r) => !r.merged);
@@ -364,7 +367,8 @@ export default function App() {
         {lastEscalation && (
           <div className="escalation-banner">
             <span className="escalation-text">
-              ▲ Eskalation ({lastEscalation.code}): {lastEscalation.message}
+              ▲ Eskalation{escStreamLabel ? ` · Stream „${escStreamLabel}"` : ""} ({lastEscalation.code}):{" "}
+              {lastEscalation.message}
             </span>
             <button
               className="banner-close"
