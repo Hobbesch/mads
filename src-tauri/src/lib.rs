@@ -125,7 +125,9 @@ pub fn run() {
             remote_bridge_list_devices,
             remote_bridge_revoke_device,
             remote_set_enabled,
-            remote_set_project
+            remote_set_project,
+            claude_relogin,
+            claude_auth_status
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -287,4 +289,63 @@ fn graceful_exit(app: &tauri::AppHandle) -> ! {
         state.kill_child();
     }
     unsafe { libc::_exit(0) }
+}
+
+/// Öffnet ein Terminal und startet den interaktiven Claude-OAuth-Login (`claude auth login`).
+/// Das erneuert das macOS-Keychain-Login, das die vom Agent-SDK gebündelte Claude-CLI liest —
+/// die nächste Agent-Anfrage nutzt die frischen Credentials automatisch (kein App-/Sidecar-Neustart
+/// nötig). mads sieht den Token NIE; die CLI schreibt ihn selbst in den Keychain.
+///
+/// SICHERHEIT: Das Kommando ist FEST verdrahtet und nimmt KEINE Argumente vom Frontend oder von der
+/// Remote-Bridge entgegen — kein Command-Injection-Vektor (die Bridge kann diesen Command nur
+/// auslösen, nicht parametrisieren).
+#[tauri::command]
+fn claude_relogin() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Terminal.app, weil der OAuth-Flow ein echtes TTY braucht (Browser öffnen + Code
+        // zurück-pasten). Feste AppleScript-Statements, keine dynamische Interpolation.
+        std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"Terminal\" to activate",
+                "-e",
+                "tell application \"Terminal\" to do script \"claude auth login\"",
+            ])
+            .spawn()
+            .map_err(|e| format!("Terminal konnte nicht geöffnet werden: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Claude-Re-Login wird derzeit nur unter macOS unterstützt.".into())
+    }
+}
+
+/// Führt `claude auth status` in der Login-Shell aus und gibt den reinen Status-Text zurück
+/// (KEIN Secret — `auth status` gibt nur den Anmeldezustand aus). Login-Shell (`$SHELL -lc`), damit
+/// `claude` über den vollen Nutzer-PATH gefunden wird (der GUI-Prozess erbt nur einen minimalen
+/// PATH). Kommando fest verdrahtet, keine Argumente von außen.
+#[tauri::command]
+fn claude_auth_status() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let out = std::process::Command::new(shell)
+            .args(["-lc", "claude auth status"])
+            .output()
+            .map_err(|e| format!("Status konnte nicht ermittelt werden: {e}"))?;
+        let mut text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if text.is_empty() {
+            text = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        }
+        if text.is_empty() {
+            text = "Kein Status-Text von der Claude-CLI erhalten.".to_string();
+        }
+        Ok(text)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Claude-Status wird derzeit nur unter macOS unterstützt.".into())
+    }
 }

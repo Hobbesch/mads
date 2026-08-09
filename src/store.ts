@@ -37,7 +37,7 @@ import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL } from "./modelCa
 import type { Collision } from "../shared/collision";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
-import { notifyOsPermission, dismissOsPermission } from "./osNotify";
+import { notifyOsPermission, dismissOsPermission, notifyOsAuthRelogin } from "./osNotify";
 import { toolCommand } from "./toolText";
 import { blobToBase64, base64ToBytes, extForMime, dirname, makeThumbnail } from "./blob";
 import { openMarkdownWindow } from "./detachWindow";
@@ -299,6 +299,9 @@ export interface MadsState {
   devLog: Record<string, DevLogLine[]>;
   permissions: PermissionRequestMsg[];
   escalations: SidecarErrorMsg[];
+  /** Maschinenweiter Auth-Ausfall (authentication_failed/oauth_org_not_allowed): zeigt den
+   *  „Bei Claude neu anmelden"-Banner. Dedupliziert (ein Banner/eine OS-Meldung pro Episode). */
+  authReloginNeeded: boolean;
   resumables: ResumableAgent[];
   /** Eingehende fremde PRs (Bots gefiltert), die mads zum read-only Review anbietet. */
   incomingPrs: IncomingPr[];
@@ -382,6 +385,12 @@ export interface MadsState {
   selectAgent: (id: string) => void;
   requestNewStream: () => void;
   dismissEscalations: () => void;
+  /** Auth-Banner schließen (setzt authReloginNeeded zurück). */
+  dismissAuthRelogin: () => void;
+  /** Öffnet ein Terminal mit `claude auth login` (Browser-OAuth). mads berührt den Token nie. */
+  reloginClaude: () => Promise<void>;
+  /** `claude auth status` in der Login-Shell → reiner Status-Text (kein Secret). */
+  checkAuthStatus: () => Promise<string>;
   setDraft: (agentId: string, text: string) => void;
   setDraftImages: (agentId: string, images: ImageInput[]) => void;
   setDraftFiles: (agentId: string, files: AttachedFile[]) => void;
@@ -732,6 +741,7 @@ export const useStore = create<MadsState>((set) => {
                   devLog: {},
                   permissions: [],
                   escalations: [],
+                  authReloginNeeded: false,
                   collisions: [],
                   editsByFile: {},
                   selectedId: undefined,
@@ -1042,6 +1052,15 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "error": {
+        // Auth-Fehler ist maschinenweit (nicht stream-spezifisch): einmalig ein globales Flag
+        // setzen (dedupliziert → nur ein Banner, eine OS-Benachrichtigung pro Episode). Der
+        // stream-spezifische Notice unten bleibt zusätzlich erhalten.
+        if (msg.code === "authentication_failed" || msg.code === "oauth_org_not_allowed") {
+          if (!useStore.getState().authReloginNeeded) {
+            set({ authReloginNeeded: true });
+            void notifyOsAuthRelogin();
+          }
+        }
         let removedGhost = false;
         if (msg.agentId && (msg.code === "main_edited" || msg.code === "main_deploy_dirty")) {
           // Proaktiver Hinweis (kein Fehler-Status): main-Dirt → auslagern ODER (nach Deploy) als Release
@@ -1078,7 +1097,10 @@ export const useStore = create<MadsState>((set) => {
           // mehr) — Status zurücksetzen, sonst hängt die UI auf "öffne…".
           set({ projectStatus: "error" });
         }
-        if (!removedGhost) {
+        // Auth-Fehler NICHT in die generische Eskalations-Leiste — dafür gibt es den dedizierten
+        // „Bei Claude neu anmelden"-Banner (authReloginNeeded); sonst zwei Banner für dasselbe.
+        const isAuthErr = msg.code === "authentication_failed" || msg.code === "oauth_org_not_allowed";
+        if (!removedGhost && !isAuthErr) {
           set((s) => ({
             escalations: [...s.escalations.filter((e) => !(e.agentId === msg.agentId && e.code === msg.code)), msg],
           }));
@@ -1117,6 +1139,7 @@ export const useStore = create<MadsState>((set) => {
     devLog: {},
     permissions: [],
     escalations: [],
+    authReloginNeeded: false,
     resumables: [],
     incomingPrs: [],
     reconcileSummary: undefined,
@@ -1299,6 +1322,17 @@ export const useStore = create<MadsState>((set) => {
     },
 
     dismissEscalations: () => set({ escalations: [] }),
+    dismissAuthRelogin: () => set({ authReloginNeeded: false }),
+    reloginClaude: async () => {
+      // Öffnet Terminal.app mit `claude auth login`. Best effort — Fehler nur loggen (kein
+      // Stream-Kontext für einen Notice). Den Token schreibt die CLI selbst in den Keychain.
+      try {
+        await invoke("claude_relogin");
+      } catch (e) {
+        console.warn("[mads] claude_relogin fehlgeschlagen:", e);
+      }
+    },
+    checkAuthStatus: async () => (await invoke("claude_auth_status")) as string,
 
     setDraft: (agentId, text) => set((s) => ({ drafts: { ...s.drafts, [agentId]: text } })),
     setDraftImages: (agentId, images) => set((s) => ({ draftImages: { ...s.draftImages, [agentId]: images } })),

@@ -76,6 +76,26 @@ export async function notifyOsPermission(msg: PermissionRequestMsg, streamLabel:
   }
 }
 
+/** Benachrichtigung (mit Ton), wenn die Claude-Anmeldung abgelaufen ist (authentication_failed) —
+ *  nur wenn das Fenster nicht im Vordergrund ist. Wird vom Store nur auf der false→true-Flanke des
+ *  authReloginNeeded-Flags ausgelöst (also einmal pro Episode). Best effort. */
+export async function notifyOsAuthRelogin(): Promise<void> {
+  if (windowFocused) return; // Fenster vorne → der In-App-Banner reicht
+  try {
+    if (granted !== true) {
+      granted = await isPermissionGranted();
+      if (!granted) return;
+    }
+    sendNotification({
+      title: "Claude-Authentifizierung fehlgeschlagen",
+      body: "Sende den Stream erneut — oder melde dich in mads neu bei Claude an.",
+      sound: "default",
+    });
+  } catch {
+    /* best effort */
+  }
+}
+
 /** Die Benachrichtigung zu einer erledigten Anfrage zurückziehen (woanders beantwortet oder
  *  abgebrochen) → kein toter „braucht eine Entscheidung"-Eintrag im Mitteilungszentrum. */
 export async function dismissOsPermission(requestId: string): Promise<void> {
