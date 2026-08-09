@@ -634,6 +634,34 @@ export async function fastForwardMain(repoRoot: string, defaultBranch: string): 
   return ff.code === 0 ? { ff: behind, behind, blocked: null } : { ff: 0, behind, blocked: "unknown" };
 }
 
+/**
+ * Feature A: main HART auf origin/<base> setzen — verwirft lokale, nicht gepushte ahead-Commits
+ * (z. B. Release-/Versions-Bumps, die ein fast-forward nicht auflöst). VORHER wird die aktuelle
+ * main-Spitze als Backup-Branch gesichert (verlustfrei rückholbar). Getrackte uncommittete
+ * Änderungen blockieren den Reset (sie würden sonst verloren gehen); untracked bleibt unangetastet.
+ */
+export async function resetMainToOrigin(
+  repoRoot: string,
+  defaultBranch: string,
+): Promise<{ ok: true; discarded: number; backup: string } | { ok: false; error: string }> {
+  await git(["-C", repoRoot, "fetch", "origin", defaultBranch], repoRoot);
+  const base = `origin/${defaultBranch}`;
+  const cur = (await git(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], repoRoot)).stdout.trim();
+  if (cur === "HEAD") return { ok: false, error: "detached HEAD — bitte zuerst main auschecken." };
+  if (cur !== defaultBranch) return { ok: false, error: `Checkout steht auf ${cur}, nicht ${defaultBranch}.` };
+  const trackedDirty = (await git(["-C", repoRoot, "status", "--porcelain", "-uno"], repoRoot)).stdout.trim();
+  if (trackedDirty.length > 0)
+    return { ok: false, error: "uncommittete Änderungen an getrackten Dateien — erst committen/verwerfen." };
+  const ahead = parseInt((await git(["-C", repoRoot, "rev-list", "--count", `${base}..HEAD`], repoRoot)).stdout.trim() || "0", 10);
+  if (ahead === 0) return { ok: true, discarded: 0, backup: "" }; // nichts voraus → nichts zu tun
+  const sha = (await git(["-C", repoRoot, "rev-parse", "--short", "HEAD"], repoRoot)).stdout.trim();
+  const backup = `mads-backup/main-${sha}`;
+  await git(["-C", repoRoot, "branch", "-f", backup, defaultBranch], repoRoot);
+  const reset = await git(["-C", repoRoot, "reset", "--hard", base], repoRoot);
+  if (reset.code !== 0) return { ok: false, error: reset.stderr.trim() || reset.stdout.trim() || "reset --hard fehlgeschlagen" };
+  return { ok: true, discarded: ahead, backup };
+}
+
 export interface GitStatusResult {
   behind: number;
   ahead: number;

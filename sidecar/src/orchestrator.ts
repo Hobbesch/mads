@@ -13,7 +13,7 @@ import { AgentSession, type PermissionHooks } from "./session.js";
 import { loadApprovedKinds, saveApprovedKinds } from "./permissions.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
-import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
+import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
@@ -415,6 +415,35 @@ export class Orchestrator {
       case "update_main": {
         // G5: Integrator-Aktion — main nachziehen. Zuerst fast-forward (unverfänglich).
         if (!this.project) break;
+        // Feature A: main ist lokal VORAUS (z. B. nicht gepushte Release-/Versions-Bump-Commits, die ein
+        // fast-forward nicht auflöst) → auf Wunsch hart auf origin/<base> setzen (mit Backup-Branch).
+        if (msg.hard) {
+          const rr = await resetMainToOrigin(this.project.repoRoot, this.project.defaultBranch);
+          if (!rr.ok) {
+            this.emitError(msg.agentId, "stale_base", `main zurücksetzen fehlgeschlagen: ${rr.error}`);
+            break;
+          }
+          this.emit({
+            ...envelope(),
+            type: "agent_event",
+            agentId: msg.agentId,
+            event: {
+              kind: "assistant_text",
+              text:
+                rr.discarded > 0
+                  ? `↺ main hart auf origin/${this.project.defaultBranch} gesetzt — ${rr.discarded} lokale(n), nicht gepushte(n) Commit(s) verworfen (gesichert auf Branch ${rr.backup}, verlustfrei rückholbar).`
+                  : "main ist nicht voraus — nichts zu verwerfen.",
+            },
+          });
+          const stH = await gitStatus(this.project.repoRoot, this.project.repoRoot, this.project.defaultBranch, this.project.defaultBranch);
+          if (!stH.unreliable) {
+            this.gitState.set(msg.agentId, stH);
+            this.emitGitStatus(msg.agentId, stH);
+          }
+          const sH = this.pool.get(msg.agentId);
+          if (sH) await this.pollAgent(sH);
+          break;
+        }
         let res = await fastForwardMain(this.project.repoRoot, this.project.defaultBranch);
         // DIVERGIERT (lokale Commits auf main + origin voraus) war bisher eine Sackgasse: die UI sagte
         // „Merge/Rebase nötig", bot aber keinen Weg — der Nutzer musste in den Terminal. Das passiert im
@@ -729,10 +758,13 @@ export class Orchestrator {
       return;
     }
     if (pre.ahead === 0) {
-      const msg = pre.dirty
+      // KEIN roter push_rejected: „nichts zu PRen" ist keine Ablehnung. Der bereits gemergte/leere
+      // Branch (clean) ist ein harmloser Normalzustand (häufig nach „Mergen & weiterarbeiten");
+      // uncommittete Änderungen sind ein Hinweis, kein Fehler. Beides → assistant_text statt Eskalation.
+      const text = pre.dirty
         ? `Kein PR möglich: Der Branch ${s.branch} hat noch keine Commits gegenüber ${this.project.defaultBranch} — die Änderungen sind nicht committet. Lass den Agenten zuerst LOKAL committen (git add -A && git commit; KEINE projekteigenen Push-Skripte — die pushen auf main), dann erneut „PR erstellen".`
-        : `Kein PR möglich: Keine Commits und keine Änderungen auf ${s.branch} gegenüber ${this.project.defaultBranch}.`;
-      this.emitError(agentId, "push_rejected", msg);
+        : `Nichts zu PRen: ${s.branch} ist bereits auf dem Stand von ${this.project.defaultBranch} (gemergt / keine Änderungen) — kein PR nötig.`;
+      this.emit({ ...envelope(), type: "agent_event", agentId, event: { kind: "assistant_text", text } });
       return;
     }
 

@@ -418,6 +418,7 @@ export interface MadsState {
   commitMainRelease: (integratorId: string) => Promise<void>;
   /** Integrator-only: main per fast-forward auf origin/<default> nachziehen (kein rebase). */
   updateMain: (id: string) => Promise<void>;
+  resetMain: (id: string) => Promise<void>;
   /** Konsolidiert „Alle aktualisieren": main fast-forward + alle hinterherhängenden Subs rebasen. */
   syncAllBehind: () => Promise<void>;
   integratePr: (id: string, keep?: boolean) => Promise<void>;
@@ -1677,6 +1678,23 @@ export const useStore = create<MadsState>((set) => {
       // G5: Integrator zieht main per fast-forward nach (NICHT rebase/force — das ist Sub).
       notice(id, "accent", "↻ main aktualisieren (fast-forward auf origin)…");
       await sendHost({ ...envelope(), type: "update_main", agentId: id });
+    },
+
+    resetMain: async (id) => {
+      // Feature A: main ist lokal VORAUS (nicht gepushte Commits, z. B. Release-/Versions-Bumps, die ein
+      // fast-forward nicht auflöst) → hart auf origin setzen. Destruktiv → Bestätigung; der Sidecar sichert
+      // vorher automatisch einen Backup-Branch (verlustfrei rückholbar).
+      const db = useStore.getState().project?.defaultBranch ?? "main";
+      const ok =
+        typeof window !== "undefined" && typeof window.confirm === "function"
+          ? window.confirm(
+              `Lokale, nicht gepushte Commits auf ${db} verwerfen und hart auf origin/${db} setzen?\n\n` +
+                `Ein Backup-Branch wird vorher automatisch gesichert (verlustfrei rückholbar).`,
+            )
+          : true;
+      if (!ok) return;
+      notice(id, "accent", `↺ ${db} hart auf origin/${db} setzen…`);
+      await sendHost({ ...envelope(), type: "update_main", agentId: id, hard: true });
     },
 
     syncAllBehind: async () => {

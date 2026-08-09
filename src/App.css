@@ -2136,6 +2136,10 @@ button.primary:hover {
   font-weight: 550;
   margin-bottom: 8px;
 }
+.perm-q-multi {
+  font-weight: 400;
+  opacity: 0.6;
+}
 .perm-options {
   display: flex;
   flex-direction: column;

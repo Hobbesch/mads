@@ -452,6 +452,10 @@ export interface CleanupWorktreeMsg extends BaseMsg {
 export interface UpdateMainMsg extends BaseMsg {
   type: "update_main";
   agentId: string;
+  /** true: lokale, nicht gepushte ahead-Commits VERWERFEN und main hart auf origin/<base> setzen
+   *  (mit automatischem Backup-Branch). Für den Fall, dass main lokal voraus ist (z. B. Release-/
+   *  Versions-Bump-Commits), den ein fast-forward nicht auflösen kann. Ohne Flag: nur fast-forward. */
+  hard?: boolean;
 }
 
 export interface ShutdownMsg extends BaseMsg {

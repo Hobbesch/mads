@@ -38,6 +38,7 @@ export function Inspector() {
   const outsourceMain = useStore((s) => s.outsourceMain);
   const commitMainRelease = useStore((s) => s.commitMainRelease);
   const updateMain = useStore((s) => s.updateMain);
+  const resetMain = useStore((s) => s.resetMain);
   const continueStream = useStore((s) => s.continueStream);
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
@@ -607,6 +608,14 @@ export function Inspector() {
               title={`Dein main-Checkout ist ${agent.behind} Commits hinter origin — per fast-forward nachziehen (kein rebase/force).`}
             >
               main aktualisieren ({agent.behind})
+            </button>
+          )}
+          {live && agent.role === "integrator" && agent.ahead > 0 && (
+            <button
+              onClick={() => void resetMain(selectedId)}
+              title={`Dein main-Checkout ist ${agent.ahead} lokale(n), nicht gepushte(n) Commit(s) VORAUS (die ein fast-forward nicht auflöst — z. B. Release-/Versions-Bumps). Hart auf origin zurücksetzen; ein Backup-Branch wird vorher gesichert.`}
+            >
+              main auf origin zurücksetzen ({agent.ahead})
             </button>
           )}
           {agent.pr && (
