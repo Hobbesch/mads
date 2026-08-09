@@ -37,6 +37,23 @@ export type EffortMode = "low" | "medium" | "high" | "xhigh" | "ultracode";
 export interface ImageInput {
   mediaType: string; // z.B. "image/png"
   dataBase64: string;
+  /** Kleines Anzeige-Thumbnail, das das FRONTEND beim Anhängen per Canvas erzeugt. Es reist INLINE im
+   *  user_text-Event mit, damit Mac UND Remote das echte Bild sehen. Das VOLLBILD geht bewusst NICHT
+   *  durch Timeline-Ringpuffer/Snapshot-Replay/Bridge (ein Screenshot sind schnell mehrere MB) —
+   *  es landet auf Platte und wird nur bei Bedarf (Klick) lokal geladen. Das SDK ignoriert diese
+   *  Felder (userMsg liest nur mediaType/dataBase64). */
+  thumbBase64?: string;
+  thumbMediaType?: string; // z.B. "image/jpeg"
+}
+
+/** Ein angehängtes Bild, wie es in der Timeline erscheint: kleines Inline-Thumbnail (überall anzeigbar)
+ *  + Pfad zum Vollbild auf Platte (nur lokal am Mac ladbar; fehlt ohne Projekt/Worktree). */
+export interface TimelineAttachment {
+  id: string;
+  mediaType: string;
+  thumbBase64?: string;
+  thumbMediaType?: string;
+  path?: string;
 }
 
 export interface BaseMsg {
@@ -71,8 +88,14 @@ export type HostMessage =
   | UpdateMainMsg
   | StartDevServerMsg
   | StopDevServerMsg
+  | ConfigureDevServerMsg
+  | OpenReviewStreamMsg
+  | MergeReviewMsg
+  | CloseReviewMsg
   | HandoffExportMsg
   | HandoffImportMsg
+  | PromptSaveMsg
+  | PromptDeleteMsg
   | RequestSnapshotMsg
   | ShutdownMsg;
 
@@ -89,6 +112,117 @@ export interface StartDevServerMsg extends BaseMsg {
 export interface StopDevServerMsg extends BaseMsg {
   type: "stop_devserver";
   agentId: string;
+}
+/** „Dev-Server konfigurieren": stellt `.mads/run.json` sicher (erzeugt/aktualisiert die Vorlage aus
+ *  erkannten Services) und liefert per `devserver_config` den Pfad, den das Frontend im Editor öffnet. */
+export interface ConfigureDevServerMsg extends BaseMsg {
+  type: "configure_devserver";
+  agentId: string;
+}
+
+// ─── Review-Streams: eingehende (fremde) PRs read-only prüfen ────────────────
+/** Ein eingehender PR (nicht von mads erstellt) — Kandidat für einen Review-Stream. */
+export interface IncomingPr {
+  number: number;
+  title: string;
+  author: string;
+  headRefName: string;
+  url: string;
+  isFork: boolean;
+  isDraft: boolean;
+}
+/** „Eingehende PRs" — Liste fremder offener PRs (Bots gefiltert), die mads zum Review anbietet. */
+export interface IncomingPrsMsg extends BaseMsg {
+  type: "incoming_prs";
+  prs: IncomingPr[];
+}
+/** Einen eingehenden PR als READ-ONLY Review-Stream öffnen (isolierter Worktree auf dem PR-Stand,
+ *  keine KI-Session, Autopilot AUS — mads pusht NIE auf den fremden Branch). */
+export interface OpenReviewStreamMsg extends BaseMsg {
+  type: "open_review_stream";
+  prNumber: number;
+  headRefName: string;
+  title: string;
+  author: string;
+  url: string;
+}
+/** Den Review-PR über den Standard-Merge-Weg annehmen (`gh pr merge <#> --squash`) + Stream schließen. */
+export interface MergeReviewMsg extends BaseMsg {
+  type: "merge_review";
+  agentId: string;
+}
+/** Review-Stream verwerfen (ohne Merge): Worktree entfernen, Kachel schließen. Der fremde PR bleibt. */
+export interface CloseReviewMsg extends BaseMsg {
+  type: "close_review";
+  agentId: string;
+}
+/** Host→Client: ein gerade geöffneter Review-Stream (passive Kachel) — Descriptor zum Anlegen. */
+export interface ReviewStreamMsg extends BaseMsg {
+  type: "review_stream";
+  agentId: string;
+  label: string;
+  branch: string;
+  worktreePath: string;
+  reviewPr: number;
+  author: string;
+  url: string;
+}
+
+/**
+ * Standard-Modell — SINGLE SOURCE für Frontend UND Sidecar. Der Sidecar coerciert JEDE fehlende
+ * Modell-Angabe hierauf, BEVOR er den Agent-SDK aufruft: gibt man dem SDK `model: undefined`, wählt
+ * er still sein Flaggschiff (Fable 5) — das verbrennt teure Tokens „blind", ohne dass die UI es zeigt
+ * (der Picker spiegelt den WUNSCH, nicht das Ist). Deshalb nie undefined an den SDK. Siehe ModelActiveMsg.
+ */
+export const DEFAULT_MODEL = "claude-opus-4-8";
+
+/**
+ * Doppel-Check gegen „blindes Fahren auf dem falschen Modell": Der Sidecar liest aus JEDER
+ * Assistant-/Init-Nachricht das TATSÄCHLICH gelaufene Modell und meldet es hier. `mismatch=true`
+ * heißt: der SDK lief auf einem anderen Modell als angefordert (z. B. Fable statt Opus) — der Sidecar
+ * hat dann aktiv `setModel(requested)` nachgezogen. Die UI zeigt `active` (nicht mehr nur den Wunsch)
+ * und warnt bei mismatch, damit unerwartete Kosten sofort sichtbar werden.
+ */
+export interface ModelActiveMsg extends BaseMsg {
+  type: "model_active";
+  agentId: string;
+  active: string; // real vom SDK gemeldetes Modell
+  requested?: string; // was mads angefordert hatte
+  mismatch: boolean;
+}
+
+// ─── Prompt-Verwaltung ────────────────────────────────────────────────────────
+// Kuratierte, wiederverwendbare Anweisungen (z. B. Deploy-Rezepte) je Projekt.
+// Persistenz: `<repoRoot>/.mads/prompts.json`. Sicherheits-Eigenschaften by design:
+// (1) Ein Prompt wird beim Auswählen NUR in den Composer eingefügt (Review vor Senden,
+//     nie Auto-Send). (2) `role` bindet ihn an die Stream-Rolle — Deploy-Prompts z. B.
+//     erscheinen nur beim Integrator, nie bei Subs. (3) Platzhalter sind `{{name}}`-Tokens
+//     im Text; die UI fragt sie beim Einfügen ab (kein Skript-Aufruf ohne explizite Werte).
+export interface SavedPrompt {
+  id: string; // stabiler Slug oder uuid
+  title: string;
+  /** Kurzbeschreibung fürs Auswahlmenü (z. B. Vorbedingungen, Versions-Hinweis). */
+  description?: string;
+  /** An welche Stream-Rolle der Prompt gebunden ist. "any" = überall wählbar. */
+  role: "integrator" | "sub" | "any";
+  /** Der Anweisungstext; `{{name}}`-Tokens werden beim Einfügen abgefragt. */
+  text: string;
+  updatedAt: number;
+}
+
+/** Prompt anlegen/ändern (Upsert per id). */
+export interface PromptSaveMsg extends BaseMsg {
+  type: "prompt_save";
+  prompt: SavedPrompt;
+}
+export interface PromptDeleteMsg extends BaseMsg {
+  type: "prompt_delete";
+  id: string;
+}
+/** Vollständige Prompt-Liste des Projekts (bei open_project und nach jeder Änderung). */
+export interface PromptsUpdateMsg extends BaseMsg {
+  type: "prompts_update";
+  prompts: SavedPrompt[];
 }
 
 export interface ProjectInfo {
@@ -138,6 +272,10 @@ export interface StartAgentMsg extends BaseMsg {
   mock?: boolean;
   /** Autopilot-Stufe (Default „assisted"). */
   autopilot?: AutopilotLevel;
+  /** true = automatische „Setze die Arbeit fort"-Anweisung beim Resume (kein echter Nutzer-Auftrag).
+   *  Der Sidecar überschreibt damit NICHT den zuletzt gemerkten Auftrag (`lastPrompt`) — die Kachel
+   *  zeigt weiter den echten Auftrag, den der Mensch abgesetzt hat. */
+  continuation?: boolean;
 }
 
 export interface CreatePrMsg extends BaseMsg {
@@ -314,6 +452,10 @@ export interface CleanupWorktreeMsg extends BaseMsg {
 export interface UpdateMainMsg extends BaseMsg {
   type: "update_main";
   agentId: string;
+  /** true: lokale, nicht gepushte ahead-Commits VERWERFEN und main hart auf origin/<base> setzen
+   *  (mit automatischem Backup-Branch). Für den Fall, dass main lokal voraus ist (z. B. Release-/
+   *  Versions-Bump-Commits), den ein fast-forward nicht auflösen kann. Ohne Flag: nur fast-forward. */
+  hard?: boolean;
 }
 
 export interface ShutdownMsg extends BaseMsg {
@@ -345,10 +487,15 @@ export type SidecarMessage =
   | CollisionWarningMsg
   | SpawnSubstreamsRequestMsg
   | DevServerStatusMsg
+  | DevServerConfigMsg
+  | IncomingPrsMsg
+  | ReviewStreamMsg
   | DevServerLogMsg
   | ProjectLockedMsg
   | SidecarErrorMsg
-  | HandoffResultMsg;
+  | HandoffResultMsg
+  | PromptsUpdateMsg
+  | ModelActiveMsg;
 
 /**
  * Öffnen abgelehnt: dieses Projekt ist bereits in einer ANDEREN, laufenden mads-Instanz offen
@@ -372,12 +519,22 @@ export interface DevServerService {
 export interface DevServerStatusMsg extends BaseMsg {
   type: "devserver_status";
   agentId: string;
-  state: "installing" | "starting" | "running" | "stopped" | "error";
+  // „unconfigured": kein lauffähiges .mads/run.json (fehlt/leer/nicht erkannt) → Frontend bietet
+  // „Konfigurieren" an, statt einen toten Fehler zu zeigen.
+  state: "installing" | "starting" | "running" | "stopped" | "error" | "unconfigured";
   services?: DevServerService[];
   /** primäre URL zum Öffnen im Browser (i. d. R. das Frontend), sobald bereit. */
   url?: string;
   /** menschenlesbarer Hinweis (Fehlergrund / „Vorlage erzeugt" o. Ä.). */
   message?: string;
+}
+/** Antwort auf `configure_devserver`: Pfad der (sichergestellten) `.mads/run.json`, die der Client
+ *  im Editor öffnet. `detected` = Anzahl automatisch erkannter Services in der frischen Vorlage. */
+export interface DevServerConfigMsg extends BaseMsg {
+  type: "devserver_config";
+  agentId: string;
+  path: string;
+  detected: number;
 }
 /** Eine Ausgabezeile eines Dev-Server-Services (Live-Log im Inspector). */
 export interface DevServerLogMsg extends BaseMsg {
@@ -402,8 +559,11 @@ export type AgentEvent =
   | { kind: "thinking"; text: string }
   // Vom Menschen eingegebene Anweisung (Prompt). Der Sidecar emittiert sie als Event, damit sie
   // auf ALLEN Clients (Mac + Remote) im Verlauf erscheint — nicht nur dort, wo sie getippt wurde.
-  | { kind: "user_text"; text: string; images?: number }
-  | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown> }
+  | { kind: "user_text"; text: string; attachments?: TimelineAttachment[]; continuation?: boolean }
+  // parentToolUseId: gesetzt, wenn dieser tool_use aus einem SUB-AGENTEN (Task/Agent-Tool) stammt —
+  // dann ist es die tool_use_id des Task-Aufrufs, der ihn startete. Erlaubt dem Frontend, die Aktivität
+  // dem richtigen Teil-Agenten zuzuordnen (Hintergrund-Agenten-Übersicht). null/fehlt = Hauptloop.
+  | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown>; parentToolUseId?: string }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; summary?: string; output?: string }
   | { kind: "system"; subtype: string; data?: Record<string, unknown> };
 
@@ -615,6 +775,16 @@ export interface ResumableAgent {
   merged?: boolean;
   /** Worktree hat ungespeicherte oder ungepushte lokale Reste → nicht still löschen. */
   localChanges?: boolean;
+  /** Gesetzt = persistierter READ-ONLY Review-Stream (fremder PR). Beim Start wird daraus die
+   *  Review-Kachel wiederhergestellt (nicht als normaler Resume-Kandidat behandelt). */
+  reviewPr?: number;
+  reviewAuthor?: string;
+  reviewUrl?: string;
+  /** PR gemergt/geschlossen UND Worktree sauber, keine ungemergte Arbeit (ahead 0): wird zwar noch als
+   *  fortsetzbar angeboten (bleibt im Grid), aber der zugehörige Auftrag ist ERLEDIGT → die Kachel zeigt
+   *  ihn nach dem Neustart NICHT mehr (in-Session verbirgt ihn isMergedDone bereits — hier fehlt nur der
+   *  pr-Kontext, den wir bewusst nicht ins passive VM heben, um die Grid-Platzierung nicht zu ändern). */
+  mergedClean?: boolean;
 }
 export interface ResumableAgentsMsg extends BaseMsg {
   type: "resumable_agents";
@@ -657,6 +827,13 @@ export interface ReconcileSummaryMsg extends BaseMsg {
    * (> 0), wenn die Liste gerade generiert wurde UND ≥ 1 Datei erkannt wurde. Rein informativ.
    */
   seedGenerated?: number;
+  /**
+   * Cross-Machine-Reparatur: Streams, deren Worktree-Pfad unter einem FREMDEN Home eingebacken war
+   * (Repo zwischen zwei Macs kopiert), wurden auf den lokalen Kanon-Pfad umgezogen und der Worktree
+   * aus dem bestehenden Branch neu ausgecheckt — Labels der umgezogenen Streams. Früher fielen diese
+   * Subs beim Öffnen still aus dem Grid; jetzt sind sie zurück + der Nutzer sieht, dass es passiert ist.
+   */
+  relocated?: string[];
 }
 
 /** Laufzeit-Kollisionen zwischen aktiven Agenten (leeres Array = aufgeräumt). */
@@ -686,6 +863,7 @@ export type EscalationKind =
   | "secret_detected" // Secret im zu pushenden Diff (LEAK-1: Push fail-closed blockiert)
   | "main_edited" // Integrator hat main direkt geändert → in Sub-Stream auslagern (proaktiver Hinweis)
   | "main_deploy_dirty" // main-Dirt stammt aus einem gerade gelaufenen Deploy → „Als Release committen" anbieten
+  | "foreign_edit" // Worktree änderte sich, während der Agent ruhte → Autopilot committet nicht blind mit
   | "max_budget";
 
 export interface SidecarErrorMsg extends BaseMsg {

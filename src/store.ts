@@ -22,6 +22,7 @@ import type {
   PullRequestInfo,
   GateStep,
   ResumableAgent,
+  IncomingPr,
   ReconcileSummaryMsg,
   HandoffResultMsg,
   AutonomyConfig,
@@ -29,14 +30,16 @@ import type {
   AutopilotLevel,
   EffortMode,
   ImageInput,
+  TimelineAttachment,
+  SavedPrompt,
 } from "../shared/protocol";
 import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
-import { notifyOsPermission, dismissOsPermission } from "./osNotify";
+import { notifyOsPermission, dismissOsPermission, notifyOsAuthRelogin } from "./osNotify";
 import { toolCommand } from "./toolText";
-import { blobToBase64, base64ToBytes, extForMime, dirname } from "./blob";
+import { blobToBase64, base64ToBytes, extForMime, dirname, makeThumbnail } from "./blob";
 import { openMarkdownWindow } from "./detachWindow";
 
 /** `rel` relativ zu `baseDir` auflösen (mit `..`/`.`-Kollaps). Führendes `/` = absolut. */
@@ -77,7 +80,7 @@ export interface DictationVM {
 }
 
 export type TimelineEvent =
-  | { id: string; kind: "user"; text: string; images?: number }
+  | { id: string; kind: "user"; text: string; attachments?: TimelineAttachment[] }
   | { id: string; kind: "assistant"; text: string }
   | { id: string; kind: "thinking"; text: string }
   | {
@@ -103,7 +106,7 @@ export interface DevLogLine {
 }
 /** Sicht auf den Stream-Dev-Server (Front-/Backend im Worktree, siehe `.mads/run.json`). */
 export interface DevServerVM {
-  state: "installing" | "starting" | "running" | "stopped" | "error";
+  state: "installing" | "starting" | "running" | "stopped" | "error" | "unconfigured";
   url?: string;
   services?: { name: string; ready: boolean; url?: string }[];
   message?: string;
@@ -123,7 +126,9 @@ export interface AgentVM {
   mock: boolean;
   permissionMode: PermissionMode;
   autopilot: AutopilotLevel; // Autopilot-Stufe dieses Streams (Default „assisted")
-  model?: string; // aktuelles Modell dieses Streams (für Anzeige + pro-Stream-Umschaltung)
+  model?: string; // ANGEFORDERTES Modell dieses Streams (Picker-Wunsch + pro-Stream-Umschaltung)
+  activeModel?: string; // REAL vom SDK gelaufenes Modell (Doppel-Check) — maßgeblich für die Anzeige
+  modelMismatch?: boolean; // true = SDK lief auf einem anderen Modell als angefordert (mads zieht nach)
   effort?: EffortMode; // Reasoning-Effort dieses Streams (undefined = Modell ohne Effort, z. B. Haiku)
   createdAt: number;
   lastEventAt: number;
@@ -134,6 +139,10 @@ export interface AgentVM {
   behind: number;
   ahead: number;
   dirty: boolean; // uncommitted ODER untracked
+  /** main-Dirt stammt aus einem gerade erkannten Deploy (Eskalation `main_deploy_dirty`) —
+   *  dann ist „Als Release committen" der Primärschritt (nicht „In Sub-Stream auslagern").
+   *  Gelöscht, sobald ein git_status mit dirty=false für diesen Agenten eintrifft. */
+  deployDirty?: boolean;
   syncBlocked?: boolean; // Auto-Sync pausiert (Rebase-Konflikt) — manuelles Eingreifen nötig
   pr?: PullRequestInfo;
   gate?: { ok: boolean; steps: GateStep[] };
@@ -142,6 +151,28 @@ export interface AgentVM {
   /** true = im Sidecar-Pool aktiv (gestartet/fortgesetzt). false = passiv wiederhergestellt
    *  (Kachel + Verlauf sichtbar, aber KEINE laufende KI — wird beim ersten Senden fortgesetzt). */
   live?: boolean;
+  /** Zuletzt vom Menschen abgesetzter Prompt (Kachel-Übersicht: „was habe ich wem aufgetragen").
+   *  Gesetzt beim user_text-Event, sichtbar bis zum Merge (isMergedDone) — dann gelöscht. Reine
+   *  Laufzeit-Anzeige, NICHT persistiert: passiv wiederhergestellte Streams haben daher keinen. */
+  lastPrompt?: string;
+  /** Aktive Teil-Agenten (Sub-Agenten via Task/Agent-Tool), die dieser Stream gerade laufen hat —
+   *  Hintergrund-Agenten-Übersicht. Key = tool_use_id des Task-Aufrufs. Aus dem SDK-Strom abgeleitet
+   *  (parent_tool_use_id), reine Laufzeit-Info: bei Abschluss (tool_result) wird der Eintrag entfernt. */
+  subAgents?: Record<string, SubAgentEntry>;
+  /** Gesetzt = dies ist ein READ-ONLY Review-Stream für einen FREMDEN PR (kein KI-Stream): PR-Nummer,
+   *  Autor, URL. Die Kachel zeigt statt „Fortsetzen" ein „PR mergen" + „Verwerfen". */
+  reviewPr?: number;
+  reviewAuthor?: string;
+  reviewUrl?: string;
+}
+
+/** Ein laufender Teil-Agent (SDK-Sub-Agent) eines Streams — für die Hintergrund-Aktivitäts-Übersicht. */
+export interface SubAgentEntry {
+  id: string; // tool_use_id des startenden Task/Agent-Aufrufs
+  label: string; // Kurzbeschreibung (description bzw. subagent_type aus dem Task-Input)
+  currentStep?: string; // zuletzt vom Teil-Agenten benutztes Tool (= „was tut er gerade")
+  startedAt: number;
+  lastAt: number;
 }
 
 export interface SidecarInfo {
@@ -268,17 +299,28 @@ export interface MadsState {
   devLog: Record<string, DevLogLine[]>;
   permissions: PermissionRequestMsg[];
   escalations: SidecarErrorMsg[];
+  /** Maschinenweiter Auth-Ausfall (authentication_failed/oauth_org_not_allowed): zeigt den
+   *  „Bei Claude neu anmelden"-Banner. Dedupliziert (ein Banner/eine OS-Meldung pro Episode). */
+  authReloginNeeded: boolean;
   resumables: ResumableAgent[];
+  /** Eingehende fremde PRs (Bots gefiltert), die mads zum read-only Review anbietet. */
+  incomingPrs: IncomingPr[];
   /** Einmaliger GitHub-Abgleich beim Öffnen (FF main / aufgeräumt / Reste) — dismissbar. */
   reconcileSummary?: ReconcileSummaryMsg;
   /** Ergebnis des letzten Handoff-Export/-Imports — treibt einen dismissbaren Banner. */
   handoff?: HandoffResultMsg;
   collisions: Collision[];
+  /** Kuratierte, wiederverwendbare Prompts des Projekts (reiner Spiegel — Persistenz macht
+   *  der Sidecar in `<repoRoot>/.mads/prompts.json`, gemeldet via prompts_update). */
+  prompts: SavedPrompt[];
   // ── Spracheingabe (lokales Whisper) ──
   whisper: WhisperVM;
   dictation: DictationVM;
   autonomy: AutonomyConfig;
   selectedId?: string;
+  /** Signal an App, den „Neuer Stream"-Dialog zu öffnen (z. B. Integrator-Guard → „Als Sub-Stream starten"
+   *  öffnet ihn vorbefüllt aus dem newStreamDraft). App setzt es beim Schließen zurück. */
+  newStreamRequested: boolean;
   debugLog: string[];
   /** Offener „Parallel starten"-Picker (nach Anforderung der Integrator-Einschätzung). */
   parallelPicker?: { agentId: string; options: { label: string; description: string }[] };
@@ -341,7 +383,14 @@ export interface MadsState {
     permissionMode?: PermissionMode;
   }) => Promise<void>;
   selectAgent: (id: string) => void;
+  requestNewStream: () => void;
   dismissEscalations: () => void;
+  /** Auth-Banner schließen (setzt authReloginNeeded zurück). */
+  dismissAuthRelogin: () => void;
+  /** Öffnet ein Terminal mit `claude auth login` (Browser-OAuth). mads berührt den Token nie. */
+  reloginClaude: () => Promise<void>;
+  /** `claude auth status` in der Login-Shell → reiner Status-Text (kein Secret). */
+  checkAuthStatus: () => Promise<string>;
   setDraft: (agentId: string, text: string) => void;
   setDraftImages: (agentId: string, images: ImageInput[]) => void;
   setDraftFiles: (agentId: string, files: AttachedFile[]) => void;
@@ -352,6 +401,10 @@ export interface MadsState {
   requestParallelAssessment: (req: PermissionRequestMsg) => Promise<void>;
   spawnParallelStreams: (picks: { label: string; brief: string }[]) => Promise<void>;
   cancelParallelPicker: () => void;
+  /** Prompt anlegen/ändern (Upsert per id) — der Sidecar persistiert und spiegelt via prompts_update. */
+  savePrompt: (prompt: SavedPrompt) => Promise<void>;
+  /** Prompt löschen (die Bestätigung macht die UI vorher). */
+  deletePrompt: (id: string) => Promise<void>;
   sendInput: (id: string, text: string, images?: ImageInput[]) => Promise<void>;
   setPermissionMode: (id: string, mode: PermissionMode) => Promise<void>;
   setAutopilot: (id: string, level: AutopilotLevel) => Promise<void>;
@@ -374,12 +427,20 @@ export interface MadsState {
   commitMainRelease: (integratorId: string) => Promise<void>;
   /** Integrator-only: main per fast-forward auf origin/<default> nachziehen (kein rebase). */
   updateMain: (id: string) => Promise<void>;
+  resetMain: (id: string) => Promise<void>;
   /** Konsolidiert „Alle aktualisieren": main fast-forward + alle hinterherhängenden Subs rebasen. */
   syncAllBehind: () => Promise<void>;
   integratePr: (id: string, keep?: boolean) => Promise<void>;
   runGate: (id: string) => Promise<void>;
   startDevServer: (id: string) => Promise<void>;
   stopDevServer: (id: string) => Promise<void>;
+  configureDevServer: (id: string) => Promise<void>;
+  /** Einen eingehenden PR als read-only Review-Stream öffnen. */
+  openReviewStream: (pr: IncomingPr) => Promise<void>;
+  /** Review-PR annehmen (squash-merge) + Stream schließen. */
+  mergeReview: (id: string) => Promise<void>;
+  /** Review-Stream verwerfen (ohne Merge) + Worktree entfernen. */
+  closeReview: (id: string) => Promise<void>;
   pollProject: () => Promise<void>;
   resumeAgent: (r: ResumableAgent) => Promise<void>;
   resumeAll: () => Promise<void>;
@@ -491,6 +552,23 @@ export const useStore = create<MadsState>((set) => {
     });
   }
 
+  /** Eine Kachel lokal entfernen (Agent + Verlauf + Diff-Panes + Dev-Log). Genutzt von stopAgent,
+   *  Review-Merge/-Verwerfen. */
+  function removeAgentLocal(id: string) {
+    set((s) => {
+      const agents = { ...s.agents };
+      delete agents[id];
+      const events = { ...s.events };
+      delete events[id];
+      const order = s.order.filter((x) => x !== id);
+      const prefix = `${id}::`;
+      const editsByFile = Object.fromEntries(Object.entries(s.editsByFile).filter(([k]) => !k.startsWith(prefix)));
+      const devLog = { ...s.devLog };
+      delete devLog[id];
+      return { agents, events, order, editsByFile, devLog, selectedId: s.selectedId === id ? order[0] : s.selectedId };
+    });
+  }
+
   function pushEvent(agentId: string, ev: TimelineEvent) {
     set((s) => {
       const prev = s.events[agentId] ?? [];
@@ -503,6 +581,28 @@ export const useStore = create<MadsState>((set) => {
 
   function notice(agentId: string, tone: NoticeTone, text: string) {
     pushEvent(agentId, { id: mkId(), kind: "notice", tone, text });
+  }
+
+  // ── Teil-Agenten (Sub-Agenten via Task/Agent-Tool): Hintergrund-Aktivitäts-Übersicht ──
+  // Aus dem SDK-Strom abgeleitet: Task-tool_use startet einen, parent_tool_use_id-Aktivität hält ihn
+  // aktuell, tool_result auf die Task-id beendet ihn. Rein Laufzeit; sequentiell verarbeitet (kein Race).
+  function upsertSubAgent(agentId: string, subId: string, patch: { label?: string; currentStep?: string }) {
+    const a = useStore.getState().agents[agentId];
+    if (!a) return;
+    const now = Date.now();
+    const cur = a.subAgents ?? {};
+    const prev = cur[subId];
+    const entry: SubAgentEntry = prev
+      ? { ...prev, ...(patch.label ? { label: patch.label } : {}), ...(patch.currentStep ? { currentStep: patch.currentStep } : {}), lastAt: now }
+      : { id: subId, label: patch.label ?? "Teil-Agent", currentStep: patch.currentStep, startedAt: now, lastAt: now };
+    patchAgent(agentId, { subAgents: { ...cur, [subId]: entry } });
+  }
+  function removeSubAgent(agentId: string, subId: string) {
+    const a = useStore.getState().agents[agentId];
+    if (!a?.subAgents || !(subId in a.subAgents)) return;
+    const next = { ...a.subAgents };
+    delete next[subId];
+    patchAgent(agentId, { subAgents: next });
   }
 
   function appendDevLog(agentId: string, line: DevLogLine) {
@@ -641,6 +741,7 @@ export const useStore = create<MadsState>((set) => {
                   devLog: {},
                   permissions: [],
                   escalations: [],
+                  authReloginNeeded: false,
                   collisions: [],
                   editsByFile: {},
                   selectedId: undefined,
@@ -669,10 +770,13 @@ export const useStore = create<MadsState>((set) => {
           if (!a) return {};
           const active = msg.status === "running" || msg.status === "starting";
           const workStartedAt = active ? (a.workStartedAt ?? Date.now()) : undefined;
+          // Terminaler Status (fertig/Fehler) → keine Teil-Agenten mehr aktiv (fängt den Rand-Fall ab,
+          // dass ein Stream endet, während ein Sub-Agent noch als „laufend" gemerkt war).
+          const subAgents = msg.status === "done" || msg.status === "error" ? undefined : a.subAgents;
           return {
             agents: {
               ...s.agents,
-              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now() },
+              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now(), subAgents },
             },
           };
         });
@@ -693,14 +797,21 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "git_status":
-        patchAgent(msg.agentId, { behind: msg.behind, ahead: msg.ahead, dirty: msg.dirty, syncBlocked: msg.syncBlocked ?? false });
+        patchAgent(msg.agentId, {
+          behind: msg.behind,
+          ahead: msg.ahead,
+          dirty: msg.dirty,
+          syncBlocked: msg.syncBlocked ?? false,
+          // Deploy-Flag löschen, sobald main wieder sauber ist (Release committet/ausgelagert).
+          ...(msg.dirty ? {} : { deployDirty: false }),
+        });
         break;
 
       case "pr_update":
         patchAgent(msg.agentId, { pr: msg.pr });
         break;
 
-      case "merge_result":
+      case "merge_result": {
         notice(
           msg.agentId,
           msg.ok ? "ok" : "err",
@@ -708,7 +819,49 @@ export const useStore = create<MadsState>((set) => {
             ? `✔ PR${msg.prNumber ? ` #${msg.prNumber}` : ""} nach main gemerged`
             : `⛔ Merge blockiert: ${msg.reasons.join(" · ")}`,
         );
+        // Review-Stream erfolgreich gemerged → Kachel entfernen (Sidecar hat den Worktree abgeräumt).
+        if (msg.ok && useStore.getState().agents[msg.agentId]?.reviewPr) removeAgentLocal(msg.agentId);
         break;
+      }
+
+      case "incoming_prs":
+        set({ incomingPrs: msg.prs });
+        break;
+
+      case "review_stream": {
+        // Neuer READ-ONLY Review-Stream (fremder PR) → als passive Kachel anlegen (keine KI-Session).
+        const id = msg.agentId;
+        set((s) => {
+          if (s.agents[id]) return {}; // schon da
+          const vm: AgentVM = {
+            id,
+            label: msg.label,
+            role: "sub",
+            status: "done",
+            costUsd: 0,
+            numTurns: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            mock: false,
+            permissionMode: "auto",
+            autopilot: "manual", // Review-Stream committet/pusht NIE
+            createdAt: Date.now(),
+            lastEventAt: Date.now(),
+            branch: msg.branch,
+            worktreePath: msg.worktreePath,
+            behind: 0,
+            ahead: 0,
+            dirty: false,
+            live: false,
+            reviewPr: msg.reviewPr,
+            reviewAuthor: msg.author,
+            reviewUrl: msg.url,
+          };
+          return { agents: { ...s.agents, [id]: vm }, order: [...s.order, id], selectedId: id };
+        });
+        notice(id, "accent", `🔍 Review-Stream für PR #${msg.reviewPr} (@${msg.author}) geöffnet — Dev-Server starten, prüfen, dann „PR mergen".`);
+        break;
+      }
 
       case "gate_result":
         patchAgent(msg.agentId, { gate: { ok: msg.ok, steps: msg.steps } });
@@ -726,6 +879,18 @@ export const useStore = create<MadsState>((set) => {
         if (msg.state === "running" && msg.url) notice(msg.agentId, "ok", `▶ Dev-Server läuft → ${msg.url}`);
         else if (msg.state === "stopped") notice(msg.agentId, "info", "■ Dev-Server gestoppt");
         else if (msg.state === "error") notice(msg.agentId, "err", `Dev-Server: ${msg.message ?? "Fehler"}`);
+        else if (msg.state === "unconfigured") notice(msg.agentId, "warn", `⚙ ${msg.message ?? "Dev-Server noch nicht eingerichtet — auf Konfigurieren tippen."}`);
+        break;
+
+      case "devserver_config":
+        // Sidecar hat .mads/run.json sichergestellt → im Editor öffnen, damit der Nutzer den
+        // Dev-Server für dieses Projekt konstruiert (Befehle/Ports/Runtime). Danach „Dev-Server" starten.
+        notice(
+          msg.agentId,
+          "accent",
+          `⚙ Dev-Server-Konfig geöffnet (.mads/run.json${msg.detected > 0 ? ` — ${msg.detected} Service(s) erkannt` : " — noch leer, bitte ausfüllen"}).`,
+        );
+        void useStore.getState().openFilePath(msg.path);
         break;
 
       case "devserver_log":
@@ -748,6 +913,18 @@ export const useStore = create<MadsState>((set) => {
         set({ collisions: msg.collisions });
         break;
 
+      case "prompts_update":
+        // Vollständige Prompt-Liste des Projekts (bei open_project + nach jeder Änderung) — Spiegel.
+        set({ prompts: msg.prompts });
+        break;
+
+      case "model_active":
+        // Doppel-Check: das REAL gelaufene Modell (Grundwahrheit aus den SDK-Nachrichten). Die
+        // Anzeige richtet sich hiernach, nicht nach dem Picker-Wunsch — so kann ein stiller
+        // Fable-Default nicht mehr unbemerkt Tokens verbrennen.
+        patchAgent(msg.agentId, { activeModel: msg.active, modelMismatch: msg.mismatch });
+        break;
+
       case "spawn_substreams_request": {
         // Der Integrator-Chat hat per Tool N Sub-Streams angefordert → über den
         // normalen createAgent-Pfad anlegen (eigener Worktree/Branch je Stream).
@@ -768,12 +945,28 @@ export const useStore = create<MadsState>((set) => {
         if (ev.kind === "user_text") {
           // Vom Menschen eingegebene Anweisung (Mac ODER Remote) — vom Sidecar ausgespielt, damit sie
           // auf ALLEN Clients im Verlauf steht. Ersetzt die frühere rein lokale, optimistische Anzeige.
-          if (ev.text.trim()) pushEvent(msg.agentId, { id: mkId(), kind: "user", text: ev.text, images: ev.images });
+          // Auch eine reine Bild-Nachricht (Text leer) anzeigen.
+          if (ev.text.trim() || ev.attachments?.length)
+            pushEvent(msg.agentId, { id: mkId(), kind: "user", text: ev.text, attachments: ev.attachments });
+          // Kachel-Übersicht: den zuletzt abgesetzten Auftrag merken (nur bei echtem Text — eine
+          // reine Bild-Folgenachricht lässt den vorigen Auftrag stehen). Sichtbar bis zum Merge.
+          // Die automatische Resume-Anweisung (continuation) ist KEIN Nutzer-Auftrag → nicht übernehmen.
+          if (ev.text.trim() && !ev.continuation) patchAgent(msg.agentId, { lastPrompt: ev.text.trim() });
         } else if (ev.kind === "assistant_text" || ev.kind === "assistant_delta") {
           if (ev.text.trim()) pushEvent(msg.agentId, { id: mkId(), kind: "assistant", text: ev.text });
         } else if (ev.kind === "thinking") {
           pushEvent(msg.agentId, { id: mkId(), kind: "thinking", text: ev.text });
         } else if (ev.kind === "tool_use") {
+          // Hintergrund-Agenten-Übersicht: Aktivität eines Teil-Agenten (parent_tool_use_id) hält seinen
+          // „aktuellen Schritt" aktuell; ein Task/Agent-tool_use startet einen neuen Teil-Agenten.
+          if (ev.parentToolUseId) upsertSubAgent(msg.agentId, ev.parentToolUseId, { currentStep: ev.name });
+          if (ev.name === "Task" || ev.name === "Agent") {
+            const label =
+              typeof ev.input?.description === "string" ? ev.input.description
+              : typeof ev.input?.subagent_type === "string" ? ev.input.subagent_type
+              : "Teil-Agent";
+            upsertSubAgent(msg.agentId, ev.toolUseId, { label });
+          }
           if (ev.name === "TodoWrite") {
             const todos = ((ev.input?.todos as TodoItem[]) ?? []).map((t) => ({
               content: String(t.content ?? ""),
@@ -801,6 +994,7 @@ export const useStore = create<MadsState>((set) => {
           }
         } else if (ev.kind === "tool_result") {
           completeTool(msg.agentId, ev.toolUseId, ev.output ?? ev.summary, ev.ok);
+          removeSubAgent(msg.agentId, ev.toolUseId); // war es der Abschluss eines Teil-Agenten? → aus der Übersicht nehmen
         }
         break;
       }
@@ -858,10 +1052,25 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "error": {
+        // Auth-Fehler ist maschinenweit (nicht stream-spezifisch): einmalig ein globales Flag
+        // setzen (dedupliziert → nur ein Banner, eine OS-Benachrichtigung pro Episode). Der
+        // stream-spezifische Notice unten bleibt zusätzlich erhalten.
+        if (msg.code === "authentication_failed" || msg.code === "oauth_org_not_allowed") {
+          if (!useStore.getState().authReloginNeeded) {
+            set({ authReloginNeeded: true });
+            void notifyOsAuthRelogin();
+          }
+        }
         let removedGhost = false;
         if (msg.agentId && (msg.code === "main_edited" || msg.code === "main_deploy_dirty")) {
           // Proaktiver Hinweis (kein Fehler-Status): main-Dirt → auslagern ODER (nach Deploy) als Release
           // committen. Status bleibt unberührt; die Aktionen bietet der Inspector an, solange main dirty ist.
+          // Deploy-Fall merken: der geführte nextStep hebt dann „Als Release committen" als Primäraktion
+          // hervor (statt „In Sub-Stream auslagern"). git_status mit dirty=false löscht das Flag wieder.
+          // main_edited löscht das Flag explizit: bleibt main nach einem Deploy DURCHGEHEND dirty
+          // (Bump weg, andere Edits bleiben), würde „Als Release committen" sonst als Primäraktion
+          // für Nicht-Deploy-Dirt kleben — ein chore(release) für beliebige Änderungen.
+          patchAgent(msg.agentId, { deployDirty: msg.code === "main_deploy_dirty" });
           notice(msg.agentId, "accent", `↗ ${msg.message}`);
         } else if (msg.agentId) {
           const a = useStore.getState().agents[msg.agentId];
@@ -888,7 +1097,10 @@ export const useStore = create<MadsState>((set) => {
           // mehr) — Status zurücksetzen, sonst hängt die UI auf "öffne…".
           set({ projectStatus: "error" });
         }
-        if (!removedGhost) {
+        // Auth-Fehler NICHT in die generische Eskalations-Leiste — dafür gibt es den dedizierten
+        // „Bei Claude neu anmelden"-Banner (authReloginNeeded); sonst zwei Banner für dasselbe.
+        const isAuthErr = msg.code === "authentication_failed" || msg.code === "oauth_org_not_allowed";
+        if (!removedGhost && !isAuthErr) {
           set((s) => ({
             escalations: [...s.escalations.filter((e) => !(e.agentId === msg.agentId && e.code === msg.code)), msg],
           }));
@@ -927,13 +1139,17 @@ export const useStore = create<MadsState>((set) => {
     devLog: {},
     permissions: [],
     escalations: [],
+    authReloginNeeded: false,
     resumables: [],
+    incomingPrs: [],
     reconcileSummary: undefined,
     collisions: [],
+    prompts: [],
     whisper: { installed: false, checked: false, downloading: false, progress: 0 },
     dictation: { recording: false, transcribing: false },
     autonomy: { autoSync: true, collisionScan: true },
     selectedId: undefined,
+    newStreamRequested: false,
     debugLog: [],
     parallelPicker: undefined,
     drafts: {},
@@ -1087,6 +1303,8 @@ export const useStore = create<MadsState>((set) => {
       });
     },
 
+    requestNewStream: () => set({ newStreamRequested: true }),
+
     selectAgent: (id) => {
       set({ selectedId: id });
       // Datei-Basis dem gewählten Stream folgen lassen — sonst betrachtet man leicht die
@@ -1104,6 +1322,17 @@ export const useStore = create<MadsState>((set) => {
     },
 
     dismissEscalations: () => set({ escalations: [] }),
+    dismissAuthRelogin: () => set({ authReloginNeeded: false }),
+    reloginClaude: async () => {
+      // Öffnet Terminal.app mit `claude auth login`. Best effort — Fehler nur loggen (kein
+      // Stream-Kontext für einen Notice). Den Token schreibt die CLI selbst in den Keychain.
+      try {
+        await invoke("claude_relogin");
+      } catch (e) {
+        console.warn("[mads] claude_relogin fehlgeschlagen:", e);
+      }
+    },
+    checkAuthStatus: async () => (await invoke("claude_auth_status")) as string,
 
     setDraft: (agentId, text) => set((s) => ({ drafts: { ...s.drafts, [agentId]: text } })),
     setDraftImages: (agentId, images) => set((s) => ({ draftImages: { ...s.draftImages, [agentId]: images } })),
@@ -1125,7 +1354,9 @@ export const useStore = create<MadsState>((set) => {
           continue;
         }
         if (f.type.startsWith("image/")) {
-          newImgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f) });
+          // Thumbnail mitgeben → die Timeline zeigt später das echte Bild (Mac + Remote), nicht nur „+1 Bild".
+          const thumb = await makeThumbnail(f);
+          newImgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f), ...thumb });
           continue;
         }
         try {
@@ -1198,6 +1429,15 @@ export const useStore = create<MadsState>((set) => {
     },
 
     cancelParallelPicker: () => set({ parallelPicker: undefined }),
+
+    // ── Prompt-Verwaltung: der Store sendet nur die HostMessage — der Sidecar persistiert
+    // (.mads/prompts.json) und spiegelt die neue Liste via prompts_update zurück (SSOT).
+    savePrompt: async (prompt) => {
+      await sendHost({ ...envelope(), type: "prompt_save", prompt });
+    },
+    deletePrompt: async (id) => {
+      await sendHost({ ...envelope(), type: "prompt_delete", id });
+    },
 
     sendInput: async (id, text, images) => {
       const a = useStore.getState().agents[id];
@@ -1397,14 +1637,47 @@ export const useStore = create<MadsState>((set) => {
     },
 
     startDevServer: async (id) => {
+      // NUR den geklickten Stream optimistisch auf „starting" setzen. Andere laufende NICHT vorab auf
+      // „stopped" spiegeln: der Orchestrator stoppt einen evtl. anderen erst NACH seinen Vorab-Checks
+      // (existiert der Worktree? gibt es eine run.json?) — schlägt der Start dort fehl, bleibt der alte
+      // Server am Leben. Nur sein echtes „stopped"-Event (das genau dann kommt, wenn er wirklich
+      // gestoppt wird) räumt die UI — so lügt die Kachel nie über einen noch laufenden Dev-Server.
       set((s) => ({ devLog: { ...s.devLog, [id]: [] } })); // altes Log verwerfen
-      patchAgent(id, { devServer: { state: "starting" } }); // optimistisch
+      patchAgent(id, { devServer: { state: "starting" } }); // optimistisch (nur dieser Stream)
       notice(id, "accent", "▶ Dev-Server startet…");
       await sendHost({ ...envelope(), type: "start_devserver", agentId: id });
     },
 
     stopDevServer: async (id) => {
       await sendHost({ ...envelope(), type: "stop_devserver", agentId: id });
+    },
+
+    configureDevServer: async (id) => {
+      // Sidecar stellt .mads/run.json sicher (frische Vorlage bei leer/fehlend) und meldet den Pfad
+      // per devserver_config zurück → dort öffnen wir die Datei im Editor (siehe Reducer).
+      await sendHost({ ...envelope(), type: "configure_devserver", agentId: id });
+    },
+
+    openReviewStream: async (pr) => {
+      await sendHost({
+        ...envelope(),
+        type: "open_review_stream",
+        prNumber: pr.number,
+        headRefName: pr.headRefName,
+        title: pr.title,
+        author: pr.author,
+        url: pr.url,
+      });
+    },
+
+    mergeReview: async (id) => {
+      await sendHost({ ...envelope(), type: "merge_review", agentId: id });
+      // Kachel bleibt bis merge_result(ok) stehen (Merge kann fehlschlagen → dann keine falsche Entfernung).
+    },
+
+    closeReview: async (id) => {
+      await sendHost({ ...envelope(), type: "close_review", agentId: id });
+      removeAgentLocal(id); // Verwerfen ist sofortig — Kachel gleich weg
     },
 
     pollProject: async () => {
@@ -1439,6 +1712,23 @@ export const useStore = create<MadsState>((set) => {
       // G5: Integrator zieht main per fast-forward nach (NICHT rebase/force — das ist Sub).
       notice(id, "accent", "↻ main aktualisieren (fast-forward auf origin)…");
       await sendHost({ ...envelope(), type: "update_main", agentId: id });
+    },
+
+    resetMain: async (id) => {
+      // Feature A: main ist lokal VORAUS (nicht gepushte Commits, z. B. Release-/Versions-Bumps, die ein
+      // fast-forward nicht auflöst) → hart auf origin setzen. Destruktiv → Bestätigung; der Sidecar sichert
+      // vorher automatisch einen Backup-Branch (verlustfrei rückholbar).
+      const db = useStore.getState().project?.defaultBranch ?? "main";
+      const ok =
+        typeof window !== "undefined" && typeof window.confirm === "function"
+          ? window.confirm(
+              `Lokale, nicht gepushte Commits auf ${db} verwerfen und hart auf origin/${db} setzen?\n\n` +
+                `Ein Backup-Branch wird vorher automatisch gesichert (verlustfrei rückholbar).`,
+            )
+          : true;
+      if (!ok) return;
+      notice(id, "accent", `↺ ${db} hart auf origin/${db} setzen…`);
+      await sendHost({ ...envelope(), type: "update_main", agentId: id, hard: true });
     },
 
     syncAllBehind: async () => {
@@ -1503,8 +1793,13 @@ export const useStore = create<MadsState>((set) => {
             worktreePath: r.worktreePath,
             behind: 0,
             ahead: 0,
-            dirty: false,
+            // localChanges (gemergt + schmutziger Worktree = ungesicherte Arbeit) → dirty, damit die
+            // „Arbeit nicht gesichert"-Warnung sofort auf der Kachel steht (vor dem ersten Poll).
+            dirty: r.localChanges === true,
             live: false, // passiv — erst beim Senden / „Fortsetzen" aktivieren
+            // Auftrag überlebt den Neustart — AUSSER der Stream ist bereits gemergt/geschlossen + sauber
+            // (mergedClean): dann ist die Arbeit erledigt und die Kachel bleibt (wie in-Session) auftragsfrei.
+            lastPrompt: r.mergedClean ? undefined : r.lastPrompt,
           };
           if (!order.includes(r.agentId)) order.push(r.agentId);
         }
@@ -1529,6 +1824,7 @@ export const useStore = create<MadsState>((set) => {
         branch: a.branch,
         worktreePath: a.worktreePath,
         status: a.status,
+        lastPrompt: a.lastPrompt, // gemerkten Auftrag ins Resume mitgeben → Kachel behält ihn
         mock: false,
       });
     },
@@ -1605,6 +1901,7 @@ export const useStore = create<MadsState>((set) => {
 
     resumeAgent: async (r) => {
       const project = useStore.getState().project;
+      const existing = useStore.getState().agents[r.agentId]; // ggf. passive Kachel mit gemerktem Auftrag
       const agent: AgentVM = {
         id: r.agentId,
         label: r.label,
@@ -1627,6 +1924,8 @@ export const useStore = create<MadsState>((set) => {
         ahead: 0,
         dirty: false,
         live: true,
+        // Auftrag über das Resume hinweg behalten — der automatische „Fortsetzen"-Nudge ersetzt ihn nicht.
+        lastPrompt: r.lastPrompt ?? existing?.lastPrompt,
       };
       set((s) => ({
         agents: { ...s.agents, [r.agentId]: agent },
@@ -1662,6 +1961,7 @@ export const useStore = create<MadsState>((set) => {
         type: "start_agent",
         agentId: r.agentId,
         prompt,
+        continuation: true, // automatische Fortsetzung — überschreibt den gemerkten Auftrag NICHT
         label: r.label,
         role: r.role,
         model: r.model,

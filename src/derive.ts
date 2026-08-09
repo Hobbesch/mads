@@ -35,6 +35,7 @@ export function agentBadges(a: AgentVM): Badge[] {
 }
 
 export function hasGitEscalation(a: AgentVM): boolean {
+  if (a.reviewPr) return false; // Review-Stream (fremder PR, read-only): behind/CI ist KEINE Eskalation
   if (isMergedDone(a)) return false; // wirklich fertig → keine Eskalation; merged-und-weitergelaufen aber schon
   return a.behind > 0 || a.pr?.checksState === "FAILURE" || a.pr?.mergeable === "CONFLICTING";
 }
@@ -44,6 +45,7 @@ export function hasGitEscalation(a: AgentVM): boolean {
  * geht beim Stop/Aufräumen verloren → auf der Kachel laut markieren und vor Stop bestätigen.
  */
 export function unsavedWork(a: AgentVM): boolean {
+  if (a.reviewPr) return false; // Review-Stream: die Commits sind der FREMDE PR, keine ungesicherte eigene Arbeit
   if (a.role === "integrator") return a.dirty; // dirty Main-Checkout → in Sub-Stream auslagern
   if (a.role !== "sub") return false;
   // Ungesichert = uncommittet/untracked ODER neue Commits über main, die (noch) KEIN offener PR
@@ -67,7 +69,7 @@ export function mergeReadiness(a: AgentVM): MergeGate {
   return preMergeGate(a.pr, a.behind);
 }
 
-export type NextStepKind = "commit" | "pr" | "integrate" | "cleanup" | "outsource" | "none";
+export type NextStepKind = "commit" | "pr" | "integrate" | "cleanup" | "outsource" | "commit_release" | "none";
 export interface NextStep {
   kind: NextStepKind;
   label: string;
@@ -104,7 +106,18 @@ export function isMergedDone(a: AgentVM): boolean {
 
 export function nextStep(a: AgentVM): NextStep {
   const none: NextStep = { kind: "none", label: "", disabled: true, hint: "" };
+  if (a.reviewPr) return none; // Review-Stream: kein Commit/PR-Workflow — Aktionen sind „PR mergen"/„Verwerfen"
   if (a.role === "integrator") {
+    // Deploy-Fall (main_deploy_dirty): das main-Dirt ist ein Deploy-Artefakt (Versions-Bump) —
+    // Primäraktion ist dann „Als Release committen", NICHT auslagern (der frühere Default hob
+    // fälschlich „In Sub-Stream auslagern" hervor). Auslagern bleibt als sekundäre Aktion.
+    if (a.dirty && a.deployDirty)
+      return {
+        kind: "commit_release",
+        label: "Als Release committen",
+        disabled: false,
+        hint: "Versions-Bump als chore(release) direkt auf main committen (Deploy-Artefakt — läuft nicht über einen PR)",
+      };
     // Direkte Edits in main sind nicht vorgesehen (main nur via grünen PR-Merge). Hat der
     // Main-Checkout doch uncommittete Änderungen → in einen neuen Sub-Stream auslagern.
     if (a.dirty)

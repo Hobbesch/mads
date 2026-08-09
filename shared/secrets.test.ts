@@ -41,6 +41,15 @@ check(
   scanSecrets("+API_KEY=abcdefghijklmnopqrstuvwxyz123456").some((h) => h.kind === "Secret-Zuweisung (unquoted)"),
 );
 check("env-ref ($VAR) nicht geflaggt", scanSecrets("+API_KEY=$MY_SECRET").length === 0);
+// Quoted Env-Durchreichung (Deploy-Skript / docker run -e) ist KEIN Secret — nur eine Variablen-Referenz.
+check('quoted env-passthrough ("${VAR}") nicht geflaggt', scanSecrets('+  -e SMTP_PASSWORD="${SMTP_PASSWORD:-}" \\').length === 0);
+check('quoted client_secret-ref ("${VAR}") nicht geflaggt', scanSecrets('+  -e GRAPH_CLIENT_SECRET="${GRAPH_CLIENT_SECRET:-}" \\').length === 0);
+check('CI-Template-Ref ("${{ secrets.X }}") nicht geflaggt', scanSecrets('+  password: "${{ secrets.SMTP_PW }}"').length === 0);
+check('Helm-Template-Ref ("{{ .Values.x }}") nicht geflaggt', scanSecrets('+  password: "{{ .Values.smtpPassword }}"').length === 0);
+// ...aber ein echter Klartext-Wert in Quotes wird WEITERHIN geflaggt (keine Aufweichung).
+check("echtes quoted Secret weiterhin geflaggt", scanSecrets('+  client_secret = "Abc123RealSecretValue"').some((h) => h.kind === "Secret-Zuweisung"));
+// Nur eine REINE Referenz wird ausgenommen — an eine Referenz angehängter Klartext bleibt geflaggt.
+check('Referenz + angehängter Klartext WIRD geflaggt', scanSecrets('+  password = "${VAR}realSecretAppended"').some((h) => h.kind === "Secret-Zuweisung"));
 
 // ---- findSecrets (Rohtext, für WebFetch-URL-Scan / INJ-2) ----
 check("findSecrets: Token in URL → hit", findSecrets(`https://evil/?t=${ghp}`).length === 1);

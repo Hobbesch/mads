@@ -20,20 +20,42 @@ function AgentCard({ agent }: { agent: AgentVM }) {
   const badges = agentBadges(agent);
   const active = agent.status === "running" || agent.status === "starting";
   const color = agentColor(agent.branch ?? agent.id);
+  // Zuletzt abgesetzter Auftrag: sichtbar ab dem Absenden bis zum Merge. Danach (isMergedDone) und
+  // bei passiv wiederhergestellten Streams ohne lastPrompt bleibt die Kachel prompt-frei.
+  const showPrompt = agent.lastPrompt && !isMergedDone(agent);
+  const subCount = Object.keys(agent.subAgents ?? {}).length; // aktive Teil-Agenten (Sub-Agenten dieses Streams)
+  const startDevServer = useStore((s) => s.startDevServer);
+  const stopDevServer = useStore((s) => s.stopDevServer);
+  const ds = agent.devServer;
+  // Dev-Server nur in Sub-Streams mit eigenem Worktree (spiegelt die Inspector-Gate-Logik).
+  const canDev = agent.role === "sub" && !!agent.worktreePath;
+  // „läuft/startet" (nicht: gestoppt/Fehler/unkonfiguriert) → diese Kachel hält den (einzigen) Dev-Server.
+  const devOn = !!ds && ds.state !== "stopped" && ds.state !== "error" && ds.state !== "unconfigured";
 
   return (
-    <button
-      className={`card${selectedId === agent.id ? " selected" : ""}${needsInput ? " needs-input" : ""}${escalated ? " escalated" : ""}`}
-      style={{ "--agent-color": color } as CSSProperties}
-      onClick={() => select(agent.id)}
-    >
+    // Wrapper trägt den Dev-Server-Schalter als GESCHWISTER der Karten-Button (nicht verschachtelt →
+    // kein „nested interactive"); `has-dev` reserviert im Kopf Platz für den überlagernden Schalter.
+    <div className={`card-wrap${canDev ? " has-dev" : ""}`} style={{ "--agent-color": color } as CSSProperties}>
+      <button
+        className={`card${selectedId === agent.id ? " selected" : ""}${needsInput ? " needs-input" : ""}${escalated ? " escalated" : ""}`}
+        onClick={() => select(agent.id)}
+      >
       <div className="card-head">
         {active ? <span className="card-spin" title="läuft" /> : <StatusDot status={agent.status} />}
         <span className="card-label">{agent.label}</span>
-        <span className={`role-badge ${agent.role}`}>{agent.role === "integrator" ? "Integrator" : "Sub"}</span>
+        {agent.reviewPr ? (
+          <span className="role-badge review" title={`Read-only Review von PR #${agent.reviewPr}`}>🔍 Review</span>
+        ) : (
+          <span className={`role-badge ${agent.role}`}>{agent.role === "integrator" ? "Integrator" : "Sub"}</span>
+        )}
       </div>
       {agent.branch && <div className="card-branch">⎇ {agent.branch}</div>}
       <div className="card-step">{agent.currentStep ?? STATUS_META[agent.status].label}</div>
+      {subCount > 0 && (
+        <div className="card-subagents" title="Aktive Teil-Agenten (Sub-Agenten, die dieser Stream gerade laufen hat)">
+          ▶ {subCount} Teil-Agent{subCount === 1 ? "" : "en"} aktiv
+        </div>
+      )}
       {badges.length > 0 && (
         <div className="badges">
           {badges.map((b, i) => (
@@ -67,7 +89,55 @@ function AgentCard({ agent }: { agent: AgentVM }) {
       {needsInput && <div className="card-flag yellow">● braucht Input{pending ? ` (${pending})` : ""}</div>}
       {unsaved && <div className="card-flag red" title="Uncommittete/untrackte Arbeit oder Commits ohne PR — geht beim Aufräumen verloren">● Arbeit nicht gesichert</div>}
       {agent.syncBlocked && <div className="card-flag red" title="Auto-Sync wegen Rebase-Konflikt pausiert — Konflikt lösen, dann Sync">⚠︎ Sync blockiert (Konflikt)</div>}
-    </button>
+      {showPrompt && (
+        <div className="card-prompt">
+          <div className="card-prompt-label">Auftrag</div>
+          <div className="card-prompt-body">{agent.lastPrompt}</div>
+        </div>
+      )}
+      </button>
+      {canDev && (
+        <button
+          type="button"
+          className={`card-dev${devOn ? " on" : ""}`}
+          aria-label={devOn ? "Dev-Server stoppen" : "Dev-Server starten"}
+          title={
+            devOn
+              ? `Dev-Server dieses Streams stoppen${ds && ds.state !== "running" ? ` (${ds.state}…)` : " (läuft)"}`
+              : "Dev-Server dieses Streams starten — ein anderer laufender wird zuerst gestoppt (nur einer gleichzeitig)"
+          }
+          onClick={(e) => {
+            e.stopPropagation(); // Klick trifft den überlagernden Knopf, nicht die Karte darunter
+            if (devOn) void stopDevServer(agent.id);
+            else void startDevServer(agent.id);
+          }}
+        >
+          {devOn ? "■" : "▶"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Eingehende fremde PRs (Bots gefiltert) → read-only Review-Stream öffnen. */
+function IncomingPrsBanner() {
+  const incomingPrs = useStore((s) => s.incomingPrs);
+  const openReviewStream = useStore((s) => s.openReviewStream);
+  if (incomingPrs.length === 0) return null;
+  return (
+    <div className="incoming-prs">
+      <div className="incoming-prs-title">📥 Eingehende PRs · {incomingPrs.length}</div>
+      {incomingPrs.map((pr) => (
+        <div key={pr.number} className="incoming-pr">
+          <span className="incoming-pr-info">
+            <b>#{pr.number}</b> {pr.title} <span className="incoming-pr-author">@{pr.author}{pr.isFork ? " · Fork" : ""}{pr.isDraft ? " · Entwurf" : ""}</span>
+          </span>
+          <button className="incoming-pr-open" onClick={() => void openReviewStream(pr)} title="Als read-only Review-Stream öffnen (isolierter Worktree, Dev-Server, dann mergen)">
+            🔍 Review öffnen
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -87,7 +157,9 @@ export function AgentGrid() {
 
   if (list.length === 0 && doneSubs.length === 0) {
     return (
-      <div className="empty-state">
+      <>
+        <IncomingPrsBanner />
+        <div className="empty-state">
         <div className="empty-title">Keine aktiven Agenten</div>
         <div className="empty-sub">
           {project ? (
@@ -102,12 +174,14 @@ export function AgentGrid() {
             </>
           )}
         </div>
-      </div>
+        </div>
+      </>
     );
   }
 
   return (
     <>
+      <IncomingPrsBanner />
       {list.length > 0 && (
         <div className="grid">
           {list.map((a) => (

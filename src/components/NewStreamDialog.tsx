@@ -1,9 +1,10 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import type { AgentRole } from "../store";
 import type { PermissionMode, EffortMode } from "../../shared/protocol";
 import { ModelEffortPicker } from "./ModelEffortPicker";
 import { clampEffort } from "../modelCatalog";
+import { loadNewStreamDraft, saveNewStreamDraft, clearNewStreamDraft, draftHasContent } from "../newStreamDraft";
 
 export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const createAgent = useStore((s) => s.createAgent);
@@ -13,23 +14,61 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const defaultModel = useStore((s) => s.defaultModel);
   const defaultEffort = useStore((s) => s.defaultEffort);
 
-  const [label, setLabel] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [role, setRole] = useState<AgentRole>(hasIntegrator ? "sub" : "integrator");
+  // Beim Öffnen einen zuvor auto-gespeicherten Entwurf wiederherstellen (überlebt Fehlklick/Neustart).
+  const draft = useRef(loadNewStreamDraft()).current;
+  const [label, setLabel] = useState(draft?.label ?? "");
+  const [prompt, setPrompt] = useState(draft?.prompt ?? "");
+  const [role, setRole] = useState<AgentRole>(draft?.role ?? (hasIntegrator ? "sub" : "integrator"));
   // Modell + Effort werden aus dem globalen Default (linke Navigation) vorbelegt, hier überschreibbar.
-  const [model, setModel] = useState(defaultModel);
-  const [effort, setEffort] = useState<EffortMode | undefined>(clampEffort(defaultModel, defaultEffort));
-  const [branch, setBranch] = useState("");
-  const [mode, setMode] = useState<PermissionMode>("auto");
+  const [model, setModel] = useState(draft?.model ?? defaultModel);
+  const [effort, setEffort] = useState<EffortMode | undefined>(
+    draft?.effort ?? clampEffort(defaultModel, defaultEffort),
+  );
+  const [branch, setBranch] = useState(draft?.branch ?? "");
+  const [mode, setMode] = useState<PermissionMode>(draft?.mode ?? "auto");
   const [mock, setMock] = useState(!sdkAvailable || !project);
+  // Wurde beim Öffnen ein Entwurf mit Inhalt wiederhergestellt? → sichtbarer Hinweis + „Verwerfen".
+  const [showRestored, setShowRestored] = useState(
+    !!draft && draftHasContent({ label: draft.label ?? "", prompt: draft.prompt ?? "", branch: draft.branch ?? "" }),
+  );
+
+  const discardDraft = () => {
+    setLabel("");
+    setPrompt("");
+    setBranch("");
+    setRole(hasIntegrator ? "sub" : "integrator");
+    setModel(defaultModel);
+    setEffort(clampEffort(defaultModel, defaultEffort));
+    setMode("auto");
+    clearNewStreamDraft();
+    setShowRestored(false);
+  };
+
+  // Auto-Speichern: jede Feldänderung sichert den Entwurf sofort in localStorage. So kostet KEIN
+  // Schließweg (Backdrop, Escape, Abbrechen, App-Neustart) den Text — erst der Submit räumt ihn ab.
+  useEffect(() => {
+    saveNewStreamDraft({ label, prompt, role, model, effort, branch, mode });
+  }, [label, prompt, role, model, effort, branch, mode]);
+
+  const dirty = draftHasContent({ label, prompt, branch });
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const l = label.trim() || (role === "integrator" ? "Main-Agent" : "Sub-Agent");
     const p = prompt.trim() || "Beschreibe deine Aufgabe…";
     void createAgent({ label: l, prompt: p, role, mock, model, effort, branch: branch.trim() || undefined, permissionMode: mode });
+    clearNewStreamDraft(); // Entwurf verbraucht → aufräumen
     onClose();
   };
+
+  // Escape schließt den Dialog — der Entwurf bleibt gespeichert und ist beim nächsten Öffnen wieder da.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const realSubNeedsProject = role === "sub" && !mock && !project;
 
@@ -46,11 +85,24 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
         downOnOverlay.current = e.target === e.currentTarget;
       }}
       onClick={(e) => {
-        if (downOnOverlay.current && e.target === e.currentTarget) onClose();
+        // Ein echter Backdrop-Klick schließt NUR, wenn nichts eingetippt ist. Sobald der Nutzer Inhalt
+        // hat, ignorieren wir den Klick (der gemeldete Datenverlust): der Dialog bleibt offen, statt
+        // spurlos zu verschwinden. Bewusstes Verlassen geht weiter über „Abbrechen" oder Escape (der
+        // Entwurf bleibt dabei gespeichert und kehrt beim nächsten Öffnen zurück).
+        if (downOnOverlay.current && e.target === e.currentTarget && !dirty) onClose();
       }}
     >
       <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <div className="modal-title">Neuer Entwicklungs-Stream</div>
+
+        {showRestored && (
+          <div className="modal-hint draft-restored">
+            ↩ Wiederhergestellter Entwurf.{" "}
+            <button type="button" className="linklike" onClick={discardDraft}>
+              Verwerfen
+            </button>
+          </div>
+        )}
 
         {!project && (
           <div className="modal-hint">
@@ -93,7 +145,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
               setEffort(clampEffort(m, effort));
             }}
             onEffort={setEffort}
-            className="dialog"
+            variant="dialog"
           />
         </label>
 

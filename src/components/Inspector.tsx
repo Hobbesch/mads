@@ -7,12 +7,15 @@ import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { agentBadges, nextStep, unsavedWork, gateDisabledReason, syncDisabledReason } from "../derive";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { saveNewStreamDraft, loadNewStreamDraft, draftHasContent } from "../newStreamDraft";
 import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
 import { ModelEffortPicker } from "./ModelEffortPicker";
+import { modelLabel } from "../modelCatalog";
+import { PromptButton, PromptManagerDialog } from "./PromptLibrary";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
-import { blobToBase64 } from "../blob";
+import { blobToBase64, makeThumbnail } from "../blob";
 import { loadUiPrefs, saveUiPrefs } from "../uiPrefs";
 import type { PermissionMode, ImageInput, AutopilotLevel } from "../../shared/protocol";
 
@@ -35,11 +38,15 @@ export function Inspector() {
   const outsourceMain = useStore((s) => s.outsourceMain);
   const commitMainRelease = useStore((s) => s.commitMainRelease);
   const updateMain = useStore((s) => s.updateMain);
+  const resetMain = useStore((s) => s.resetMain);
   const continueStream = useStore((s) => s.continueStream);
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
   const startDevServer = useStore((s) => s.startDevServer);
   const stopDevServer = useStore((s) => s.stopDevServer);
+  const configureDevServer = useStore((s) => s.configureDevServer);
+  const mergeReview = useStore((s) => s.mergeReview);
+  const closeReview = useStore((s) => s.closeReview);
   const devLog = useStore((s) => (s.selectedId ? s.devLog[s.selectedId] ?? NO_DEVLOG : NO_DEVLOG));
   const devLogRef = useRef<HTMLDivElement>(null);
   const devLogStickRef = useRef(true); // an den unteren Rand „geklebt"? (nur dann folgen)
@@ -75,6 +82,10 @@ export function Inspector() {
     null | { title: string; body: React.ReactNode; confirmLabel: string; danger?: boolean; onConfirm: () => void }
   >(null);
   const [dragging, setDragging] = useState(false); // Bild per Drag&Drop in den Composer
+  const [integratorGuard, setIntegratorGuard] = useState(false); // Rückfrage vor dem Senden an den Integrator (main)
+  // Prompt-Verwaltungs-Dialog: HIER (außerhalb des Composer-<form>) gerendert, damit sein
+  // Bearbeiten-Formular kein verschachteltes <form> im Composer wird.
+  const [managePrompts, setManagePrompts] = useState(false);
 
   // Auto-wachsende Composer-Höhe (Textarea): bei jeder Entwurfs-Änderung neu messen.
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -94,12 +105,10 @@ export function Inspector() {
     );
   }
 
-  const submit = (e?: { preventDefault: () => void }) => {
-    e?.preventDefault();
+  // Der eigentliche Versand (nach evtl. Guard). Datei-Anhänge (Nicht-Bilder) als lesbare Referenzen in
+  // den Prompt hängen — der Agent liest sie über den Pfad (in `.mads/attachments/`, im cwd → keine Rückfrage).
+  const doSend = () => {
     let text = draft.trim();
-    if (!text && attached.length === 0 && attachedFiles.length === 0) return;
-    // Datei-Anhänge (Nicht-Bilder) als lesbare Referenzen in den Prompt hängen — der Agent
-    // liest sie über den Pfad (liegen in `.mads/attachments/`, im cwd → keine Rückfrage).
     if (attachedFiles.length) {
       const list = attachedFiles.map((f) => `- ${f.relPath}`).join("\n");
       text = `${text ? text + "\n\n" : ""}📎 Angehängte Dateien (bitte lesen):\n${list}`;
@@ -110,11 +119,47 @@ export function Inspector() {
     setDraftFiles(selectedId, []);
   };
 
+  // Integrator-Guard „Als Sub-Stream starten": den getippten Text in einen frischen Sub-Stream-Entwurf
+  // legen und den „Neuer Stream"-Dialog vorbefüllt öffnen — so beginnt die Arbeit gleich im richtigen
+  // Sub-Stream statt (versehentlich) auf main. VERLUSTFREI: liegt bereits ein (nicht gespeicherter)
+  // „Neuer Stream"-Entwurf vor, wird er NICHT überschrieben — dann öffnet nur der Dialog, und der
+  // Integrator-Text bleibt im Composer. Bild-/Datei-Anhänge bleiben ohnehin im Composer (der Dialog
+  // kann sie nicht übernehmen). So geht in keinem Fall Text verloren.
+  const redirectToSubStream = () => {
+    const s = useStore.getState();
+    const existing = loadNewStreamDraft();
+    const hasPending = !!existing && draftHasContent({ label: existing.label ?? "", prompt: existing.prompt ?? "", branch: existing.branch ?? "" });
+    if (!hasPending) {
+      saveNewStreamDraft({ label: "", prompt: draft.trim(), role: "sub", model: s.defaultModel, effort: s.defaultEffort, branch: "", mode: "auto" });
+      setDraft(selectedId, ""); // Text lebt jetzt im persistenten Entwurf → übersteht Abbrechen des Dialogs
+    }
+    s.requestNewStream();
+  };
+
+  const submit = (e?: { preventDefault: () => void }) => {
+    e?.preventDefault();
+    if (!draft.trim() && attached.length === 0 && attachedFiles.length === 0) return;
+    // Guard gegen versehentliches Arbeiten im INTEGRATOR (main): er soll nur integrieren, nicht direkt
+    // umsetzen — Umsetzungen gehören in einen Sub-Stream. Greift bei jedem TEXT an den Integrator
+    // (nur-Anhänge ohne Text → direkt senden, ein Redirect wäre sinnlos). Der Integrator wartet
+    // Rückfragen NICHT im Composer ab (das läuft über den Permission-/Frage-Dialog), daher keine
+    // Status-Ausnahme. Beide Guard-Aktionen sind verlustfrei.
+    if (agent.role === "integrator" && !!draft.trim()) {
+      setIntegratorGuard(true);
+      return;
+    }
+    doSend();
+  };
+
   // Bild-Dateien (aus Paste ODER Drag&Drop) als Anhänge übernehmen (base64, ImageInput).
   const attachImageFiles = async (files: File[]) => {
     const imgs: ImageInput[] = [];
     for (const f of files) {
-      if (f.type.startsWith("image/")) imgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f) });
+      if (!f.type.startsWith("image/")) continue;
+      // Thumbnail gleich hier erzeugen (Canvas gibt's nur im Frontend) → es reist im user_text-Event
+      // mit, damit Mac UND Remote das echte Bild statt eines Zählers zeigen.
+      const thumb = await makeThumbnail(f);
+      imgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f), ...thumb });
     }
     if (imgs.length) setDraftImages(selectedId, [...attached, ...imgs]);
     return imgs.length;
@@ -249,7 +294,16 @@ export function Inspector() {
     else if (step.kind === "pr") void createPr(selectedId);
     else if (step.kind === "integrate") askMerge(true); // Default = mergen + Stream BEHALTEN
     else if (step.kind === "outsource") askOutsource();
+    else if (step.kind === "commit_release") askCommitRelease(); // Deploy-Fall: Release-Commit ist primär
     else if (step.kind === "cleanup") void stopAgent(selectedId, true); // bereits gemergt → sicher
+  };
+
+  // Gespeicherten Prompt in den Composer-ENTWURF einfügen (nie automatisch senden — der
+  // Mensch liest und schickt selbst ab): leer → Text, sonst Entwurf + Leerzeile + Text.
+  const insertPromptText = (text: string) => {
+    const cur = draft;
+    setDraft(selectedId, cur.trim() ? `${cur.replace(/\s+$/, "")}\n\n${text}` : text);
+    composerRef.current?.focus();
   };
 
   return (
@@ -321,17 +375,60 @@ export function Inspector() {
                 effort={agent.effort}
                 onModel={(m) => void setStreamModel(selectedId, m)}
                 onEffort={(e) => void setStreamEffort(selectedId, e)}
-                className="inspector"
+                variant="inspector"
               />
+            </div>
+          )}
+          {/* Doppel-Check: läuft der Stream real auf einem ANDEREN Modell als angefordert (stiller
+              SDK-Default), das laut + sichtbar machen — der Picker allein spiegelt nur den Wunsch. */}
+          {agent.modelMismatch && agent.activeModel && (
+            <div
+              className="insp-model-warn"
+              title="Der SDK lief auf einem anderen Modell als angefordert. mads zieht automatisch nach — bei Bedarf im Picker erneut umstellen."
+            >
+              ⚠ läuft real auf {modelLabel(agent.activeModel)}
             </div>
           )}
           </div>
           {/* Cluster 2 — Aktions-Buttons (kontextabhängig). Bricht als eigene Einheit um. */}
           <div className="insp-ops">
+          {/* Review-Stream (fremder PR, read-only): PR annehmen ODER verwerfen — KEIN „Fortsetzen"
+              (es ist keine KI-Session). Dev-Server-Knopf steht separat weiter unten. */}
+          {agent.reviewPr && (
+            <>
+              <button
+                className="step-primary"
+                title={`PR #${agent.reviewPr} squash-mergen und Review-Stream schließen`}
+                onClick={() =>
+                  setConfirm({
+                    title: `PR #${agent.reviewPr} nach main mergen?`,
+                    body: (
+                      <p>
+                        Squash-merged den fremden PR nach <code>main</code> und schließt den Review-Stream. Außen-sichtbar.
+                        <br />
+                        <small>Kein automatischer CI-Check — deine Prüfung (Dev-Server/Diff) entscheidet.</small>
+                      </p>
+                    ),
+                    confirmLabel: "PR mergen",
+                    onConfirm: () => void mergeReview(selectedId),
+                  })
+                }
+              >
+                ✓ PR #{agent.reviewPr} mergen
+              </button>
+              <button
+                className="step-primary cleanup"
+                title="Review verwerfen (Worktree entfernen) — der fremde PR bleibt unberührt"
+                onClick={() => void closeReview(selectedId)}
+              >
+                ✕ Verwerfen
+              </button>
+            </>
+          )}
           {/* Passiv wiederhergestellt → erst reaktivieren, bevor Git-Aktionen möglich sind.
               Beim INTEGRATOR (Leitstelle) erst rückfragen: reaktivieren kann sofort Aktionen
               auslösen (versehentliches „Fortsetzen" hat genau das getan). */}
-          {!live && (
+          {!live && !agent.reviewPr && (
             <button
               className="step-primary"
               title="Stream fortsetzen (Session reaktivieren, dann weiterarbeiten)"
@@ -368,11 +465,16 @@ export function Inspector() {
             </button>
           )}
           {/* Geführter „nächster Schritt": Committen → PR erstellen → Integrieren */}
-          {live && step.kind !== "none" && (
+          {/* Auch bei einem PASSIV wiederhergestellten Stream (nach App-Neustart, live=false) den Schritt
+              ZEIGEN — nur deaktiviert und mit Grund. Vorher war der Knopf komplett ausgeblendet: der
+              „Mergen & weiterarbeiten"-Knopf fehlte nach jedem Neustart spurlos, obwohl ein offener PR
+              da war, und niemand konnte sehen warum. Handeln kann mads erst, wenn der Stream wieder im
+              Pool ist → „Fortsetzen". */}
+          {step.kind !== "none" && (
             <button
               className={`step-primary${step.kind === "cleanup" ? " cleanup" : ""}`}
-              disabled={step.disabled}
-              title={step.hint}
+              disabled={step.disabled || !live}
+              title={live ? step.hint : `${step.label}: erst „Fortsetzen“ — der Stream ist nach dem App-Neustart noch nicht aktiv.`}
               onClick={runStep}
             >
               {step.label}
@@ -402,6 +504,16 @@ export function Inspector() {
               Als Release committen
             </button>
           )}
+          {/* Deploy-Fall (main_deploy_dirty): „Als Release committen" ist die Primäraktion (oben) —
+              das Auslagern in einen Sub-Stream bleibt als sekundäre Alternative erreichbar. */}
+          {live && step.kind === "commit_release" && (
+            <button
+              title="Deine uncommitteten main-Änderungen stattdessen in einen neuen Sub-Stream verschieben (main bleibt sauber; normaler Commit→PR→Integrate-Fluss)."
+              onClick={askOutsource}
+            >
+              In Sub-Stream auslagern
+            </button>
+          )}
           {live && agent.role === "sub" && agent.worktreePath && (
             <button
               disabled={!!gateDisabledReason(agent)}
@@ -417,7 +529,8 @@ export function Inspector() {
           {agent.role === "sub" && agent.worktreePath && (
             (() => {
               const ds = agent.devServer;
-              const on = !!ds && ds.state !== "stopped" && ds.state !== "error";
+              // „unconfigured" gilt als AUS (nicht laufend) — sonst würde der Knopf fälschlich „stoppen".
+              const on = !!ds && ds.state !== "stopped" && ds.state !== "error" && ds.state !== "unconfigured";
               const label =
                 ds?.state === "running"
                   ? "■ Dev-Server (läuft)"
@@ -427,17 +540,29 @@ export function Inspector() {
                       ? "■ Dev-Server (startet…)"
                       : "▶ Dev-Server";
               return (
-                <button
-                  className={`devserver-btn${on ? " on" : ""}`}
-                  onClick={() => (on ? void stopDevServer(selectedId) : void startDevServer(selectedId))}
-                  title={
-                    on
-                      ? "Dev-Server dieses Streams stoppen"
-                      : "Front-/Backend dieses Streams lokal starten (aus dem Worktree — main bleibt unberührt). Konfig: .mads/run.json"
-                  }
-                >
-                  {label}
-                </button>
+                <>
+                  <button
+                    className={`devserver-btn${on ? " on" : ""}`}
+                    onClick={() => (on ? void stopDevServer(selectedId) : void startDevServer(selectedId))}
+                    title={
+                      on
+                        ? "Dev-Server dieses Streams stoppen"
+                        : "Front-/Backend dieses Streams lokal starten (aus dem Worktree — main bleibt unberührt). Konfig: .mads/run.json"
+                    }
+                  >
+                    {label}
+                  </button>
+                  {/* „Konfigurieren": öffnet .mads/run.json im Editor (mit erkannter Vorlage) — hier
+                      konstruiert der Nutzer projekt-spezifisch, WAS beim Start passiert. Prominent bei
+                      „unconfigured", sonst als dezenter Zahnrad-Knopf immer erreichbar. */}
+                  <button
+                    className={`devserver-config${ds?.state === "unconfigured" ? " prominent" : ""}`}
+                    onClick={() => void configureDevServer(selectedId)}
+                    title="Dev-Server einrichten/anpassen — .mads/run.json im Editor öffnen"
+                  >
+                    {ds?.state === "unconfigured" ? "⚙ Konfigurieren" : "⚙"}
+                  </button>
+                </>
               );
             })()
           )}
@@ -485,18 +610,37 @@ export function Inspector() {
               main aktualisieren ({agent.behind})
             </button>
           )}
+          {live && agent.role === "integrator" && agent.ahead > 0 && (
+            <button
+              onClick={() => void resetMain(selectedId)}
+              title={`Dein main-Checkout ist ${agent.ahead} lokale(n), nicht gepushte(n) Commit(s) VORAUS (die ein fast-forward nicht auflöst — z. B. Release-/Versions-Bumps). Hart auf origin zurücksetzen; ein Backup-Branch wird vorher gesichert.`}
+            >
+              main auf origin zurücksetzen ({agent.ahead})
+            </button>
+          )}
           {agent.pr && (
             <button onClick={() => void openUrl(agent.pr!.url)} title="PR auf GitHub öffnen">
               PR #{agent.pr.number} ↗
             </button>
           )}
-          <button
-            className="danger"
-            onClick={askStop}
-            title="Stoppen + aufräumen (Worktree/Branch entfernen bei Sub)"
-          >
-            Stop
-          </button>
+          {agent.reviewPr ? (
+            // Review-Stream: die generische „Stop" (pool-only stop_agent) greift hier NICHT und würde
+            // den Worktree lecken + den PR dauerhaft ausblenden. Stattdessen der PR-Link; Verwerfen/Mergen
+            // stehen unten als eigene Aktionen.
+            agent.reviewUrl && (
+              <button onClick={() => void openUrl(agent.reviewUrl!)} title="PR auf GitHub öffnen">
+                PR #{agent.reviewPr} ↗
+              </button>
+            )
+          ) : (
+            <button
+              className="danger"
+              onClick={askStop}
+              title="Stoppen + aufräumen (Worktree/Branch entfernen bei Sub)"
+            >
+              Stop
+            </button>
+          )}
           </div>
         </div>
       </header>
@@ -556,6 +700,21 @@ export function Inspector() {
               {b.label}
             </span>
           ))}
+        </div>
+      )}
+
+      {Object.keys(agent.subAgents ?? {}).length > 0 && (
+        <div className="subagents-panel">
+          <div className="subagents-title">▶ Teil-Agenten · {Object.keys(agent.subAgents ?? {}).length} aktiv</div>
+          {Object.values(agent.subAgents ?? {})
+            .sort((a, b) => a.startedAt - b.startedAt)
+            .map((sa) => (
+              <div key={sa.id} className="subagent-row">
+                <span className="subagent-dot" title="läuft" />
+                <span className="subagent-label">{sa.label}</span>
+                {sa.currentStep && <span className="subagent-step">{sa.currentStep}</span>}
+              </div>
+            ))}
         </div>
       )}
 
@@ -641,6 +800,8 @@ export function Inspector() {
             aria-hidden="true"
             tabIndex={-1}
           />
+          {/* Prompt-Bibliothek: fügt kuratierte Prompts in den ENTWURF ein (nie Auto-Send). */}
+          <PromptButton role={agent.role} onInsert={insertPromptText} onManage={() => setManagePrompts(true)} />
           <button
             type="button"
             className="composer-btn attach"
@@ -731,6 +892,26 @@ export function Inspector() {
           danger={confirm.danger}
           onConfirm={confirm.onConfirm}
           onClose={() => setConfirm(null)}
+        />
+      )}
+      {managePrompts && <PromptManagerDialog onClose={() => setManagePrompts(false)} />}
+      {integratorGuard && (
+        <ConfirmDialog
+          title="Im Integrator (main) arbeiten?"
+          confirmLabel="Als Sub-Stream starten"
+          cancelLabel="Abbrechen"
+          secondary={{ label: "An Integrator senden", onClick: doSend }}
+          body={
+            <>
+              <p>
+                Das ist der <b>Integrator</b> (main) — er soll nur <b>integrieren</b>, nicht direkt umsetzen.
+                Umsetzungen gehören in einen Sub-Stream (main bleibt nur über grün-getestete PR-Merges aktuell).
+              </p>
+              <p>Deinen Text als neuen <b>Sub-Stream</b> starten — oder trotzdem an den Integrator senden?</p>
+            </>
+          }
+          onConfirm={redirectToSubStream}
+          onClose={() => setIntegratorGuard(false)}
         />
       )}
     </section>

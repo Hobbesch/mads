@@ -12,17 +12,21 @@
  */
 import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
-import { createWorktree, removeWorktree } from "./git.js";
+import { createWorktree, removeWorktree, worktreeFingerprint } from "./git.js";
+import { ensureMadsDir } from "./persistence.js";
 import { classifyToolCall, isDeployCommand, isGitCommit, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
 import { scrubbedAgentEnv } from "./agentEnv.js";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { DEFAULT_MODEL } from "../../shared/protocol.js";
 import type {
   StartAgentMsg,
   PermissionDecision,
   AgentStatus,
   ImageInput,
+  TimelineAttachment,
   AutopilotLevel,
   PullRequestInfo,
 } from "../../shared/protocol.js";
@@ -88,6 +92,25 @@ function effortOptions(effort?: string): Record<string, unknown> {
   if (effort === "ultracode") return { effort: "xhigh", settings: { ultracode: true } };
   return { effort };
 }
+/**
+ * Modell-IDs fürs Gegenprüfen kanonisieren: Region-Präfix (`us.`/`eu.`/`anthropic.`) und
+ * Datums-Suffix (`-20260722`) strippen. Sonst gälte ein vom SDK echotes
+ * `us.anthropic.claude-opus-4-8-20260722` fälschlich als Mismatch zum kurzen `claude-opus-4-8`
+ * → dauerndes Falsch-Warn-Badge („cries wolf"). Der eigentliche Fall (Fable ≠ Opus) bleibt erkannt.
+ */
+export function normalizeModelId(id: string): string {
+  // `+` strippt auch zusammengesetzte Präfixe wie `us.anthropic.` (mehrere Segmente).
+  return id.replace(/^(?:(?:us|eu|apac|anthropic)\.)+/, "").replace(/-\d{8}$/, "");
+}
+/**
+ * Gehört diese SDK-Stream-Nachricht dem HAUPTLOOP (nicht einem Sub-Agenten)? Der Agent-SDK setzt
+ * bei Nachrichten aus einem Task/Explore-Sub-Agenten `parent_tool_use_id` auf dessen tool_use_id;
+ * beim Hauptloop ist es `null`/fehlt. Wichtig fürs Modell-Gegenprüfen: Sub-Agenten laufen bewusst
+ * auf dem schnellen Modell (Haiku) — ihr Modell darf das Stream-Modell nicht als „Haiku" fehlmelden.
+ */
+function isMainLoop(m: Record<string, unknown>): boolean {
+  return m.parent_tool_use_id == null; // deckt null UND undefined (fehlt) ab
+}
 /** Live-Variante fürs applyFlagSettings (Flag-Layer). */
 function effortFlagSettings(effort: string): Record<string, unknown> {
   if (effort === "ultracode") return { effortLevel: "xhigh", ultracode: true };
@@ -133,6 +156,24 @@ function apiErrorInfo(err: string): { message: string; recoverable: boolean } {
   }
 }
 
+/** Obergrenze für ein Inline-Thumbnail (base64-Länge). Ein 320px-JPEG liegt typisch bei 10–30 KB;
+ *  256 KB ist grosszügig und deckelt zugleich Ringpuffer/Snapshot-Replay/Bridge gegen Missbrauch. */
+const MAX_THUMB_B64 = 256 * 1024;
+
+/** Obergrenze fürs VOLLBILD (base64-Länge, ~27 MB ≈ 20 MB Datei — spiegelt den Frontend-Anhang-Cap).
+ *  Greift vor allem gegen ein gekoppeltes REMOTE, das sonst ungedeckelt auf die Platte schreiben könnte. */
+const MAX_IMAGE_B64 = 27 * 1024 * 1024;
+
+/** Datei-Endung für abgelegte Bild-Anhänge (nur Anzeige/Debug — der mediaType bleibt im Event). */
+const IMG_EXT: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/svg+xml": "svg",
+  "image/bmp": "bmp",
+};
+
 function userMsg(text: string, images?: ImageInput[]): SdkUserMessage {
   if (images && images.length > 0) {
     const content: unknown[] = [{ type: "text", text }];
@@ -170,6 +211,14 @@ export class AgentSession {
   role?: "integrator" | "sub";
   model?: string;
   effort?: string;
+  /** Doppel-Check: real vom SDK gelaufenes Modell (normalisiert, aus Init/Assistant-Nachrichten). */
+  activeModel?: string;
+  /** Fremd-Edit-Schutz: Worktree-Fingerprint zum ENDE des letzten Agent-Turns. Der Autopilot
+   *  committet nur, wenn der Worktree danach unverändert ist — sonst ist etwas fremdes reingekommen. */
+  turnFingerprint?: string;
+  /** Für welches konkrete Fehl-Modell schon gewarnt+nachgezogen wurde (verhindert Spam, erlaubt
+   *  aber eine neue Warnung, falls der SDK auf ein ANDERES falsches Modell driftet). */
+  private mismatchCorrectedFor?: string;
   lastPrompt?: string;
   mock = false;
   // Autopilot (Phase 2): vom Orchestrator gesetzt/gelesen (treibt autopilotPass). Default
@@ -196,11 +245,15 @@ export class AgentSession {
   private readonly perms?: PermissionHooks;
   private q?: QueryHandle;
   private readonly onChange?: () => void;
+  /** Liefert (LIVE, beim Start abgefragt) die Zusammenfassung der AKTIVEN Streams — damit der Agent
+   *  weiß, welche Streams existieren, und Arbeit nicht an einen geschlossenen „Phantom-Stream" routet. */
+  private readonly streamsContext?: () => string;
 
-  constructor(agentId: string, onChange?: () => void, perms?: PermissionHooks) {
+  constructor(agentId: string, onChange?: () => void, perms?: PermissionHooks, streamsContext?: () => string) {
     this.agentId = agentId;
     this.onChange = onChange;
     this.perms = perms;
+    this.streamsContext = streamsContext;
   }
 
   /** Wartet eine Permission-Rückfrage? (Autopilot agiert nur, wenn der Stream ruhig ist.) */
@@ -260,11 +313,17 @@ export class AgentSession {
     this.branch = msg.branch;
     this.label = msg.label;
     this.role = msg.role;
-    this.model = msg.model;
+    // PRÄVENTION (Doppel-Check, Schicht 1): NIE undefined ans SDK — sonst wählt es sein Flaggschiff
+    // (Fable 5) und verbrennt teure Tokens „blind". Ein verlorenes Modell beim Resume (msg.model
+    // undefined) fällt hier auf den Default (Opus) zurück, statt still auf Fable zu laufen.
+    this.model = msg.model || DEFAULT_MODEL;
     this.effort = msg.effort;
-    this.lastPrompt = msg.prompt;
+    // Die automatische „Setze die Arbeit fort"-Anweisung beim Resume ist KEIN Nutzer-Auftrag: sie darf
+    // den zuletzt gemerkten (ggf. via Orchestrator aus der Registry vorgeladenen) Auftrag nicht
+    // überschreiben, sonst zeigt die Kachel nach dem Neustart den Nudge statt des echten Auftrags.
+    if (!msg.continuation) this.lastPrompt = msg.prompt;
     this.permissionMode = msg.permissionMode;
-    this.emitUserText(msg.prompt); // Start-Prompt beidseitig sichtbar machen
+    this.emitUserText(msg.prompt, undefined, msg.continuation); // Start-Prompt beidseitig sichtbar machen
     this.inbox.push(userMsg(msg.prompt));
     this.setStatus("running", "starting up");
 
@@ -291,6 +350,25 @@ export class AgentSession {
     }
 
     this.cwd = cwd;
+
+    // Cross-Machine-Härtung (Session-Schicht): Eine fortzusetzende Claude-Session liegt lokal unter
+    // ~/.claude/projects/<enc(cwd)>/<sessionId>.jsonl — PRO RECHNER, NICHT im Repo. Kopiert man ein
+    // mads-Repo auf einen anderen Mac, fehlt sie dort → der SDK-Resume scheitert hart mit „No conversation
+    // found with session ID" (consume_failed) und der Stream ist unbrauchbar. Ist die Session lokal nicht
+    // vorhanden, setzen wir stattdessen mit einer FRISCHEN Session im selben Worktree/Branch fort (die
+    // Anzeige-Historie kommt weiterhin aus .mads/transcripts). Best effort — die On-disk-Ablage ist
+    // Claude-intern; schlägt der Check fehl, bleibt der harte consume-Fehler als Backstop.
+    let resume = msg.resumeSessionId;
+    if (resume && !this.claudeSessionExists(cwd, resume)) {
+      log(`[${this.agentId}] Resume-Session ${resume} lokal nicht gefunden (Repo von anderem Rechner kopiert?) → frische Session im selben Worktree`);
+      this.emitText(
+        "ℹ Die frühere Konversation dieses Streams ist auf diesem Rechner nicht vorhanden " +
+          "(vermutlich von einem anderen Mac kopiert — Claude-Sessions liegen pro Rechner in ~/.claude, " +
+          "nicht im Repo). Ich setze im selben Worktree/Branch mit einer neuen Session fort; die bisherige " +
+          "Verlaufsanzeige bleibt erhalten.",
+      );
+      resume = undefined;
+    }
 
     try {
       const sdk = (await import("@anthropic-ai/claude-agent-sdk")) as unknown as {
@@ -370,7 +448,7 @@ export class AgentSession {
         options: {
           cwd,
           env: agentEnv.env,
-          model: msg.model,
+          model: this.model, // coerciert (nie undefined) — siehe DEFAULT_MODEL-Zuweisung in start()
           // Effort/Ultracode (SDK-nativ): low/medium/high/xhigh → options.effort;
           // ultracode → effort xhigh + settings.ultracode. Ohne Effort → SDK-Default (high).
           ...effortOptions(msg.effort),
@@ -409,6 +487,21 @@ export class AgentSession {
                   "um die vom Menschen gewünschte parallele Sub-Agenten-Arbeit zu erledigen.\n" +
                   "Außen-git (push/pr/merge) macht weiterhin nur mads über die UI; mergen tust nur du."
                 : "") +
+              // Stream-Zuständigkeit ist TRANSIENT (endet beim Merge) — verhindert das Routen an
+              // Phantom-Streams: der Agent lehnte Arbeit ab „gehört zu Stream X", obwohl X längst
+              // geschlossen+gemergt war (dessen Dateien liegen dann in main und gehören NIEMANDEM).
+              "\nStream-Zuständigkeit & Ownership (WICHTIG, verhindert Fehl-Routing):\n" +
+              "• Die Zuordnung Feature-X-gehört-zu-Stream-Y gilt NUR, solange Stream Y AKTIV ist. " +
+              "Ist Y gemergt und geschlossen, liegen seine Dateien in main und gehören KEINEM Stream " +
+              "mehr — du darfst sie in deinem Stream bearbeiten.\n" +
+              "• mads' `ownership_trespass`-Gate greift AUSSCHLIESSLICH zwischen AKTIVEN Parallel-Streams. " +
+              "Für einen geschlossenen Stream kann es NICHT auslösen — sage nie einen Trespass voraus, " +
+              "ohne dass der besitzende Stream in der Liste unten steht.\n" +
+              "• Bevor du Arbeit an einen anderen Stream zurückgibst oder mit Ownership ablehnst: " +
+              "PRÜFE, ob dieser Stream noch lebt — in der Liste unten oder via " +
+              "git branch -a --list 'mads/<name>'. Fehlt der Branch und liegt die Datei schon in " +
+              "main, ist der Stream zu → mach die Arbeit hier.\n" +
+              (this.streamsContext?.() ?? "") +
               loadProjectGuide(cwd),
           },
           // "auto" wird mads-seitig behandelt (Auto-Freigabe im canUseTool); dem SDK
@@ -417,7 +510,7 @@ export class AgentSession {
           includePartialMessages: false,
           allowedTools: msg.allowedTools,
           disallowedTools: msg.disallowedTools,
-          resume: msg.resumeSessionId,
+          resume, // vorvalidiert: fehlt die Session lokal (Cross-Machine), ist dies undefined → frischer Start
           forkSession: msg.forkSession,
           stderr: (d: string) => log(`[claude ${this.agentId}]`, d),
           canUseTool: (toolName: string, input: Record<string, unknown>, opts: Record<string, unknown>) =>
@@ -603,6 +696,7 @@ export class AgentSession {
   }
 
   sendInput(text: string, images?: ImageInput[]): void {
+    if (text.trim()) this.lastPrompt = text; // Folge-Auftrag merken (Kachel-Übersicht, Resume-fest)
     this.emitUserText(text, images); // Folge-Anweisung beidseitig sichtbar machen
     this.inbox.push(userMsg(text, images));
     this.setStatus("running");
@@ -626,11 +720,53 @@ export class AgentSession {
   async setModelEffort(model?: string, effort?: string): Promise<void> {
     if (model !== undefined && model !== "") {
       this.model = model;
+      this.mismatchCorrectedFor = undefined; // frische Absicht → ein neuer Mismatch darf wieder warnen
       await this.q?.setModel?.(model);
     }
     if (effort !== undefined && effort !== "") {
       this.effort = effort;
       await this.q?.applyFlagSettings?.(effortFlagSettings(effort));
+    }
+  }
+
+  /**
+   * DETEKTION (Doppel-Check, Schicht 2): das REAL vom SDK gelaufene Modell (aus Init-/Assistant-
+   * Nachrichten) gegen das angeforderte prüfen. Weicht es ab (z. B. Fable statt Opus), aktiv
+   * `setModel(angefordert)` nachziehen und den Menschen EINMAL warnen — so verbrennt kein stiller
+   * Modellwechsel unbemerkt Tokens. Meldet den Ist-Stand ans UI (Picker zeigt Ist, nicht Wunsch).
+   */
+  private reconcileActiveModel(actual: string | undefined): void {
+    if (!actual) return;
+    // Platzhalter-„Modelle" ignorieren: der SDK taggt synthetische Nachrichten (Kompaktierung,
+    // Fehler-/System-Einschübe) mit `<synthetic>` o. Ä. — das ist KEIN reales Modell und darf das
+    // Stream-Modell nicht als „<synthetic>" fehlmelden (Fehlalarm-Badge). Reale IDs sind `claude-…`.
+    if (actual.startsWith("<") || !/^[a-z]/i.test(actual)) return;
+    const norm = normalizeModelId(actual);
+    if (norm === this.activeModel) return; // nur bei echter Änderung — drosselt den Emit
+    this.activeModel = norm;
+    const mismatch = !!this.model && norm !== normalizeModelId(this.model);
+    this.emit({ ...envelope(), type: "model_active", agentId: this.agentId, active: norm, requested: this.model, mismatch });
+    if (mismatch) {
+      // Je konkretem Fehl-Modell EINMAL warnen+nachziehen; driftet der SDK auf ein ANDERES falsches
+      // Modell, darf erneut gewarnt werden (mismatchCorrectedFor trackt das zuletzt behandelte).
+      if (this.mismatchCorrectedFor !== norm) {
+        this.mismatchCorrectedFor = norm;
+        log(`[${this.agentId}] MODELL-MISMATCH: SDK lief auf ${norm}, angefordert ${this.model} → versuche nachzuziehen`);
+        this.emit({
+          ...envelope(),
+          type: "agent_event",
+          agentId: this.agentId,
+          event: {
+            kind: "assistant_text",
+            // Bewusst „versucht": setModel ist fire-and-forget; ist das Wunschmodell nicht verfügbar,
+            // bleibt der SDK beim Fallback. Das Badge zeigt dann weiter die Wahrheit (reales Modell).
+            text: `⚠ Modell-Abweichung: Dieser Stream läuft real auf **${norm}**, angefordert war **${this.model}**. mads versucht, auf ${this.model} nachzuziehen.`,
+          },
+        });
+        void this.q?.setModel?.(this.model);
+      }
+    } else {
+      this.mismatchCorrectedFor = undefined; // wieder in Deckung → ein späterer Mismatch darf erneut warnen
     }
   }
 
@@ -657,10 +793,17 @@ export class AgentSession {
           case "system":
             if (m.subtype === "init") {
               this.sessionId = m.session_id as string;
+              // NUR den Hauptloop gegenprüfen: ein Sub-Agent (Task/Explore-Tool) läuft bewusst auf
+              // dem schnellen Modell (Haiku) und emittiert eine EIGENE init mit gesetztem
+              // parent_tool_use_id — die darf das Stream-Modell NICHT als „Haiku" fehlmelden.
+              if (isMainLoop(m)) this.reconcileActiveModel(m.model as string | undefined);
               this.onChange?.();
             }
             break;
           case "assistant": {
+            // Doppel-Check: jede Assistant-Nachricht des HAUPTLOOPS trägt das real gelaufene Modell.
+            // Sub-Agent-Antworten (parent_tool_use_id gesetzt) überspringen — sie laufen legitim auf Haiku.
+            if (isMainLoop(m)) this.reconcileActiveModel((m.message as { model?: string })?.model);
             const content = ((m.message as { content?: unknown[] })?.content ?? []) as Array<Record<string, unknown>>;
             for (const block of content) {
               if (block.type === "text") {
@@ -669,7 +812,10 @@ export class AgentSession {
                 const t = String(block.thinking ?? block.text ?? "");
                 if (t) this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "thinking", text: t } });
               } else if (block.type === "tool_use") {
-                this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId: String(block.id), name: String(block.name), input: (block.input ?? {}) as Record<string, unknown> } });
+                // parent_tool_use_id mitgeben: bei einem Sub-Agenten (Task/Agent-Tool) trägt die Nachricht
+                // die tool_use_id ihres Starters → das Frontend ordnet die Aktivität dem Teil-Agenten zu.
+                const parentToolUseId = (m.parent_tool_use_id as string | null) ?? undefined;
+                this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId: String(block.id), name: String(block.name), input: (block.input ?? {}) as Record<string, unknown>, parentToolUseId } });
                 this.setStatus("running", String(block.name));
               }
             }
@@ -734,6 +880,17 @@ export class AgentSession {
               isError: Boolean(m.is_error),
             });
             this.setStatus(m.is_error ? "error" : "done");
+            // Fremd-Edit-Schutz: den Worktree-Zustand JETZT (Turn-Ende, alle Tool-Calls fertig) als
+            // „agent-authored" festhalten. AWAIT (nicht floating): sonst könnte der 25s-Poll im ms-Fenster
+            // danach mit undefined/veraltetem Fingerprint prüfen → ungeguardeter Commit ODER Falsch-Pause
+            // (Review-Race 4a/b/c). Der Turn ist hier zu Ende → das kurze Warten stört nichts.
+            if (this.worktreePath) {
+              try {
+                this.turnFingerprint = await worktreeFingerprint(this.worktreePath);
+              } catch {
+                /* git-Fehler → Fingerprint bleibt wie er war; Guard fällt im Zweifel auf „kein Vergleich" */
+              }
+            }
             break;
           }
           default:
@@ -803,10 +960,76 @@ export class AgentSession {
   /** Die vom Menschen eingegebene Anweisung als Event ausspielen → auf ALLEN Clients (Mac + Remote)
    *  im Verlauf sichtbar, nicht nur dort, wo sie getippt wurde. Geht durch den zentralen Egress →
    *  Timeline-Puffer (Snapshot-Replay für später verbundene Remotes) UND Bridge-Tee. */
-  private emitUserText(text: string, images?: ImageInput[]): void {
+  private emitUserText(text: string, images?: ImageInput[], continuation?: boolean): void {
     const t = text.trim();
-    if (!t) return;
-    this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "user_text", text: t, images: images?.length } });
+    // Vollbilder EINMAL auf Platte legen; ins Event geht nur die Referenz + das kleine Thumbnail.
+    const attachments = (images ?? []).map((im) => this.persistAttachment(im));
+    if (!t && attachments.length === 0) return; // nichts zu zeigen
+    this.emit({
+      ...envelope(),
+      type: "agent_event",
+      agentId: this.agentId,
+      // continuation markiert die automatische Resume-Anweisung — sie steht zwar sichtbar im Verlauf,
+      // darf aber die Kachel-Auftragsanzeige NICHT übernehmen (Frontend überspringt sie dafür).
+      event: { kind: "user_text", text: t, attachments: attachments.length ? attachments : undefined, continuation: continuation || undefined },
+    });
+  }
+
+  /** Das Vollbild eines Anhangs einmal ins (gitignorte) `.mads/attachments/` schreiben und die
+   *  Timeline-Referenz bauen. Bewusst SYNC: so steht das user_text-Event garantiert VOR der Antwort
+   *  des Agenten in der Timeline (emit vor inbox.push). Ohne cwd (Mock/kein Projekt) wird nichts
+   *  geschrieben → Thumbnail ja, Vollbild-Klick nein. Schreibfehler dürfen die Nachricht nie killen. */
+  private persistAttachment(im: ImageInput): TimelineAttachment {
+    // Thumbnail deckeln: send_input kann von einem gekoppelten REMOTE kommen — ein überdimensioniertes
+    // thumbBase64 läge sonst im 500er-Ringpuffer, würde bei JEDEM Snapshot neu ausgespielt und über die
+    // Bridge an alle Geräte geschoben. Ein 320px-JPEG liegt weit darunter; darüber → lieber kein Thumbnail.
+    const thumbOk = typeof im.thumbBase64 === "string" && im.thumbBase64.length <= MAX_THUMB_B64;
+    const mediaType = typeof im.mediaType === "string" && /^image\/[a-z0-9.+-]+$/i.test(im.mediaType) ? im.mediaType : "image/png";
+    const att: TimelineAttachment = {
+      id: randomUUID(),
+      mediaType,
+      thumbBase64: thumbOk ? im.thumbBase64 : undefined,
+      thumbMediaType: thumbOk ? im.thumbMediaType : undefined,
+    };
+    if (!this.cwd) return att;
+    // Vollbild ebenfalls deckeln: dataBase64 landet auf PLATTE und kommt (via Bridge) auch von einem
+    // Remote — ohne Grenze könnte ein Gerät die Platte volllaufen lassen. Darüber: Thumbnail bleibt,
+    // nur der Vollbild-Klick entfällt (bereits unterstützter Degraded-Modus).
+    if (typeof im.dataBase64 !== "string" || im.dataBase64.length > MAX_IMAGE_B64) {
+      log(`[${this.agentId}] Bild-Anhang übersprungen (fehlt oder > ${Math.round(MAX_IMAGE_B64 / 1024 / 1024)} MB base64)`);
+      return att;
+    }
+    try {
+      // `.mads/` im Worktree selbst-ignorieren, BEVOR die erste Datei darin landet — sonst zählt der
+      // Anhang als „dirty" und der Autopilot committet ihn per `git add -A` ins Projekt-Repo.
+      ensureMadsDir(this.cwd);
+      const dir = join(this.cwd, ".mads", "attachments");
+      mkdirSync(dir, { recursive: true });
+      // Object.hasOwn: kein Prototyp-Durchgriff (z. B. mediaType "constructor" → Müll-Dateiname).
+      const ext = Object.hasOwn(IMG_EXT, mediaType) ? IMG_EXT[mediaType] : "png";
+      const p = join(dir, `${att.id}.${ext}`);
+      writeFileSync(p, Buffer.from(im.dataBase64, "base64"));
+      att.path = p;
+    } catch (e) {
+      log(`[${this.agentId}] Bild-Anhang nicht gespeichert: ${String(e)}`);
+    }
+    return att;
+  }
+
+  /**
+   * Existiert die Claude-Code-Session `sessionId` lokal für dieses `cwd`? Claude legt Sessions unter
+   * `~/.claude/projects/<enc(cwd)>/<sessionId>.jsonl` ab, wobei `enc` den absoluten cwd-Pfad kodiert,
+   * indem `/` und `.` durch `-` ersetzt werden (z. B. `/Users/x/coding/Boba` → `-Users-x-coding-Boba`).
+   * Best effort: bei jedem Fehler/Unsicherheit `false` → der Stream startet lieber frisch, statt am
+   * Resume einer nicht vorhandenen Session hart zu scheitern.
+   */
+  private claudeSessionExists(cwd: string, sessionId: string): boolean {
+    try {
+      const enc = cwd.replace(/[/.]/g, "-");
+      return existsSync(join(homedir(), ".claude", "projects", enc, `${sessionId}.jsonl`));
+    } catch {
+      return false;
+    }
   }
 
   private emitText(text: string): void {

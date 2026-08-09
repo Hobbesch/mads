@@ -52,8 +52,18 @@ fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
         .select_all()
         .build()?;
 
+    // „Hauptfenster" holt das (evtl. versehentlich geschlossene) Hauptfenster zurück — neu erstellt,
+    // falls es nicht mehr existiert, sonst nur gezeigt/fokussiert. „Alle Fenster nach vorne holen" zeigt
+    // + entminimiert + fokussiert JEDES offene Fenster (auch versteckte/verdeckte Markdown-Fenster).
+    // Damit kann ein geschlossenes/verstecktes Fenster künftig selbstständig zurückgeholt werden.
+    let main_window_item = MenuItem::with_id(app, "main_window", "Hauptfenster", true, Some("CmdOrCtrl+0"))?;
+    let all_windows_item = MenuItem::with_id(app, "all_windows", "Alle Fenster nach vorne holen", true, None::<&str>)?;
+
     let window_menu = SubmenuBuilder::new(app, "Fenster")
         .minimize()
+        .separator()
+        .item(&main_window_item)
+        .item(&all_windows_item)
         .separator()
         .close_window()
         .build()?;
@@ -89,6 +99,8 @@ pub fn run() {
                 let _ = app.emit("show-about", ());
             }
             "new_instance" => open_new_instance(),
+            "main_window" => show_or_create_main(app),
+            "all_windows" => show_all_windows(app),
             "quit" => graceful_exit(app),
             _ => {}
         })
@@ -113,16 +125,22 @@ pub fn run() {
             remote_bridge_list_devices,
             remote_bridge_revoke_device,
             remote_set_enabled,
-            remote_set_project
+            remote_set_project,
+            claude_relogin,
+            claude_auth_status
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
+        .run(|app_handle, event| match event {
             // Jeder reguläre Exit-Pfad (Dock-Beenden, letztes Fenster zu …) wird abgefangen
             // und über graceful_exit beendet — sonst crasht der ggml-metal-Teardown.
-            if let tauri::RunEvent::Exit = event {
-                graceful_exit(app_handle);
-            }
+            tauri::RunEvent::Exit => graceful_exit(app_handle),
+            // macOS: Klick aufs Dock-Icon → Hauptfenster zurückholen/erstellen, auch wenn noch ein
+            // Doc-Fenster sichtbar ist (has_visible_windows). So ist ein versehentlich geschlossenes
+            // Hauptfenster mit der gewohnten Geste sofort wieder da (ohne App-Neustart).
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_or_create_main(app_handle),
+            _ => {}
         });
 }
 
@@ -221,6 +239,46 @@ fn open_new_instance() {
     }
 }
 
+/// Holt das Hauptfenster (Label „main") nach vorne — und erstellt es NEU, falls es (versehentlich)
+/// geschlossen wurde. Das Schließen eines Fensters lässt den Sidecar am Leben (nur der App-Quit
+/// beendet ihn) und `start_sidecar` ist idempotent → das neu erstellte Fenster hängt sich wieder an
+/// den laufenden Orchestrator, alle Streams sind sofort zurück. Ohne diesen Weg gäbe es keine
+/// Möglichkeit, ein geschlossenes Hauptfenster ohne kompletten App-Neustart zurückzuholen.
+fn show_or_create_main(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+    // Neu erstellen — spiegelt die Fenster-Konfig aus tauri.conf.json. Label „main" → erbt die
+    // Capabilities aus default.json/fs.json, sodass fs/Sidecar/Fenster-APIs sofort wieder greifen.
+    let _ = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .title("mads")
+        .inner_size(1280.0, 832.0)
+        .min_inner_size(900.0, 600.0)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        // dragDropEnabled:false spiegeln — sonst fängt der OS-Handler Datei-Drops ab und die
+        // HTML5-Drag&Drop-Ablage im Composer („Drag&Drop für Dateien") funktioniert im neuen Fenster nicht.
+        .disable_drag_drop_handler()
+        .build();
+}
+
+/// Zeigt + entminimiert + fokussiert JEDES offene Fenster — bringt versteckte/verdeckte Fenster
+/// (z. B. losgelöste Markdown-Fenster) zuverlässig wieder nach vorne — und stellt sicher, dass das
+/// Hauptfenster existiert. Gegenstück zum versehentlichen „Fenster weg".
+fn show_all_windows(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    show_or_create_main(app);
+    for win in app.webview_windows().into_values() {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 /// Sauberer, harter Prozess-Exit: erst den Sidecar-Child beenden (sonst verwaist er),
 /// dann via `_exit()` raus — das UMGEHT die C++-Static-Destruktoren (`__cxa_finalize`).
 /// Nötig, weil ggml-metal (whisper) in seinem Device-Destructor `ggml_abort` aufruft und
@@ -231,4 +289,63 @@ fn graceful_exit(app: &tauri::AppHandle) -> ! {
         state.kill_child();
     }
     unsafe { libc::_exit(0) }
+}
+
+/// Öffnet ein Terminal und startet den interaktiven Claude-OAuth-Login (`claude auth login`).
+/// Das erneuert das macOS-Keychain-Login, das die vom Agent-SDK gebündelte Claude-CLI liest —
+/// die nächste Agent-Anfrage nutzt die frischen Credentials automatisch (kein App-/Sidecar-Neustart
+/// nötig). mads sieht den Token NIE; die CLI schreibt ihn selbst in den Keychain.
+///
+/// SICHERHEIT: Das Kommando ist FEST verdrahtet und nimmt KEINE Argumente vom Frontend oder von der
+/// Remote-Bridge entgegen — kein Command-Injection-Vektor (die Bridge kann diesen Command nur
+/// auslösen, nicht parametrisieren).
+#[tauri::command]
+fn claude_relogin() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Terminal.app, weil der OAuth-Flow ein echtes TTY braucht (Browser öffnen + Code
+        // zurück-pasten). Feste AppleScript-Statements, keine dynamische Interpolation.
+        std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"Terminal\" to activate",
+                "-e",
+                "tell application \"Terminal\" to do script \"claude auth login\"",
+            ])
+            .spawn()
+            .map_err(|e| format!("Terminal konnte nicht geöffnet werden: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Claude-Re-Login wird derzeit nur unter macOS unterstützt.".into())
+    }
+}
+
+/// Führt `claude auth status` in der Login-Shell aus und gibt den reinen Status-Text zurück
+/// (KEIN Secret — `auth status` gibt nur den Anmeldezustand aus). Login-Shell (`$SHELL -lc`), damit
+/// `claude` über den vollen Nutzer-PATH gefunden wird (der GUI-Prozess erbt nur einen minimalen
+/// PATH). Kommando fest verdrahtet, keine Argumente von außen.
+#[tauri::command]
+fn claude_auth_status() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let out = std::process::Command::new(shell)
+            .args(["-lc", "claude auth status"])
+            .output()
+            .map_err(|e| format!("Status konnte nicht ermittelt werden: {e}"))?;
+        let mut text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if text.is_empty() {
+            text = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        }
+        if text.is_empty() {
+            text = "Kein Status-Text von der Claude-CLI erhalten.".to_string();
+        }
+        Ok(text)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Claude-Status wird derzeit nur unter macOS unterstützt.".into())
+    }
 }

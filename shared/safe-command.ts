@@ -68,7 +68,21 @@ const DANGER: { re: RegExp; why: string; kind: CommandKind }[] = [
   // git außen-sichtbar/destruktiv — auch code-versteckt (Scan ist quote-neutralisiert). Den
   // nuancierten Top-Level-Fall (`git remote -v` ok, `git remote add` fragt; Config-Exec-Keys)
   // deckt zusätzlich classifyGit ab; hier nur die eindeutig riskanten Subcommands.
-  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*(push|pull|fetch|clone|reset|clean)(\s|$)/, why: "git außen-sichtbar/verändernd", kind: "git" },
+  // ARBEITS-VERNICHTEND → kind "danger" = NIE per „Immer erlauben" merkbar. Diese Subcommands werfen
+  // uncommittete Arbeit bzw. ganze Commits weg (`git reset --hard`, `git clean -fd`, `git checkout -f`,
+  // `git restore`, `git branch -D`, `git stash drop/clear`). Sie lagen früher in derselben MERKBAREN
+  // Kategorie „git" wie das harmlose fetch/push — wer einmal „Immer erlauben (git)" klickte, autorisierte
+  // damit still auch `git reset --hard origin/main`. Genau so ging in einem echten Stream Arbeit verloren.
+  {
+    re: /(^|[\s;&|(])git\s+(?:-\S+\s+(?:\S+\s+)?)*(reset|clean|restore)(\s|$)/,
+    why: "git verwirft Arbeit (reset/clean/restore) — unwiderruflich",
+    kind: "danger",
+  },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+(?:\S+\s+)?)*checkout\s+(-f|--force)(\s|$)/, why: "git checkout --force verwirft Änderungen", kind: "danger" },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+(?:\S+\s+)?)*branch\s+(?:\S+\s+)*-D(\s|$)/, why: "git branch -D löscht ungemergten Branch", kind: "danger" },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+(?:\S+\s+)?)*stash\s+(drop|clear)(\s|$)/, why: "git stash drop/clear verwirft gesicherte Arbeit", kind: "danger" },
+  // Außen-sichtbar, aber NICHT arbeitsvernichtend → bleibt merkbar.
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*(push|pull|fetch|clone)(\s|$)/, why: "git außen-sichtbar", kind: "git" },
   { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)", kind: "danger" },
   // Hijack-/Egress-Umgebungsvariablen: laden fremde Libs bzw. übernehmen git/ssh nach aussen.
   {

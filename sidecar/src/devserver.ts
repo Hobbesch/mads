@@ -104,33 +104,65 @@ export function loadRunManifest(repoRoot: string): RunManifest | null {
   return services.length ? { services } : null;
 }
 
-/**
- * Erzeugt beim ERSTEN Öffnen eine Starter-`.mads/run.json` aus erkannten Scripts/Projekten
- * (generate-if-absent → überschreibt nie eine editierte Datei). Best effort/heuristisch — der
- * Nutzer prüft Ports/Runtime. Gibt zurück, ob generiert wurde + Service-Anzahl.
- */
-export function ensureRunManifest(repoRoot: string): { generated: boolean; services: number } {
-  const p = RUN_PATH(repoRoot);
-  if (existsSync(p)) return { generated: false, services: 0 };
-  const services: ServiceSpec[] = [];
+/** Pfad der Projekt-Dev-Server-Konfig (`<repoRoot>/.mads/run.json`) — für den Konfig-Editor. */
+export function runManifestPath(repoRoot: string): string {
+  return RUN_PATH(repoRoot);
+}
 
-  // Frontend: erstes package.json mit dev/start-Script (root oder gängige UI-Unterordner).
+function readFileSafe(p: string): string {
+  try {
+    return readFileSync(p, "utf8");
+  } catch {
+    return "";
+  }
+}
+function listDir(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
+/** Erstes projekt-eigenes Dev-Skript (am zuverlässigsten): `scripts/*dev*.sh` (aber NICHT setup/
+ *  install/build/test/deploy), sonst `just dev` / `make <dev|run|serve|start|up>`. undefined = keins. */
+function pickDevScript(repoRoot: string): string | undefined {
+  const shs = listDir(join(repoRoot, "scripts"))
+    .filter(
+      (f) =>
+        /\.sh$/i.test(f) &&
+        /(^|[-_.])(dev|serve|run|start)([-_.]|$)/i.test(f) &&
+        !/(setup|install|build|clean|test|deploy|lint|format|migrate|seed)/i.test(f),
+    )
+    .sort();
+  if (shs.length) return `bash scripts/${shs[0]}`;
+  if (existsSync(join(repoRoot, "justfile")) || existsSync(join(repoRoot, "Justfile"))) return "just dev";
+  const mk = readFileSafe(join(repoRoot, "Makefile"));
+  const t = ["dev", "run", "serve", "start", "up"].find((x) => new RegExp(`^${x}:`, "m").test(mk));
+  if (t) return `make ${t}`;
+  return undefined;
+}
+
+/**
+ * Erkennt lauffähige Services aus dem Projekt — PROJEKT-AGNOSTISCH, best effort. Reihenfolge:
+ * Node-Frontend → Backend nach Runtime (.NET / Rust / Python: Django/FastAPI-uvicorn/Flask) →
+ * als Fallback die EIGENEN Dev-Skripte (scripts/*dev*.sh, `just dev`, `make dev`) — die sind am
+ * ehesten „was der Projekt-Autor meint". Für Python nutzt es `.venv/bin/python`, wenn ein `.venv`
+ * existiert, sonst schlägt es ein Venv-Setup als install-Schritt vor. Alles nur eine Startvorlage —
+ * der Nutzer verfeinert im Konfig-Editor (`.mads/run.json`).
+ */
+export function detectServices(repoRoot: string): ServiceSpec[] {
+  const services: ServiceSpec[] = [];
+  const at = (dir: string, f: string): boolean => existsSync(join(repoRoot, dir, f));
+  const globAny = (dir: string, re: RegExp): boolean => listDir(join(repoRoot, dir)).some((f) => re.test(f));
+
+  // 1) Frontend: erstes package.json mit dev/start-Script (root oder gängige UI-Unterordner).
   for (const dir of ["", "client", "frontend", "web", "app", "ui", "packages/web"]) {
     try {
       const pkg = JSON.parse(readFileSync(join(repoRoot, dir, "package.json"), "utf8")) as { scripts?: Record<string, string> };
-      const scripts = pkg.scripts ?? {};
-      const script = scripts.dev ? "dev" : scripts.start ? "start" : null;
+      const script = pkg.scripts?.dev ? "dev" : pkg.scripts?.start ? "start" : null;
       if (script) {
-        services.push({
-          name: dir ? dir.split("/").pop()! : "frontend",
-          cwd: dir || ".",
-          install: "npm install",
-          installIfMissing: "node_modules",
-          command: `npm run ${script}`,
-          url: "http://localhost:5173",
-          open: true,
-          ready: "ready",
-        });
+        services.push({ name: dir ? dir.split("/").pop()! : "frontend", cwd: dir || ".", install: "npm install", installIfMissing: "node_modules", command: `npm run ${script}`, url: "http://localhost:5173", open: true, ready: "ready" });
         break;
       }
     } catch {
@@ -138,51 +170,76 @@ export function ensureRunManifest(repoRoot: string): { generated: boolean; servi
     }
   }
 
-  // Backend: einfache Heuristik nach Runtime — Nutzer trägt Ports/Env nach.
-  const globAny = (dir: string, re: RegExp): boolean => {
-    try {
-      return readdirSync(join(repoRoot, dir)).some((f) => re.test(f));
-    } catch {
-      return false;
-    }
-  };
+  // 2) Backend/Dev: ZUERST ein eigenes Dev-Skript (am zuverlässigsten „was der Autor meint" — deckt
+  //    z. B. Python-Setups mit venv/uvicorn ab, die man kaum raten kann), sonst Runtime-Heuristik.
+  const devCmd = pickDevScript(repoRoot);
+  if (devCmd) {
+    services.push({ name: services.length ? "backend" : "dev", cwd: ".", command: devCmd });
+    return services;
+  }
+
   for (const dir of ["server", "backend", "api", "src", "."]) {
     if (globAny(dir, /\.csproj$/i)) {
-      services.push({
-        name: "backend",
-        cwd: dir,
-        command: "dotnet run",
-        env: { ASPNETCORE_URLS: "http://localhost:5000" },
-        url: "http://localhost:5000",
-        ready: "Now listening on",
-      });
+      services.push({ name: "backend", cwd: dir, command: "dotnet run", env: { ASPNETCORE_URLS: "http://localhost:5000" }, url: "http://localhost:5000", ready: "Now listening on" });
       break;
     }
-    if (existsSync(join(repoRoot, dir, "Cargo.toml"))) {
+    if (at(dir, "Cargo.toml")) {
       services.push({ name: "backend", cwd: dir, command: "cargo run", ready: "Running" });
       break;
     }
-    if (existsSync(join(repoRoot, dir, "manage.py"))) {
-      services.push({ name: "backend", cwd: dir, command: "python manage.py runserver", url: "http://localhost:8000", ready: "Starting development server" });
-      break;
+    // Python: Django / FastAPI(uvicorn) / Flask — mit venv-Interpreter, wenn `.venv` da ist.
+    const isPy = at(dir, "manage.py") || at(dir, "pyproject.toml") || at(dir, "requirements.txt") || at(dir, "setup.py");
+    if (isPy) {
+      const pyText = (readFileSafe(join(repoRoot, dir, "pyproject.toml")) + readFileSafe(join(repoRoot, dir, "requirements.txt"))).toLowerCase();
+      const hasVenv = at(dir, ".venv");
+      const py = hasVenv ? ".venv/bin/python" : "python3";
+      // Venv-Setup als install-Schritt vorschlagen, wenn keins da ist (nur wenn `.venv` fehlt).
+      const dep = at(dir, "requirements.txt") ? "-r requirements.txt" : "-e .";
+      const install = hasVenv ? undefined : `python3 -m venv .venv && .venv/bin/pip install ${dep}`;
+      const installIfMissing = hasVenv ? undefined : ".venv";
+      if (at(dir, "manage.py")) {
+        services.push({ name: "backend", cwd: dir, install, installIfMissing, command: `${py} manage.py runserver`, url: "http://localhost:8000", ready: "Starting development server" });
+        break;
+      }
+      if (/uvicorn|fastapi/.test(pyText)) {
+        services.push({ name: "backend", cwd: dir, install, installIfMissing, command: `${py} -m uvicorn app.main:app --reload --port 8000`, url: "http://localhost:8000", ready: "Uvicorn running" });
+        break;
+      }
+      if (/\bflask\b/.test(pyText)) {
+        services.push({ name: "backend", cwd: dir, install, installIfMissing, env: { FLASK_APP: "app" }, command: `${py} -m flask run --debug --port 8000`, url: "http://localhost:8000", ready: "Running on" });
+        break;
+      }
     }
   }
 
-  const doc = {
-    _readme:
-      "mads Stream-Dev-Server. Jeder Service wird im WORKTREE des Streams gestartet (nicht in main). " +
-      "Felder: name, cwd (rel. zum Worktree), install (+installIfMissing = nur wenn Pfad fehlt), command, " +
-      "env (Werte dürfen ${VAR} nutzen), url, open:true (=im-Browser-öffnen-URL), ready (Teilstring der " +
-      "Ausgabe = 'bereit'). Es läuft immer nur EIN Stream-Dev-Server gleichzeitig. Diese Datei ist eine " +
-      "automatisch erzeugte Vorlage — Ports/Runtime bitte prüfen.",
-    services,
-  };
+  return services;
+}
+
+const RUN_README =
+  "mads Stream-Dev-Server. Jeder Service wird im WORKTREE des Streams gestartet (nicht in main). " +
+  "Felder: name, cwd (rel. zum Worktree), install (+installIfMissing = nur wenn Pfad fehlt), command, " +
+  "env (Werte dürfen ${VAR} nutzen), url, open:true (=im-Browser-öffnen-URL), ready (Teilstring der " +
+  "Ausgabe = 'bereit'). Es läuft immer nur EIN Stream-Dev-Server gleichzeitig. Automatisch erzeugte " +
+  "Vorlage — Befehle/Ports/Runtime bitte prüfen und anpassen.";
+
+/**
+ * Stellt `.mads/run.json` sicher: existiert es MIT Services → unangetastet lassen (Nutzer-Konfig).
+ * Fehlt es ODER ist es leer (`services: []`, z. B. altes Auto-Scaffold, das nichts erkannte) →
+ * frische Vorlage aus {@link detectServices} schreiben. Gibt generiert/Service-Anzahl + Pfad zurück.
+ */
+export function ensureRunManifest(repoRoot: string): { generated: boolean; services: number; path: string } {
+  const p = RUN_PATH(repoRoot);
+  const existing = loadRunManifest(repoRoot); // null bei fehlend/ungültig/LEER (services: [])
+  if (existing && existing.services.length > 0) {
+    return { generated: false, services: existing.services.length, path: p };
+  }
+  const services = detectServices(repoRoot);
   try {
-    writeFileSync(p, JSON.stringify(doc, null, 2) + "\n", "utf8");
-    return { generated: true, services: services.length };
+    writeFileSync(p, JSON.stringify({ _readme: RUN_README, services }, null, 2) + "\n", "utf8");
+    return { generated: true, services: services.length, path: p };
   } catch (e) {
     log(`[devserver] run.json konnte nicht geschrieben werden: ${String(e)}`);
-    return { generated: false, services: 0 };
+    return { generated: false, services: 0, path: p };
   }
 }
 
@@ -212,6 +269,8 @@ export class DevServerRun {
   private readyTimer?: ReturnType<typeof setTimeout>;
   private readonly onCrash?: DevCrashHandler;
   private crashReported = false;
+  private degraded = false; // true, sobald ein Service abstürzte, andere aber weiterlaufen (Survivor-Modus)
+  private started = false; // true erst NACH der Spawn-Schleife — nie „running" melden, solange noch Services fehlen
   private readonly recentLogs = new Map<string, string[]>(); // pro Service, für die Crash-Diagnose
 
   constructor(agentId: string, worktree: string, manifest: RunManifest, onCrash?: DevCrashHandler) {
@@ -231,9 +290,19 @@ export class DevServerRun {
     send({ ...envelope(), type: "devserver_log", agentId: this.agentId, service, stream, line: capped });
   }
 
+  /** Alle NOCH lebenden (gespawnten, nicht abgestürzten) Services bereit? Nach einem Absturz das
+   *  richtige „läuft"-Kriterium — {@link allUp} zählt den toten Prozess mit und wäre nie wieder true. */
+  private liveAllReady(): boolean {
+    const live = this.procs.filter((p) => p.child?.pid != null);
+    return live.length > 0 && live.every((p) => p.ready);
+  }
+
   private primaryUrl(): string | undefined {
-    const openable = this.procs.filter((p) => p.spec.open && p.url);
-    const pool = openable.length ? openable : this.procs.filter((p) => p.url);
+    // Nur LEBENDE Services dürfen die „im Browser öffnen"-URL stellen — sonst würde nach einem Absturz
+    // (Survivor-Modus) der tote Service (dessen `url` gesetzt bleibt) einen Connection-refused-Link liefern.
+    const live = this.procs.filter((p) => p.child?.pid != null && p.url);
+    const openable = live.filter((p) => p.spec.open);
+    const pool = openable.length ? openable : live;
     return (pool.find((p) => p.ready) ?? pool[0])?.url;
   }
 
@@ -330,7 +399,13 @@ export class DevServerRun {
       this.emitLog(p.spec.name, stream, line);
       if (!p.ready && p.spec.ready && line.includes(p.spec.ready)) {
         p.ready = true;
-        if (this.state !== "running" && this.allUp()) {
+        // Normalstart: ALLE Services müssen leben+bereit sein (allUp verhindert ein verfrühtes „running",
+        // solange spätere Services noch nicht gespawnt sind). Im Survivor-Modus (degraded, nach einem
+        // Absturz) zählt allUp den toten Prozess mit und würde nie mehr true — dann reicht: alle LEBENDEN
+        // bereit, ABER erst wenn die Spawn-Schleife durch ist (`started`), sonst würde ein noch nicht
+        // gestarteter Service übersehen und verfrüht „running" gemeldet.
+        const promotable = this.degraded ? this.started && this.liveAllReady() : this.allUp();
+        if (this.state !== "running" && promotable) {
           this.state = "running";
           if (this.readyTimer) clearTimeout(this.readyTimer);
         }
@@ -354,14 +429,27 @@ export class DevServerRun {
       p.child = undefined;
       p.ready = false;
       if (this.stopping) return; // erwartetes Beenden (wir stoppen gerade)
-      // Unerwarteter Tod eines Service (z. B. Port belegt, Build-Fehler) → alles stoppen + melden.
       this.emitLog(p.spec.name, "stderr", `⚠ Prozess beendet (exit ${code ?? "?"}${signal ? `, ${signal}` : ""}).`);
-      this.state = "error";
-      this.emitStatus(`Service „${p.spec.name}" unerwartet beendet — siehe Log.`);
       const crashLog = [...(this.recentLogs.get(p.spec.name) ?? [])];
       const firstCrash = !this.crashReported; // nur EINMAL heilen (Kaskaden nicht doppelt anstoßen)
       this.crashReported = true;
-      void this.stop();
+      // Ein EINZELNER Service-Absturz reißt NICHT den ganzen Dev-Server ab: laufen noch andere Dienste
+      // (typisch das Frontend), bleiben sie am Leben. Sonst ließe sich z. B. ein reiner Frontend-PR nicht
+      // ansehen, nur weil das Backend scheitert — im Review-Worktree passiert das systematisch, weil dort
+      // bewusst KEINE lokalen Secrets geseedet werden (DB/Mail-Config fehlt). Erst wenn NICHTS mehr
+      // läuft → Fehler + Stop. onCrash feuert weiterhin (Selbstheilung/Meldung entscheidet der Aufrufer).
+      const survivors = this.procs.filter((x) => x.child?.pid != null);
+      if (survivors.length > 0) {
+        this.degraded = true; // ab jetzt zählt für „running" nur noch, ob alle LEBENDEN Dienste bereit sind
+        // „running", sobald alle NOCH laufenden Dienste bereit sind; sonst „starting" lassen, damit der
+        // Ready-Marker (degraded-Pfad in onLine) bzw. der Fallback-Timer sie hochstuft (readyTimer NICHT abbrechen).
+        this.state = this.liveAllReady() ? "running" : "starting";
+        this.emitStatus(`Service „${p.spec.name}" beendet (exit ${code ?? "?"}) — die übrigen Dienste laufen weiter, siehe Log.`);
+      } else {
+        this.state = "error";
+        this.emitStatus(`Service „${p.spec.name}" unerwartet beendet — siehe Log.`);
+        void this.stop();
+      }
       if (firstCrash) this.onCrash?.(p.spec.name, code, crashLog);
     });
   }
@@ -375,6 +463,8 @@ export class DevServerRun {
   async start(): Promise<void> {
     this.state = "starting";
     this.crashReported = false; // frischer Start → Selbstheilung wieder scharf
+    this.degraded = false; // frischer Start → wieder Normalstart-Semantik (allUp), kein Survivor-Modus
+    this.started = false; // Spawn-Schleife läuft noch → „running" frühestens nach der Schleife
     this.emitStatus();
     for (const p of this.procs) {
       if (this.stopping) return;
@@ -398,16 +488,19 @@ export class DevServerRun {
       if (this.stopping) return;
       this.spawnService(p);
     }
-    // „running", sobald alle Services mit Ready-Marker bereit sind (die ohne gelten sofort).
-    // (Ein früher gestorbener Service hätte via seinen Exit-Handler `stopping` gesetzt → oben return.)
-    this.state = this.allUp() ? "running" : "starting";
+    // Spawn-Schleife durch → ab jetzt darf „running" gemeldet werden (kein noch fehlender Service).
+    this.started = true;
+    // „running", sobald alle Services mit Ready-Marker bereit sind (die ohne gelten sofort). Ist während
+    // des Startens schon ein Service abgestürzt (degraded, aber andere leben weiter), zählen nur die
+    // LEBENDEN — sonst bliebe es wegen des toten Prozesses fälschlich in „starting".
+    this.state = (this.degraded ? this.liveAllReady() : this.allUp()) ? "running" : "starting";
     this.emitStatus();
     // Fallback: greift ein Ready-Marker nach 15 s nicht (z. B. Serilog formatiert die Kestrel-Zeile
     // anders), Bereitschaft annehmen — die Server laufen, nur die Erkennung schlug fehl.
     if (this.state === "starting") {
       this.readyTimer = setTimeout(() => {
         if (this.stopping || this.state !== "starting") return;
-        for (const p of this.procs) p.ready = true;
+        for (const p of this.procs) if (p.child?.pid != null) p.ready = true; // nur LEBENDE Dienste
         this.state = "running";
         this.emitStatus("Bereitschaft angenommen (Ready-Marker nicht erkannt) — siehe Log.");
       }, 15_000);

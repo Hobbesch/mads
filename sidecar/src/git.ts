@@ -9,9 +9,11 @@
  * Siehe docs/research/github-multiagent.md und docs/design/04-sub-agents.md.
  */
 import { execFile, execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { ensureMadsDir } from "./persistence.js";
 import type { EscalationKind, PullRequestInfo, PrChecksState } from "../../shared/protocol.js";
 import { scanSecrets, type SecretHit } from "../../shared/secrets.js";
 import { log } from "./io.js";
@@ -57,6 +59,38 @@ const gh = (args: string[], cwd?: string, timeoutMs?: number) => run("gh", args,
 /** GitHub-Aufrufe können bei Netzproblemen hängen — der Reconcile darf nie blockieren. */
 const GH_TIMEOUT_MS = 15_000;
 
+/**
+ * Fingerprint des UNCOMMITTETEN Worktree-Zustands (Fremd-Edit-Schutz): kombiniert Datei-Status,
+ * den Inhalt getrackter Änderungen (`diff HEAD`) und den Inhalt untrackter (nicht-ignorierter)
+ * Dateien zu einem Hash. Ändert etwas den Worktree, während der Agent RUHT (Fremd-Edit durch einen
+ * Menschen/anderen Prozess), weicht dieser Fingerprint vom zuletzt beim Turn-Ende erfassten ab —
+ * dann committet der Autopilot NICHT blind mit `git add -A`, sondern hält an. `.git`-Änderungen
+ * (Index/HEAD) zählen bewusst NICHT rein; nur Arbeitsbaum-Inhalt.
+ */
+export async function worktreeFingerprint(wt: string): Promise<string> {
+  const status = (await run("git", ["-C", wt, "status", "--porcelain"], wt)).stdout;
+  const diff = (await run("git", ["-C", wt, "diff", "HEAD"], wt)).stdout;
+  const untracked = (await run("git", ["-C", wt, "ls-files", "--others", "--exclude-standard"], wt)).stdout
+    .split("\n")
+    .filter(Boolean);
+  const h = createHash("sha256").update(status).update("\0").update(diff);
+  // Große untrackte Dateien (Dumps/Datasets/Logs, die NICHT gitignored sind) nicht voll in den Hash
+  // lesen — synchroner Read würde den Event-Loop blockieren + Speicher spiken. Ab dem Cap genügt
+  // size+mtime als Änderungssignal (ändert sich der Inhalt, ändert sich i. d. R. beides).
+  const UNTRACKED_HASH_CAP = 2 * 1024 * 1024;
+  for (const f of untracked) {
+    h.update("\0").update(f).update("\0");
+    try {
+      const st = statSync(join(wt, f));
+      if (st.size > UNTRACKED_HASH_CAP) h.update(`__big__:${st.size}:${st.mtimeMs}`);
+      else h.update(readFileSync(join(wt, f)));
+    } catch {
+      /* Datei verschwand zwischen ls-files und read — egal, der Status-Teil deckt das ab */
+    }
+  }
+  return h.digest("hex");
+}
+
 export function repoSlug(repoRoot: string): string {
   return basename(repoRoot);
 }
@@ -95,6 +129,63 @@ export async function discoverWorktrees(
   }
   flush();
   return out;
+}
+
+/**
+ * Erkennt einen mads-Worktree-Pfad, der zur kanonischen Struktur `…/mads-worktrees/<slug>/<agentId>`
+ * gehört, aber NICHT dem lokalen Kanon-Pfad (`worktreePathFor`) entspricht — der klassische
+ * Cross-Machine-Fall: das Repo wurde von einem Mac (`/Users/amedici/…`) auf einen anderen mit anderem
+ * Home (`/Users/alessandromedici/…`) kopiert. Der eingebackene absolute `worktreePath` (Registry +
+ * `.git/worktrees/<id>/gitdir`) zeigt dann ins Leere, obwohl Branch (`mads/<name>`) und Transcripts
+ * (per agentId) intakt mitkopiert wurden. Separator-sicher über die letzten drei Pfad-Segmente
+ * statt String-Präfixen — der lokale Worktree lässt sich vollständig aus repoRoot+agentId ableiten.
+ */
+export function isForeignMadsWorktree(worktreePath: string, repoRoot: string, agentId: string): boolean {
+  if (!worktreePath || worktreePath === worktreePathFor(repoRoot, agentId)) return false; // schon lokal-kanonisch
+  const p = worktreePath.replace(/[/\\]+$/, "");
+  return (
+    basename(p) === agentId &&
+    basename(dirname(p)) === repoSlug(repoRoot) &&
+    basename(dirname(dirname(p))) === "mads-worktrees"
+  );
+}
+
+/**
+ * Cross-Machine-Reparatur eines Sub-/Review-Streams: den unter einem fremden Home verwaisten Worktree
+ * auf den LOKALEN Kanon-Pfad (`worktreePathFor`) umziehen. Branch + Transcripts sind kopiert und
+ * intakt — nur das Arbeitsverzeichnis fehlt lokal. Vorgehen:
+ *   • Existiert der lokale Pfad bereits (z. B. `~/mads-worktrees` wurde mitkopiert) → nur den
+ *     git-Admin-Link reparieren (`worktree repair`) und den lokalen Pfad zurückgeben.
+ *   • Sonst: verwaiste (fremde) Worktree-Admin-Einträge prunen — das gibt den Branch frei, sonst
+ *     scheitert `worktree add` an „already used by worktree at …fremder Pfad" — und den lokalen
+ *     Worktree aus dem BESTEHENDEN Branch neu auschecken (`worktree add`, KEIN `-b`).
+ * Fehlt der Branch lokal, ist nichts wiederherstellbar → `{ ok:false }`. Best-effort git; wirft nie.
+ */
+export async function relocateWorktree(
+  repoRoot: string,
+  agentId: string,
+  branch: string,
+): Promise<{ ok: true; path: string; recreated: boolean } | { ok: false; error: string }> {
+  const local = worktreePathFor(repoRoot, agentId);
+  if (existsSync(local)) {
+    // Lokaler Worktree ist vorhanden (mitkopiert) — nur der Admin-Link kann noch aufs fremde Home zeigen.
+    // `worktree repair` richtet die Zwei-Wege-Verknüpfung (repo ↔ Worktree) wieder ein; No-Op, wenn heil.
+    await git(["-C", repoRoot, "worktree", "repair", local], repoRoot);
+    return { ok: true, path: local, recreated: false };
+  }
+  // Fremde gitdir-Zeiger (…/amedici/… existiert lokal nicht) → prune entfernt die Admin-Einträge und
+  // gibt den Branch frei. Ohne prune: „fatal: '<branch>' is already used by worktree at …".
+  await git(["-C", repoRoot, "worktree", "prune"], repoRoot);
+  const hasBranch = await git(["-C", repoRoot, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repoRoot);
+  if (hasBranch.code !== 0) return { ok: false, error: `Branch ${branch} existiert lokal nicht` };
+  const add = await git(["-C", repoRoot, "worktree", "add", local, branch], repoRoot);
+  if (add.code !== 0) return { ok: false, error: add.stderr || add.stdout };
+  try {
+    ensureMadsDir(local); // mads' eigenes .mads/ im neuen Worktree sofort git-unsichtbar machen (wie createWorktree)
+  } catch (e) {
+    log(`[git] relocate: .mads-Schutz im Worktree ${local} fehlgeschlagen: ${String(e)}`);
+  }
+  return { ok: true, path: local, recreated: true };
 }
 
 export async function getRepoInfo(
@@ -357,6 +448,15 @@ export async function createWorktree(
   const path = worktreePathFor(repoRoot, agentId);
   const r = await git(["-C", repoRoot, "worktree", "add", "-b", branch, path, baseRef], repoRoot);
   if (r.code !== 0) return { ok: false, error: r.stderr || r.stdout };
+  // mads' eigenes `.mads/` im NEUEN Worktree sofort git-unsichtbar machen (legt `.mads/.gitignore` = `*`).
+  // Das geschah bisher NUR im Haupt-Checkout — in Worktrees waren Anhänge dadurch weder ignoriert noch
+  // gefiltert, und der Autopilot committete sie per `git add -A` bis nach main (echte xlsx-Anhänge sind
+  // so in einem Projekt gelandet). Idempotent; muss VOR dem ersten Anhang passieren.
+  try {
+    ensureMadsDir(path);
+  } catch (e) {
+    log(`[git] .mads-Schutz im Worktree fehlgeschlagen: ${String(e)}`);
+  }
   // Lokale, gitignorte Dev-Config aus dem Haupt-Checkout nachziehen → Stream sofort lauffähig.
   try {
     const seeded = seedLocalDevFiles(repoRoot, path);
@@ -534,22 +634,65 @@ export async function fastForwardMain(repoRoot: string, defaultBranch: string): 
   return ff.code === 0 ? { ff: behind, behind, blocked: null } : { ff: 0, behind, blocked: "unknown" };
 }
 
+/**
+ * Feature A: main HART auf origin/<base> setzen — verwirft lokale, nicht gepushte ahead-Commits
+ * (z. B. Release-/Versions-Bumps, die ein fast-forward nicht auflöst). VORHER wird die aktuelle
+ * main-Spitze als Backup-Branch gesichert (verlustfrei rückholbar). Getrackte uncommittete
+ * Änderungen blockieren den Reset (sie würden sonst verloren gehen); untracked bleibt unangetastet.
+ */
+export async function resetMainToOrigin(
+  repoRoot: string,
+  defaultBranch: string,
+): Promise<{ ok: true; discarded: number; backup: string } | { ok: false; error: string }> {
+  await git(["-C", repoRoot, "fetch", "origin", defaultBranch], repoRoot);
+  const base = `origin/${defaultBranch}`;
+  const cur = (await git(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], repoRoot)).stdout.trim();
+  if (cur === "HEAD") return { ok: false, error: "detached HEAD — bitte zuerst main auschecken." };
+  if (cur !== defaultBranch) return { ok: false, error: `Checkout steht auf ${cur}, nicht ${defaultBranch}.` };
+  const trackedDirty = (await git(["-C", repoRoot, "status", "--porcelain", "-uno"], repoRoot)).stdout.trim();
+  if (trackedDirty.length > 0)
+    return { ok: false, error: "uncommittete Änderungen an getrackten Dateien — erst committen/verwerfen." };
+  const ahead = parseInt((await git(["-C", repoRoot, "rev-list", "--count", `${base}..HEAD`], repoRoot)).stdout.trim() || "0", 10);
+  if (ahead === 0) return { ok: true, discarded: 0, backup: "" }; // nichts voraus → nichts zu tun
+  const sha = (await git(["-C", repoRoot, "rev-parse", "--short", "HEAD"], repoRoot)).stdout.trim();
+  const backup = `mads-backup/main-${sha}`;
+  await git(["-C", repoRoot, "branch", "-f", backup, defaultBranch], repoRoot);
+  const reset = await git(["-C", repoRoot, "reset", "--hard", base], repoRoot);
+  if (reset.code !== 0) return { ok: false, error: reset.stderr.trim() || reset.stdout.trim() || "reset --hard fehlgeschlagen" };
+  return { ok: true, discarded: ahead, backup };
+}
+
+export interface GitStatusResult {
+  behind: number;
+  ahead: number;
+  dirty: boolean;
+  /**
+   * true, wenn eines der drei git-Subkommandos (behind/ahead/dirty) mit code!==0 endete —
+   * z. B. Worktree gerade entfernt, Branch/Base-Ref weg, Timeout. Ein git-FEHLER darf nie wie
+   * „echte 0 / clean" aussehen: Konsumenten dürfen einen unreliable-Status weder als frischen
+   * Stand cachen noch daraus Eskalationen („Keine Commits") ableiten.
+   */
+  unreliable?: boolean;
+}
+
 export async function gitStatus(
   repoRoot: string,
   worktree: string,
   branch: string,
   defaultBranch: string,
   skipFetch = false,
-): Promise<{ behind: number; ahead: number; dirty: boolean }> {
+): Promise<GitStatusResult> {
   if (!skipFetch) await git(["-C", repoRoot, "fetch", "origin"], repoRoot);
   const base = `origin/${defaultBranch}`;
   const behindR = await git(["-C", worktree, "rev-list", "--count", `${branch}..${base}`], worktree);
   const aheadR = await git(["-C", worktree, "rev-list", "--count", `${base}..${branch}`], worktree);
   const dirtyR = await git(["-C", worktree, "status", "--porcelain"], worktree);
+  const unreliable = behindR.code !== 0 || aheadR.code !== 0 || dirtyR.code !== 0;
   return {
     behind: parseInt(behindR.stdout.trim() || "0", 10),
     ahead: parseInt(aheadR.stdout.trim() || "0", 10),
     dirty: dirtyR.stdout.trim().length > 0,
+    ...(unreliable ? { unreliable: true } : {}),
   };
 }
 
@@ -874,6 +1017,33 @@ export async function detectMainVersionBump(repoRoot: string): Promise<string | 
   return diff.trim() ? deriveReleaseVersion(diff) : undefined;
 }
 
+/**
+ * Divergierten main auflösen, OHNE etwas wegzuwerfen: die lokalen Commits per Rebase auf
+ * origin/<base> heben. Genau der Fall, in dem `fastForwardMain` „diverged" meldet — bisher eine
+ * Sackgasse in der UI („braucht echten Merge/Rebase → Mensch"), obwohl er im Alltag ständig
+ * auftritt: jeder Deploy-Versions-Bump / Release-Commit liegt als lokaler Commit auf main, und
+ * sobald ein PR gemergt wird, ist main divergiert.
+ * Sicherheit: nur auf dem Default-Branch, nur bei sauberem Tree; Konflikt → `rebase --abort`,
+ * Zustand bleibt exakt wie vorher (nichts geht verloren).
+ */
+export async function rebaseMainOntoOrigin(
+  repoRoot: string,
+  defaultBranch: string,
+): Promise<{ ok: true; rebased: number } | { ok: false; error: string }> {
+  const cur = (await git(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], repoRoot)).stdout.trim();
+  if (cur !== defaultBranch) return { ok: false, error: `Nicht auf ${defaultBranch} (aktuell „${cur}“) — Rebase abgebrochen.` };
+  const trackedDirty = (await git(["-C", repoRoot, "status", "--porcelain", "-uno"], repoRoot)).stdout.trim();
+  if (trackedDirty) return { ok: false, error: "Uncommittete Änderungen im Main-Checkout — erst committen oder auslagern." };
+  const base = `origin/${defaultBranch}`;
+  const ahead = parseInt((await git(["-C", repoRoot, "rev-list", "--count", `${base}..HEAD`], repoRoot)).stdout.trim() || "0", 10);
+  const rb = await git(["-C", repoRoot, "rebase", base], repoRoot);
+  if (rb.code !== 0) {
+    await git(["-C", repoRoot, "rebase", "--abort"], repoRoot); // Zustand unverändert lassen
+    return { ok: false, error: `Rebase-Konflikt — main wurde NICHT verändert: ${(rb.stderr || rb.stdout).trim().slice(0, 200)}` };
+  }
+  return { ok: true, rebased: ahead };
+}
+
 /** Lokale Commits, die noch nicht auf origin/<branch> liegen (für „PR aktuell halten"). */
 export async function unpushedCount(worktree: string, branch: string): Promise<number> {
   const r = await git(["-C", worktree, "rev-list", "--count", `origin/${branch}..HEAD`], worktree);
@@ -930,6 +1100,27 @@ export async function syncBranch(
   defaultBranch: string,
 ): Promise<{ ok: true; renamedAdrs?: { num: string; to: string }[] } | { ok: false; kind: EscalationKind; error: string }> {
   await run("git", ["-C", worktree, "fetch", "origin"], worktree);
+  // Der Worktree MUSS auf seinem Branch stehen, bevor rebased wird. Ein detached HEAD (der Zustand, den
+  // mads nach einer sauberen Integration hinterlässt) würde sonst den LOSEN Commit rebasen (No-Op) statt
+  // den Branch — der Branch-Ref bliebe „behind", und Auto-Sync liefe endlos. Reattach, verlustfrei:
+  //  - Branch ist Vorfahre des (detached) HEAD → Branch per `checkout -B` auf HEAD ziehen (KEINE
+  //    Working-Tree-Bewegung, keine eigenen Commits vorhanden); der folgende Rebase ist dann No-Op/FF.
+  //  - sonst (Branch hat eigene Commits) → Branch auschecken; der Rebase spielt seine Commits auf origin/<default>.
+  const headRef = await git(["-C", worktree, "symbolic-ref", "-q", "HEAD"], worktree);
+  if (headRef.code !== 0 || headRef.stdout.trim() !== `refs/heads/${branch}`) {
+    const branchIsAncestor = await git(["-C", worktree, "merge-base", "--is-ancestor", branch, "HEAD"], worktree);
+    const reattach =
+      branchIsAncestor.code === 0
+        ? await git(["-C", worktree, "checkout", "-B", branch, "HEAD"], worktree)
+        : await git(["-C", worktree, "checkout", branch], worktree);
+    if (reattach.code !== 0) {
+      return {
+        ok: false,
+        kind: "merge_conflict",
+        error: `Worktree ließ sich nicht auf ${branch} setzen (HEAD steht nicht auf dem Branch — z. B. detached HEAD, kollidierende Working-Tree-Änderungen oder Branch in einem anderen Worktree aktiv): ${(reattach.stderr || reattach.stdout).trim()}`,
+      };
+    }
+  }
   const rebase = await git(["-C", worktree, "rebase", `origin/${defaultBranch}`], worktree);
   if (rebase.code !== 0) {
     const errText = rebase.stderr || rebase.stdout;
@@ -1011,7 +1202,7 @@ export async function createPr(
   title: string,
   body: string,
   draft: boolean,
-): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; url: string } | { ok: false; error: string; transient?: boolean }> {
   const pushed = await pushBranch(worktree, branch, base);
   if (!pushed.ok) return { ok: false, error: pushed.error };
   // Idempotent: existiert für den Branch bereits ein OFFENER PR, hat der Push oben ihn
@@ -1022,8 +1213,15 @@ export async function createPr(
   if (existing && existing.state === "OPEN") return { ok: true, url: existing.url };
   const args = ["pr", "create", "--head", branch, "--base", base, "--title", title, "--body", body];
   if (draft) args.push("--draft");
-  const r = await gh(args, repoRoot);
-  if (r.code !== 0) {
+  // GitHub liefert bei internen Störungen einen TRANSIENTEN GraphQL/5xx-Fehler („Something went wrong
+  // while executing your query" mit Referenz-ID, 502/503/504, Timeouts, sekundäre Rate-Limits). Das ist
+  // KEIN Push-/Code-Problem — GitHub empfiehlt Wiederholung. Ohne Retry eskalierte mads schon beim ersten
+  // Schluckauf. Darum: bis zu 3 Versuche mit Backoff; nur wenn es bestehen bleibt, Fehler zurückgeben.
+  let lastErr = "";
+  let transient = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await gh(args, repoRoot);
+    if (r.code === 0) return { ok: true, url: r.stdout.trim().split("\n").pop() ?? "" };
     const err = (r.stderr || r.stdout).trim();
     // Race zwischen Check und create (oder ein PR, den prStatus nicht sah): „already exists" ist
     // KEIN Fehler — den vorhandenen PR (URL aus der Meldung, sonst Nachpoll) übernehmen.
@@ -1032,9 +1230,82 @@ export async function createPr(
       const again = urlInErr ? null : await prStatus(repoRoot, branch);
       return { ok: true, url: urlInErr ?? again?.url ?? existing?.url ?? "" };
     }
-    return { ok: false, error: err };
+    lastErr = err;
+    transient = isTransientGhError(err);
+    if (transient && attempt < 2) {
+      await new Promise((res) => setTimeout(res, 1500 * (attempt + 1))); // 1,5 s / 3 s Backoff
+      continue;
+    }
+    break;
   }
-  return { ok: true, url: r.stdout.trim().split("\n").pop() ?? "" };
+  return { ok: false, error: lastErr, transient };
+}
+
+/** Offene PRs des Repos (roh) — für die „eingehende PRs"-Erkennung. Bot-/mads-Filter macht der Aufrufer. */
+export async function listOpenPrs(
+  repoRoot: string,
+): Promise<Array<{ number: number; title: string; author: string; headRefName: string; url: string; isFork: boolean; isDraft: boolean }>> {
+  const r = await gh(
+    ["pr", "list", "--state", "open", "--limit", "50", "--json", "number,title,author,headRefName,isCrossRepository,url,isDraft"],
+    repoRoot,
+    GH_TIMEOUT_MS,
+  );
+  if (r.code !== 0) return [];
+  try {
+    const arr = JSON.parse(r.stdout) as Array<Record<string, unknown>>;
+    return arr.map((p) => ({
+      number: Number(p.number),
+      title: String(p.title ?? ""),
+      author: String((p.author as { login?: string })?.login ?? ""),
+      headRefName: String(p.headRefName ?? ""),
+      url: String(p.url ?? ""),
+      isFork: p.isCrossRepository === true,
+      isDraft: p.isDraft === true,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** Isolierten READ-ONLY Worktree auf dem Stand eines PRs anlegen — fork-sicher über den `pull/<#>/head`-
+ *  Ref (existiert für JEDEN PR). Lokaler Review-Branch `mads-review/pr-<#>`; kein Remote-Tracking, damit
+ *  nie versehentlich auf den fremden Branch gepusht wird. Merge läuft später über die PR-Nummer. */
+export async function createReviewWorktree(
+  repoRoot: string,
+  agentId: string,
+  prNumber: number,
+): Promise<{ ok: true; path: string; branch: string } | { ok: false; error: string }> {
+  const branch = `mads-review/pr-${prNumber}`;
+  const path = worktreePathFor(repoRoot, agentId);
+  // Idempotent: einen Rest aus einer früheren Sitzung (Worktree/Branch liegen noch da) forciert wegräumen,
+  // damit ein erneutes Öffnen desselben PR-Reviews sauber startet.
+  if (existsSync(path)) await git(["-C", repoRoot, "worktree", "remove", "--force", path], repoRoot);
+  await git(["-C", repoRoot, "worktree", "prune"], repoRoot); // verwaiste Registrierung (Pfad manuell gelöscht) lösen
+  await git(["-C", repoRoot, "branch", "-D", branch], repoRoot); // egal ob vorhanden
+  const f = await git(["-C", repoRoot, "fetch", "origin", "--force", `pull/${prNumber}/head:${branch}`], repoRoot);
+  if (f.code !== 0) return { ok: false, error: (f.stderr || f.stdout).trim() };
+  const w = await git(["-C", repoRoot, "worktree", "add", path, branch], repoRoot);
+  if (w.code !== 0) {
+    await git(["-C", repoRoot, "branch", "-D", branch], repoRoot); // Branch angelegt, Worktree nicht → kein Müll
+    return { ok: false, error: (w.stderr || w.stdout).trim() };
+  }
+  try {
+    ensureMadsDir(path);
+  } catch {
+    /* best effort */
+  }
+  // BEWUSST KEIN seedLocalDevFiles: ein Review-Worktree hält FREMDEN (bei Forks beliebigen) PR-Code.
+  // Würde man die lokalen Secrets (.env/appsettings/credentials …) hineinseeden, könnten die vom PR-Autor
+  // kontrollierten Dev-/Postinstall-Skripte sie lesen/exfiltrieren. Read-only Review bleibt secret-frei.
+  return { ok: true, path, branch };
+}
+
+/** Transiente GitHub-Server-Fehler (GraphQL-500 „Something went wrong", 5xx, Timeouts, sekundäres
+ *  Rate-Limit) — GitHub empfiehlt Wiederholung. NICHT für echte Ablehnungen (Permission, Protection). */
+export function isTransientGhError(err: string): boolean {
+  return /Something went wrong while executing your query|GraphQL:\s*Something went wrong|\b50[234]\b|Bad Gateway|Service Unavailable|Gateway Time-?out|timed? ?out|ETIMEDOUT|EAI_AGAIN|ECONNRESET|ECONNREFUSED|temporarily unavailable|was submitted too quickly|secondary rate limit|abuse detection|try again/i.test(
+    err,
+  );
 }
 
 /** Integrator-Merge: gh pr merge --squash --delete-branch (lineare main). */
@@ -1047,9 +1318,20 @@ export async function mergePr(
   // KEIN --delete-branch: der lokale Branch ist im Worktree ausgecheckt → gh würde beim
   // Löschen scheitern und den (bereits erfolgten) Merge fälschlich als Fehler melden.
   // Worktree + lokalen + Remote-Branch räumt der Orchestrator danach auf (Worktree zuerst).
-  const r = await gh(["pr", "merge", branch, flag], repoRoot);
-  if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout).trim() };
-  return { ok: true, output: r.stdout.trim() };
+  // Transiente GitHub-Server-Fehler (GraphQL-500 o. Ä.) wiederholen — wie bei createPr (dieselbe
+  // Störung trifft `gh pr merge`, und nur der Integrator merged → ein Fehlschlag ist teuer).
+  let lastErr = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await gh(["pr", "merge", branch, flag], repoRoot);
+    if (r.code === 0) return { ok: true, output: r.stdout.trim() };
+    lastErr = (r.stderr || r.stdout).trim();
+    if (isTransientGhError(lastErr) && attempt < 2) {
+      await new Promise((res) => setTimeout(res, 1500 * (attempt + 1)));
+      continue;
+    }
+    break;
+  }
+  return { ok: false, error: lastErr };
 }
 
 function rollupState(rollup: unknown): PrChecksState {

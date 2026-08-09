@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useStore } from "../store";
 import { RemotePairing } from "./RemotePairing";
 
@@ -10,6 +11,21 @@ export function SettingsPanel() {
   const project = useStore((s) => s.project);
   const autonomy = useStore((s) => s.autonomy);
   const setAutonomy = useStore((s) => s.setAutonomy);
+  const reloginClaude = useStore((s) => s.reloginClaude);
+  const checkAuthStatus = useStore((s) => s.checkAuthStatus);
+  const [authStatus, setAuthStatus] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  async function onCheckAuth() {
+    setChecking(true);
+    try {
+      setAuthStatus(await checkAuthStatus());
+    } catch (e) {
+      setAuthStatus(`Status konnte nicht ermittelt werden: ${String(e)}`);
+    } finally {
+      setChecking(false);
+    }
+  }
 
   return (
     <section className="primary-panel settings-panel" aria-label="Einstellungen">
@@ -42,6 +58,40 @@ export function SettingsPanel() {
               <span className="settings-row-sub">Code-Kollisionen zwischen aktiven Agenten erkennen</span>
             </span>
           </label>
+        </div>
+        <div className="settings-group">
+          <div className="settings-group-title">Anthropic-Login</div>
+          <div className="settings-hint">
+            mads nutzt deine bestehende Claude-Anmeldung (macOS-Schlüsselbund) und speichert selbst kein
+            Token. Auth-Fehler sind oft vorübergehend (erneut senden genügt); bei dauerhaftem
+            „Authentifizierung fehlgeschlagen" hier neu anmelden — es öffnet sich ein Terminal mit dem
+            Browser-Login. Danach den Stream erneut senden (kein Neustart nötig).
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+            <button onClick={() => void reloginClaude()} title="Öffnet ein Terminal mit dem Befehl claude auth login (Browser-OAuth)">
+              Bei Claude neu anmelden
+            </button>
+            <button onClick={() => void onCheckAuth()} disabled={checking}>
+              {checking ? "Prüfe…" : "Status prüfen"}
+            </button>
+          </div>
+          {authStatus !== null && (
+            <pre
+              style={{
+                marginTop: 8,
+                padding: "8px 10px",
+                borderRadius: 6,
+                fontSize: 12,
+                lineHeight: 1.4,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                opacity: 0.85,
+                background: "rgba(127,127,127,0.12)",
+              }}
+            >
+              {authStatus}
+            </pre>
+          )}
         </div>
         <RemotePairing />
         {/* TODO(Post-MVP): Permission-Defaults, Modell-Auswahl, Update-Kanal (doc 10 §10). */}
