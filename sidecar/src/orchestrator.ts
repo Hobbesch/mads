@@ -13,7 +13,7 @@ import { AgentSession, type PermissionHooks } from "./session.js";
 import { loadApprovedKinds, saveApprovedKinds } from "./permissions.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
-import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
+import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
@@ -415,6 +415,32 @@ export class Orchestrator {
       case "update_main": {
         // G5: Integrator-Aktion — main nachziehen. Zuerst fast-forward (unverfänglich).
         if (!this.project) break;
+        // main ist lokal VORAUS und die Commits sind ECHT (z. B. Release-/Versions-Bumps, behalten) →
+        // nach origin/<base> pushen statt verwerfen (Fast-Forward, kein force). Sichere Alternative zu `hard`.
+        if (msg.push) {
+          const pr = await pushMainToOrigin(this.project.repoRoot, this.project.defaultBranch);
+          if (!pr.ok) {
+            this.emitError(msg.agentId, pr.kind, `main pushen fehlgeschlagen: ${pr.error}`);
+            break;
+          }
+          this.emit({
+            ...envelope(),
+            type: "agent_event",
+            agentId: msg.agentId,
+            event: {
+              kind: "assistant_text",
+              text: `⤒ ${pr.pushed} lokale(n) Commit(s) nach origin/${this.project.defaultBranch} gepusht — main ist jetzt in Sync (0/0).`,
+            },
+          });
+          const stP = await gitStatus(this.project.repoRoot, this.project.repoRoot, this.project.defaultBranch, this.project.defaultBranch);
+          if (!stP.unreliable) {
+            this.gitState.set(msg.agentId, stP);
+            this.emitGitStatus(msg.agentId, stP);
+          }
+          const sP = this.pool.get(msg.agentId);
+          if (sP) await this.pollAgent(sP);
+          break;
+        }
         // Feature A: main ist lokal VORAUS (z. B. nicht gepushte Release-/Versions-Bump-Commits, die ein
         // fast-forward nicht auflöst) → auf Wunsch hart auf origin/<base> setzen (mit Backup-Branch).
         if (msg.hard) {

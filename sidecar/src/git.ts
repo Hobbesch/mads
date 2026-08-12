@@ -662,6 +662,26 @@ export async function resetMainToOrigin(
   return { ok: true, discarded: ahead, backup };
 }
 
+/**
+ * Integrator-Aktion: lokale main-Commits (die main „ahead" machen — z. B. Release-/Versions-Bumps
+ * aus einem Deploy, die man BEHALTEN will) nach origin/<base> pushen. NUR Fast-Forward — main wird
+ * nie zwangsweise (force) überschrieben; ist origin voraus, ehrlicher Fehler → erst „main aktualisieren".
+ * Secret-Gate wie bei jedem Push (mads-Remote ist öffentlich).
+ */
+export async function pushMainToOrigin(
+  repoRoot: string,
+  defaultBranch: string,
+): Promise<{ ok: true; pushed: number } | { ok: false; kind: EscalationKind; error: string }> {
+  const cur = (await git(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], repoRoot)).stdout.trim();
+  if (cur !== defaultBranch) return { ok: false, kind: "push_rejected", error: `Checkout steht auf ${cur}, nicht ${defaultBranch}.` };
+  const ahead = parseInt((await git(["-C", repoRoot, "rev-list", "--count", `origin/${defaultBranch}..HEAD`], repoRoot)).stdout.trim() || "0", 10);
+  const gate = await secretGateBeforePush(repoRoot, defaultBranch);
+  if (!gate.ok) return gate;
+  const push = await git(["-C", repoRoot, "push", "origin", defaultBranch], repoRoot);
+  if (push.code !== 0) return { ok: false, kind: classifyGitError(push.stderr) ?? "push_rejected", error: push.stderr.trim() || push.stdout.trim() };
+  return { ok: true, pushed: ahead };
+}
+
 export interface GitStatusResult {
   behind: number;
   ahead: number;

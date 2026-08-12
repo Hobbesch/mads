@@ -428,6 +428,7 @@ export interface MadsState {
   /** Integrator-only: main per fast-forward auf origin/<default> nachziehen (kein rebase). */
   updateMain: (id: string) => Promise<void>;
   resetMain: (id: string) => Promise<void>;
+  pushMain: (id: string) => Promise<void>;
   /** Konsolidiert „Alle aktualisieren": main fast-forward + alle hinterherhängenden Subs rebasen. */
   syncAllBehind: () => Promise<void>;
   integratePr: (id: string, keep?: boolean) => Promise<void>;
@@ -1716,19 +1717,21 @@ export const useStore = create<MadsState>((set) => {
 
     resetMain: async (id) => {
       // Feature A: main ist lokal VORAUS (nicht gepushte Commits, z. B. Release-/Versions-Bumps, die ein
-      // fast-forward nicht auflöst) → hart auf origin setzen. Destruktiv → Bestätigung; der Sidecar sichert
-      // vorher automatisch einen Backup-Branch (verlustfrei rückholbar).
+      // fast-forward nicht auflöst) → hart auf origin setzen. Die Sicherheits-Bestätigung läuft über den
+      // In-App-ConfirmDialog im Inspector — NICHT window.confirm: das zeigt in der Tauri-Webview keinen
+      // Dialog und würde ohne Warnung durchlaufen. Der Sidecar sichert vorher automatisch einen
+      // Backup-Branch (verlustfrei rückholbar).
       const db = useStore.getState().project?.defaultBranch ?? "main";
-      const ok =
-        typeof window !== "undefined" && typeof window.confirm === "function"
-          ? window.confirm(
-              `Lokale, nicht gepushte Commits auf ${db} verwerfen und hart auf origin/${db} setzen?\n\n` +
-                `Ein Backup-Branch wird vorher automatisch gesichert (verlustfrei rückholbar).`,
-            )
-          : true;
-      if (!ok) return;
       notice(id, "accent", `↺ ${db} hart auf origin/${db} setzen…`);
       await sendHost({ ...envelope(), type: "update_main", agentId: id, hard: true });
+    },
+
+    pushMain: async (id) => {
+      // main ist lokal VORAUS und die Commits sind echt (behalten, z. B. Release-Version-Bumps) →
+      // nach origin pushen statt verwerfen. Ungefährlich (Fast-Forward, kein force) → keine Rückfrage nötig.
+      const db = useStore.getState().project?.defaultBranch ?? "main";
+      notice(id, "accent", `⤒ ${db} nach origin pushen…`);
+      await sendHost({ ...envelope(), type: "update_main", agentId: id, push: true });
     },
 
     syncAllBehind: async () => {

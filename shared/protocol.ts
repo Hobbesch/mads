@@ -456,6 +456,9 @@ export interface UpdateMainMsg extends BaseMsg {
    *  (mit automatischem Backup-Branch). Für den Fall, dass main lokal voraus ist (z. B. Release-/
    *  Versions-Bump-Commits), den ein fast-forward nicht auflösen kann. Ohne Flag: nur fast-forward. */
   hard?: boolean;
+  /** true: lokale ahead-Commits BEHALTEN und nach origin/<base> PUSHEN (Fast-Forward, kein force) —
+   *  die sichere Alternative zu `hard`, wenn die Commits echt sind (z. B. Release-Version-Bumps). */
+  push?: boolean;
 }
 
 export interface ShutdownMsg extends BaseMsg {

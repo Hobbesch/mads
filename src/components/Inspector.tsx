@@ -39,6 +39,7 @@ export function Inspector() {
   const commitMainRelease = useStore((s) => s.commitMainRelease);
   const updateMain = useStore((s) => s.updateMain);
   const resetMain = useStore((s) => s.resetMain);
+  const pushMain = useStore((s) => s.pushMain);
   const continueStream = useStore((s) => s.continueStream);
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
@@ -612,7 +613,36 @@ export function Inspector() {
           )}
           {live && agent.role === "integrator" && agent.ahead > 0 && (
             <button
-              onClick={() => void resetMain(selectedId)}
+              onClick={() => void pushMain(selectedId)}
+              title={`Deine ${agent.ahead} lokale(n) Commit(s) auf main (z. B. Release-Version-Bumps) nach origin/main pushen — Fast-Forward, behält sie. Danach ist main in Sync.`}
+            >
+              nach main pushen ({agent.ahead})
+            </button>
+          )}
+          {live && agent.role === "integrator" && agent.ahead > 0 && (
+            <button
+              className="danger"
+              onClick={() =>
+                setConfirm({
+                  title: `${agent.ahead} lokale Commit(s) verwerfen?`,
+                  body: (
+                    <>
+                      <p>
+                        Dein <code>main</code>-Checkout ist <strong>{agent.ahead}</strong> lokale(n), nicht
+                        gepushte(n) Commit(s) VORAUS. Diese werden <strong>verworfen</strong>, und <code>main</code>{" "}
+                        wird hart auf <code>origin/main</code> gesetzt.
+                      </p>
+                      <p>
+                        Ein Backup-Branch (<code>mads-backup/main-…</code>) wird vorher automatisch gesichert — die
+                        Commits bleiben verlustfrei rückholbar.
+                      </p>
+                    </>
+                  ),
+                  confirmLabel: `${agent.ahead} verwerfen & auf origin setzen`,
+                  danger: true,
+                  onConfirm: () => void resetMain(selectedId),
+                })
+              }
               title={`Dein main-Checkout ist ${agent.ahead} lokale(n), nicht gepushte(n) Commit(s) VORAUS (die ein fast-forward nicht auflöst — z. B. Release-/Versions-Bumps). Hart auf origin zurücksetzen; ein Backup-Branch wird vorher gesichert.`}
             >
               main auf origin zurücksetzen ({agent.ahead})
