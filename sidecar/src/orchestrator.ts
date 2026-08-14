@@ -816,6 +816,21 @@ export class Orchestrator {
       draft ?? false,
     );
     if (!res.ok) {
+      if (res.noCommits) {
+        // GitHub selbst: „No commits between …" — der Branch-Inhalt ist bereits im Default-Branch
+        // (typisch nach Squash-Merge: voraus nach Commit-SHA, aber leer nach Inhalt). KEINE Ablehnung
+        // → harmloser Hinweis statt roter push_rejected-Eskalation. Der Stream ist fertig.
+        this.emit({
+          ...envelope(),
+          type: "agent_event",
+          agentId,
+          event: {
+            kind: "assistant_text",
+            text: `Nichts zu PRen: ${s.branch} ist inhaltlich bereits in ${this.project.defaultBranch} (gemergt) — GitHub meldet „keine Commits dazwischen". Kein PR nötig; der Stream kann beendet werden.`,
+          },
+        });
+        return;
+      }
       if (res.transient) {
         // Der Push war ERFOLGREICH; nur GitHub lieferte beim PR-Anlegen einen transienten Server-Fehler
         // (GraphQL-500 o. Ä.) — auch nach mehreren Wiederholungen. Das ist KEINE Ablehnung und nicht der

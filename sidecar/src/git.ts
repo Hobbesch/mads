@@ -1222,7 +1222,7 @@ export async function createPr(
   title: string,
   body: string,
   draft: boolean,
-): Promise<{ ok: true; url: string } | { ok: false; error: string; transient?: boolean }> {
+): Promise<{ ok: true; url: string } | { ok: false; error: string; transient?: boolean; noCommits?: boolean }> {
   const pushed = await pushBranch(worktree, branch, base);
   if (!pushed.ok) return { ok: false, error: pushed.error };
   // Idempotent: existiert für den Branch bereits ein OFFENER PR, hat der Push oben ihn
@@ -1249,6 +1249,13 @@ export async function createPr(
       const urlInErr = /(https?:\/\/\S+\/pull\/\d+)/i.exec(err)?.[1];
       const again = urlInErr ? null : await prStatus(repoRoot, branch);
       return { ok: true, url: urlInErr ?? again?.url ?? existing?.url ?? "" };
+    }
+    // GitHub sagt selbst „nichts zu PRen": Head == Base bzw. der Branch-Inhalt liegt schon in `base`
+    // (typisch nach Squash-Merge: voraus nach Commit-SHA, aber leer nach Inhalt; oder Branch bereits
+    // auf `base` zurückgesetzt). Das ist KEINE Ablehnung — nicht rot eskalieren, Retry ist zwecklos.
+    // Der Aufrufer meldet es als harmlosen „bereits gemergt"-Hinweis.
+    if (/No commits between|Head sha can't be blank|Base sha can't be blank/i.test(err)) {
+      return { ok: false, error: err, noCommits: true };
     }
     lastErr = err;
     transient = isTransientGhError(err);
