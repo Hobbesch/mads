@@ -22,19 +22,33 @@ import { findSecrets } from "./secrets.js";
 /** Kategorie einer Rückfrage — steuert das projektweite „Immer erlauben". `danger` (destruktiv:
  *  rm/sudo/dd/kill/…) ist BEWUSST NICHT merkbar und fragt IMMER. Alle anderen kann der Nutzer per
  *  „Immer erlauben" für das Projekt freischalten (näher an Claude Code). */
-export type CommandKind = "danger" | "network" | "pkg" | "secret" | "git" | "write";
+export type CommandKind = "danger" | "outward" | "network" | "pkg" | "secret" | "git" | "write" | "tool";
 
-/** Kategorien, die „Immer erlauben" merken darf (alles außer dem destruktiven `danger`). */
+/** Kategorien, die „Immer erlauben" merken darf. NICHT dabei: `danger` (destruktiv) und `outward`.
+ *  `outward` = die Aktion wird für ANDERE sichtbar (Push/PR/Merge/Issue). Sie lag früher in derselben
+ *  merkbaren Kategorie `git` wie das harmlose fetch/pull — ein einziger Klick auf „Immer erlauben
+ *  (Git-Fernaktionen)" autorisierte damit dauerhaft auch `git push` und `gh pr merge`. Das hebelte
+ *  die Invarianten 1 („nur der Integrator merged") und 4 („außen-sichtbare Aktionen sind explizit")
+ *  aus — im Autopilot, wo niemand zusieht. Außenwirkung muss jedes Mal bewusst bestätigt werden. */
 export const REMEMBERABLE_KINDS: readonly CommandKind[] = ["network", "pkg", "secret", "git", "write"];
 /** Menschliche Labels (Dialog-Knopf „Immer erlauben (…)" + Persistenz-Anzeige). */
 export const COMMAND_KIND_LABELS: Record<CommandKind, string> = {
   danger: "destruktive Befehle",
+  outward: "Push/PR/Merge nach außen",
   network: "Netzwerkzugriff nach außen",
   pkg: "Paket-/Dienst-Verwaltung",
   secret: "Zugriff auf Secrets/Config",
-  git: "Git-Fernaktionen",
+  git: "Git-Fernaktionen (lesend)",
   write: "Schreiben außerhalb des Projekts",
+  tool: "dieses Tool",
 };
+
+/** Kategorien, für die der Dialog „Immer erlauben" anbieten darf. `tool` wird NICHT pauschal
+ *  gemerkt, sondern pro Tool-NAME (wie WebFetch pro Domain) — deshalb steht es nicht in
+ *  REMEMBERABLE_KINDS (das persistiert Bash-Kategorien), aber der Knopf ist sinnvoll. */
+export function isRememberableKind(k: CommandKind | undefined): boolean {
+  return !!k && (k === "tool" || (REMEMBERABLE_KINDS as readonly string[]).includes(k));
+}
 
 export type AutoDecision = { decision: "allow" | "ask"; reason?: string; kind?: CommandKind };
 
@@ -53,6 +67,19 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
  * sonst greift die Regel je nach SDK-Version nicht. `TaskOutput`/`TaskStop` heißen als Legacy-Alias
  * `BashOutput`/`KillShell` und betreffen nur Hintergrund-Tasks, die der Agent selbst gestartet hat.
  */
+/**
+ * Reine Doku-/Referenz-Nachschlagewerke (MCP): liefern Bibliotheks-Dokumentation. Lesend, ohne
+ * Datei-, Prozess- oder Zustandswirkung — dieselbe Klasse wie ein WebFetch auf einen kuratierten
+ * Doku-Host, der weiter unten längst still läuft. Ohne diese Ausnahme fragte JEDE einzelne
+ * Doku-Abfrage nach (und der „Immer erlauben"-Knopf half nicht, weil er nur für Bash griff).
+ * Die Argumente werden trotzdem auf Secret-Muster geprüft — der Query-Text ist frei formulierbar
+ * und wäre sonst ein Exfiltrationskanal.
+ */
+const DOC_LOOKUP_TOOLS = new Set([
+  "mcp__context7__resolve-library-id",
+  "mcp__context7__query-docs",
+]);
+
 const META_TOOLS = new Set([
   "Agent", "Task",
   "Workflow",
@@ -81,6 +108,26 @@ const DANGER: { re: RegExp; why: string; kind: CommandKind }[] = [
   { re: /(^|[\s;&|(])(nc|ncat|telnet|ssh|scp|sftp|rsync|ftp)(\s|$)/, why: "Netzwerkzugriff nach aussen", kind: "network" },
   { re: /(^|[\s;&|(])(brew|apt|apt-get|yum|dnf|port|docker|podman|launchctl|crontab|systemctl)(\s|$)/, why: "System-/Paket-/Dienst-Verwaltung", kind: "pkg" },
   { re: /(^|[\s;&|(])(osascript|defaults|pbcopy|pbpaste)(\s|$)/, why: "macOS-Systemfunktionen/Zwischenablage", kind: "danger" },
+  // gh ABGESTUFT — Reihenfolge zählt (erster Treffer gewinnt): erst das Unwiderrufliche, dann das
+  // Außenwirksame, zuletzt der generische Backstop. Der generische Eintrag bleibt bewusst bestehen:
+  // er läuft quote-neutralisiert und fängt jede Form, die die spezifischen Muster nicht treffen.
+  {
+    re: /(^|[\s;&|(])gh\s+(?:-\S+\s+)*(?:pr\s+merge|repo\s+(?:delete|edit|archive|rename|transfer)|release\s+delete|secret\s+(?:set|delete)|variable\s+(?:set|delete)|auth\s+token|ruleset\s+delete)(\s|$)/,
+    why: "gh verändert GitHub unwiderruflich (Merge/Löschen/Secrets)",
+    kind: "danger",
+  },
+  {
+    // `gh api` mit verändernder HTTP-Methode — genau der Aufruf, mit dem sich Branches löschen oder
+    // Repo-Einstellungen ändern lassen. Auf das Segment begrenzt, damit kein Folgebefehl mitgelesen wird.
+    re: /(^|[\s;&|(])gh\s+api\b[^;|&\n]*(?:-X|--method)[\s=]+(?:DELETE|PATCH|PUT|POST)\b/i,
+    why: "gh api mit verändernder Methode (DELETE/PATCH/PUT/POST)",
+    kind: "danger",
+  },
+  {
+    re: /(^|[\s;&|(])gh\s+(?:-\S+\s+)*(?:pr\s+(?:create|close|reopen|ready|edit)|issue\s+(?:create|close|reopen|edit)|release\s+(?:create|upload)|workflow\s+(?:run|enable|disable))(\s|$)/,
+    why: "gh wirkt nach außen (PR/Issue/Release/Workflow)",
+    kind: "outward",
+  },
   { re: /(^|[\s;&|(])gh(\s|$)/, why: "GitHub-CLI (außen-sichtbar: PR/Issue/API)", kind: "git" },
   // git außen-sichtbar/destruktiv — auch code-versteckt (Scan ist quote-neutralisiert). Den
   // nuancierten Top-Level-Fall (`git remote -v` ok, `git remote add` fragt; Config-Exec-Keys)
@@ -99,7 +146,15 @@ const DANGER: { re: RegExp; why: string; kind: CommandKind }[] = [
   { re: /(^|[\s;&|(])git\s+(?:-\S+\s+(?:\S+\s+)?)*branch\s+(?:\S+\s+)*-D(\s|$)/, why: "git branch -D löscht ungemergten Branch", kind: "danger" },
   { re: /(^|[\s;&|(])git\s+(?:-\S+\s+(?:\S+\s+)?)*stash\s+(drop|clear)(\s|$)/, why: "git stash drop/clear verwirft gesicherte Arbeit", kind: "danger" },
   // Außen-sichtbar, aber NICHT arbeitsvernichtend → bleibt merkbar.
-  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*(push|pull|fetch|clone)(\s|$)/, why: "git außen-sichtbar", kind: "git" },
+  // Force-Push ÜBERSCHREIBT fremde Commits auf dem Remote — unwiderruflich, deshalb `danger` (nie
+  // merkbar). `--force-with-lease` prüft vorher den Remote-Stand und ist nur `outward`; es muss ZUERST
+  // stehen, sonst würde die allgemeine --force-Regel es fälschlich als danger einstufen.
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*push\b[^;|&\n]*--force-with-lease/, why: "git push --force-with-lease (außen-sichtbar)", kind: "outward" },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*push\b[^;|&\n]*(?:--force\b|\s-f(\s|$))/, why: "git push --force überschreibt fremde Commits auf dem Remote", kind: "danger" },
+  // push macht Arbeit für ANDERE sichtbar → `outward` (nicht merkbar). pull/fetch/clone holen nur
+  // herein und bleiben `git` (merkbar) — sie erzeugen keine Außenwirkung.
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*push(\s|$)/, why: "git push — außen-sichtbar", kind: "outward" },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*(pull|fetch|clone)(\s|$)/, why: "git holt vom Remote", kind: "git" },
   { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)", kind: "danger" },
   // Hijack-/Egress-Umgebungsvariablen: laden fremde Libs bzw. übernehmen git/ssh nach aussen.
   {
@@ -125,6 +180,9 @@ const GIT_RISKY_SUB = new Set([
   "pull", "am", "apply", "format-patch", "send-email", "request-pull", "daemon",
   "fast-import", "p4", "svn", "instaweb", "clone", "ls-remote", "archive",
 ]);
+/** git-Subcommands mit AUSSENWIRKUNG: tragen Commits/Patches nach außen oder machen das Repo von
+ *  außen erreichbar. Bekommen kind `outward` → nie per „Immer erlauben" merkbar (Invariante 4). */
+const GIT_OUTWARD_SUB = new Set(["push", "send-email", "request-pull", "daemon", "instaweb", "p4", "svn"]);
 // Subcommands, die nur lesen bzw. lokal/harmlos sind. ALLES andere → default-deny (ASK),
 // damit ein unbekanntes/neues Subcommand nicht versehentlich auto-erlaubt wird.
 const GIT_SAFE_SUB = new Set([
@@ -265,7 +323,13 @@ function classifyGit(cmd: string): AutoDecision | null {
     }
     const sub = (toks[i] ?? "").toLowerCase();
     if (!sub) continue;
-    if (GIT_RISKY_SUB.has(sub)) return ASK(`git-Operation „${sub}“ — außen-sichtbar/verändernd`);
+    if (GIT_RISKY_SUB.has(sub))
+      return ASK(
+        `git-Operation „${sub}“ — außen-sichtbar/verändernd`,
+        // Trägt die Aktion Daten nach AUSSEN bzw. macht sie das Repo von außen erreichbar, ist sie
+        // `outward` (nicht per „Immer erlauben" merkbar). Alles Übrige behält die bisherige Einstufung.
+        GIT_OUTWARD_SUB.has(sub) ? "outward" : undefined,
+      );
     const a1 = (toks[i + 1] ?? "").toLowerCase();
     if (sub === "remote" && /^(add|remove|rm|set-url|rename|prune)$/.test(a1)) return ASK("git remote ändern");
     if (sub === "submodule" && /^(add|update|deinit|sync|set-url|set-branch)$/.test(a1)) return ASK("git submodule ändern");
@@ -667,6 +731,8 @@ export function classifyToolCall(
     cwd?: string;
     isFetchHostApproved?: (host: string) => boolean;
     isKindApproved?: (kind: CommandKind) => boolean;
+    /** Der Nutzer hat GENAU dieses Tool per „Immer erlauben" freigegeben (pro Tool-Name). */
+    isToolApproved?: (toolName: string) => boolean;
   } = {},
 ): AutoDecision {
   if (toolName === "AskUserQuestion") return ASK("Rückfrage des Agenten");
@@ -739,6 +805,18 @@ export function classifyToolCall(
   // Drittanbieter-MCP-Tools (fremder Code/fremde Instruktionen) — die fragen weiter.
   if (META_TOOLS.has(toolName)) return ALLOW;
 
-  // Drittanbieter-MCP-Tools, Unbekanntes → fragen.
-  return ASK(`Tool „${toolName}“ nicht als auto-sicher eingestuft`);
+  // Doku-Nachschlagen (context7 &co.): still — außer die Anfrage trägt ein mögliches Secret nach
+  // außen. Gleiche Logik wie bei WebFetch, wo `findSecrets(url)` den Exfil-Kanal schließt.
+  if (DOC_LOOKUP_TOOLS.has(toolName)) {
+    const hits = findSecrets(JSON.stringify(input ?? {}));
+    return hits.length
+      ? ASK(`Doku-Abfrage enthält ein mögliches Secret (${hits[0].kind}) — Exfiltration verhindern`)
+      : ALLOW;
+  }
+
+  // Drittanbieter-MCP-Tools, Unbekanntes → fragen. Kategorie `tool`, damit „Immer erlauben"
+  // überhaupt etwas bewirken KANN (der Merk-Pfad war bisher auf Bash beschränkt → der Knopf war
+  // bei MCP-Tools wirkungslos und dieselbe Rückfrage kam endlos wieder).
+  if (ctx.isToolApproved?.(toolName)) return ALLOW;
+  return ASK(`Tool „${toolName}“ nicht als auto-sicher eingestuft`, "tool");
 }

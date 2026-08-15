@@ -5,7 +5,7 @@
  * Gefragt wird NUR bei echtem Risiko: Netz nach AUSSEN, Paketmanager/Installer, git-outward/PR,
  * sudo/destruktiv/System, Secrets-Zugriff, Schreiben ausserhalb von Projekt/Temp.
  */
-import { classifyBashCommand, classifyToolCall, isDeployCommand, isGitCommit, registrableDomain } from "./safe-command";
+import { classifyBashCommand, classifyToolCall, isDeployCommand, isGitCommit, isRememberableKind, registrableDomain, REMEMBERABLE_KINDS, COMMAND_KIND_LABELS } from "./safe-command";
 
 const results: string[] = [];
 let failed = 0;
@@ -352,7 +352,7 @@ check("curl → kind network", kind("curl https://app.ardexa.com/api/v1") === "n
 check("docker compose → kind pkg", kind("docker compose -f x.yml up -d") === "pkg");
 check("rm -rf → kind danger", kind("rm -rf build") === "danger");
 check("cat .env → kind secret", kind("cat .env") === "secret");
-check("git push → kind git", kind("git push origin main") === "git");
+check("git push → kind outward (frueher merkbar als git; siehe Invariante 4)", kind("git push origin main") === "outward");
 
 // ---- classifyToolCall: gemerkte Kategorie erlaubt still; danger ist NIE merkbar ----
 const bash = (c: string, approved: string[] = []) =>
@@ -377,8 +377,10 @@ check("git branch -D fragt trotz freigegebenem git", bash("git branch -D feature
 check("git stash drop fragt trotz freigegebenem git", bash("git stash drop", ["git"]) === "ask");
 check("auch mit -C fragt reset --hard", bash("git -C /repo reset --hard origin/main", ["git"]) === "ask");
 check("reset ist kind=danger (nie merkbar)", classifyBashCommand("git reset --hard origin/main").kind === "danger");
-// Nicht-vernichtendes Außen-git bleibt merkbar (sonst wäre die Freigabe wertlos):
-check("git push bleibt merkbar → allow bei freigegebenem git", bash("git push origin main", ["git"]) === "allow");
+// Außenwirkung ist NICHT merkbar: „Immer erlauben (git)" darf push NICHT mitfreischalten — genau
+// dieses Bündeln war das Loch in Invariante 1/4. Herein-holendes git bleibt merkbar.
+check("git push fragt TROTZ freigegebenem git (outward ≠ git)", bash("git push origin main", ["git"]) === "ask");
+check("auch mit freigegebenem outward-Versuch: nicht persistierbar", !REMEMBERABLE_KINDS.includes("outward"));
 check("git fetch bleibt merkbar → allow bei freigegebenem git", bash("git fetch origin", ["git"]) === "allow");
 check("git push ohne Freigabe → ask", bash("git push origin main", []) === "ask");
 
@@ -406,6 +408,30 @@ check("docker compose up ist KEIN deploy", !isDeployCommand("docker compose up -
 check("npm publish --dry-run ist KEIN deploy (Probelauf)", !isDeployCommand("npm publish --dry-run"));
 check("Skript in deploy/-Ordner ist KEIN deploy (Basename zählt)", !isDeployCommand("./deploy/build.sh"));
 
+// --- Außenwirkung ist NICHT merkbar (Invarianten 1 & 4) ---------------------
+// Früher lagen push und `gh pr merge` in derselben merkbaren Kategorie „git" wie fetch/pull:
+// ein Klick auf „Immer erlauben (Git-Fernaktionen)" autorisierte damit dauerhaft auch Merges.
+const kindOf = (c: string) => classifyBashCommand(c).kind;
+check("git push → outward (nicht merkbar)", kindOf("git push origin main") === "outward");
+check("git push --force → danger (überschreibt fremde Commits)", kindOf("git push --force origin main") === "danger");
+check("git push -f → danger", kindOf("git push -f") === "danger");
+check("git push --force-with-lease → outward (prüft Remote-Stand)", kindOf("git push --force-with-lease origin main") === "outward");
+check("git fetch/pull bleiben merkbar (holen nur herein)", kindOf("git fetch origin") === "git" && kindOf("git pull") === "git");
+check("gh pr merge → danger (nie merkbar — Invariante 1)", kindOf("gh pr merge 42 --squash") === "danger");
+check("gh api -X DELETE → danger", kindOf("gh api -X DELETE repos/o/r/git/refs/heads/x") === "danger");
+check("gh api -X PATCH → danger", kindOf("gh api -X PATCH repos/o/r -F delete_branch_on_merge=true") === "danger");
+check("gh repo delete → danger", kindOf("gh repo delete o/r") === "danger");
+check("gh secret set → danger", kindOf("gh secret set FOO") === "danger");
+check("gh pr create → outward (nicht merkbar)", kindOf("gh pr create --title x --body y") === "outward");
+check("gh pr list → git (lesend, merkbar)", kindOf("gh pr list") === "git");
+check("gh api (ohne -X, lesend) → git", kindOf("gh api repos/o/r") === "git");
+check("outward ist NICHT in REMEMBERABLE_KINDS", !REMEMBERABLE_KINDS.includes("outward"));
+check("danger ist NICHT in REMEMBERABLE_KINDS", !REMEMBERABLE_KINDS.includes("danger"));
+check("outward hat ein Label (Dialog zeigt sonst undefined)", typeof COMMAND_KIND_LABELS.outward === "string" && COMMAND_KIND_LABELS.outward.length > 0);
+// Quote-Verstecken darf die Einstufung nicht entschärfen (Scan läuft quote-neutralisiert).
+check("versteckter Merge in Code-String bleibt danger", kindOf(`python3 -c "import os; os.system('gh pr merge 42')"`) === "danger");
+check("versteckter Force-Push bleibt danger", kindOf(`bash -c "git push --force"`) === "danger");
+
 // --- Orchestrierungs-/Meta-Tools: erlaubt (die INNEREN Aufrufe werden weiterhin einzeln geprüft) ---
 check("Agent (Subagent starten) → allow", classifyToolCall("Agent", { description: "x" }).decision === "allow");
 check("Task (Legacy-Alias) → allow", classifyToolCall("Task", { description: "x" }).decision === "allow");
@@ -416,7 +442,31 @@ check("TaskCreate/TaskUpdate → allow", classifyToolCall("TaskCreate", {}).deci
 // Gegenprobe: die riskanten bleiben gegated.
 check("ExitPlanMode bleibt ask (könnte sich Freigaben selbst schreiben)", classifyToolCall("ExitPlanMode", {}).decision === "ask");
 check("Skill bleibt ask", classifyToolCall("Skill", { skill: "x" }).decision === "ask");
-check("Drittanbieter-MCP bleibt ask", classifyToolCall("mcp__context7__query-docs", {}).decision === "ask");
+// --- Doku-Nachschlagen (context7): still, aber mit Exfil-Schutz ---
+check(
+  "context7 query-docs → allow (reines Nachschlagen)",
+  classifyToolCall("mcp__context7__query-docs", { libraryId: "/websites/vuetifyjs_en", query: "v-tabs API props stacked" }).decision === "allow",
+);
+check(
+  "context7 resolve-library-id → allow",
+  classifyToolCall("mcp__context7__resolve-library-id", { libraryName: "Vuetify", query: "VDataTable custom headers" }).decision === "allow",
+);
+check(
+  "context7 mit Secret im Query → ask (Exfiltration verhindern)",
+  classifyToolCall("mcp__context7__query-docs", { query: "warum lehnt sk-ant-api03-AA00bbCC11ddEE22ffGG33hhII44jjKK55llMM66nnOO77ppQQ88rr-bbccddee ab?" }).decision === "ask",
+);
+// Unbekannte MCP-Tools bleiben gegated — aber jetzt merkbar (Kategorie „tool", pro Tool-NAME).
+check("unbekanntes MCP bleibt ask", classifyToolCall("mcp__foo__bar", {}).decision === "ask");
+check("unbekanntes MCP hat kind=tool (Immer-erlauben wirkt jetzt)", classifyToolCall("mcp__foo__bar", {}).kind === "tool");
+check(
+  "freigegebenes Tool läuft still",
+  classifyToolCall("mcp__foo__bar", {}, { isToolApproved: (t) => t === "mcp__foo__bar" }).decision === "allow",
+);
+check(
+  "Freigabe gilt NUR für dieses Tool (kein Blanko für alle)",
+  classifyToolCall("mcp__evil__exfil", {}, { isToolApproved: (t) => t === "mcp__foo__bar" }).decision === "ask",
+);
+check("kind 'tool' ist merkbar, 'outward' nicht", isRememberableKind("tool") && !isRememberableKind("outward") && !isRememberableKind("danger"));
 check("spawn_substreams bleibt ask (echte Streams/Worktrees)", classifyToolCall("mcp__mads__spawn_substreams", {}).decision === "ask");
 check("unbekanntes Tool bleibt ask", classifyToolCall("SomeNewTool", {}).decision === "ask");
 check("Bash bleibt gegated (Meta-Liste öffnet Bash NICHT)", classifyToolCall("Bash", { command: "sudo rm -rf /" }).decision === "ask");

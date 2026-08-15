@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useStore } from "../store";
 import { toolDescription, toolCommand } from "../toolText";
 import type { AskQuestion, PermissionRequestMsg } from "../../shared/protocol";
-import { COMMAND_KIND_LABELS } from "../../shared/safe-command";
+import { COMMAND_KIND_LABELS, isRememberableKind } from "../../shared/safe-command";
 
 // Sentinel für die „Etwas anderes…"-Option (Freitext statt einer angebotenen Option).
 const CUSTOM = "__custom__";
@@ -33,7 +33,10 @@ function ToolApproval({ req }: { req: PermissionRequestMsg }) {
           // bisher — für ein Tool mit Claude-Code-Regel-Vorschlägen (z. B. WebFetch-Domain). Das
           // destruktive `danger` (rm/sudo/dd/…) ist NIE merkbar → kein Knopf.
           const ck = req.commandKind;
-          const kindRemember = ck && ck !== "danger";
+          // NUR wirklich merkbare Kategorien anbieten. Früher stand hier `ck !== "danger"` — damit
+          // hätte der Knopf auch für `outward` (Push/PR/Merge) erschienen und eine Freigabe
+          // versprochen, die es bewusst nicht gibt.
+          const kindRemember = isRememberableKind(ck);
           const suggestRemember = !!req.suggestions && req.suggestions.length > 0;
           if (!kindRemember && !suggestRemember) return null;
           const label = kindRemember ? `Immer erlauben (${COMMAND_KIND_LABELS[ck!]})` : "Immer erlauben";

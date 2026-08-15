@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { AgentSession, type PermissionHooks } from "./session.js";
-import { loadApprovedKinds, saveApprovedKinds } from "./permissions.js";
+import { loadApprovedKinds, saveApprovedKinds, loadApprovedTools, saveApprovedTools } from "./permissions.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
 import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
@@ -53,6 +53,8 @@ export class Orchestrator {
   // Projektweite „Immer erlauben"-Freigaben für Bash-Kategorien (persistent in .mads/permissions.json).
   // Alle Streams des Projekts teilen sich diesen Zustand; bei Projektwechsel neu geladen.
   private readonly approvedKinds = new Set<CommandKind>();
+  // Dito, aber pro TOOL-NAME (MCP-/Nicht-Bash-Tools) — siehe permissions.ts.
+  private readonly approvedTools = new Set<string>();
   private pollTimer?: ReturnType<typeof setInterval>;
   // Re-Entrancy-Schutz: dauert ein Poll-Zyklus (fetch + Autopilot commit/push/PR) länger als das
   // Intervall, würde `setInterval` einen ZWEITEN parallel starten → zwei Push-/Rebase-Zyklen kollidieren
@@ -1015,7 +1017,10 @@ export class Orchestrator {
   /** Projektweite „Immer erlauben"-Freigaben aus .mads/permissions.json (neu) laden. */
   private reloadApprovedKinds(): void {
     this.approvedKinds.clear();
-    if (this.project) for (const k of loadApprovedKinds(this.project.repoRoot)) this.approvedKinds.add(k);
+    this.approvedTools.clear();
+    if (!this.project) return;
+    for (const k of loadApprovedKinds(this.project.repoRoot)) this.approvedKinds.add(k);
+    for (const t of loadApprovedTools(this.project.repoRoot)) this.approvedTools.add(t);
   }
 
   /** Permission-Hooks, die jede Session bekommt: geteilter (live) Projekt-Zustand + Persistenz. */
@@ -1026,6 +1031,12 @@ export class Orchestrator {
         if (this.approvedKinds.has(k)) return;
         this.approvedKinds.add(k);
         if (this.project) saveApprovedKinds(this.project.repoRoot, this.approvedKinds);
+      },
+      isToolApproved: (t) => this.approvedTools.has(t),
+      approveTool: (t) => {
+        if (this.approvedTools.has(t)) return;
+        this.approvedTools.add(t);
+        if (this.project) saveApprovedTools(this.project.repoRoot, this.approvedTools);
       },
     };
   }

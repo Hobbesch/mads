@@ -14,7 +14,7 @@ import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
 import { createWorktree, removeWorktree, worktreeFingerprint } from "./git.js";
 import { ensureMadsDir } from "./persistence.js";
-import { classifyToolCall, isDeployCommand, isGitCommit, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
+import { classifyToolCall, isDeployCommand, isGitCommit, isRememberableKind, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
 import { scrubbedAgentEnv } from "./agentEnv.js";
 import { sandboxOptions } from "./sandbox.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -191,6 +191,10 @@ function userMsg(text: string, images?: ImageInput[]): SdkUserMessage {
 export interface PermissionHooks {
   isKindApproved: (kind: CommandKind) => boolean;
   approveKind: (kind: CommandKind) => void;
+  /** Freigabe pro TOOL-NAME (nicht pauschal für alle Tools) — für Nicht-Bash-Tools wie MCP-Server.
+   *  Ohne diesen Pfad war „Immer erlauben" dort wirkungslos und dieselbe Rückfrage kam endlos wieder. */
+  isToolApproved: (toolName: string) => boolean;
+  approveTool: (toolName: string) => void;
 }
 
 export class AgentSession {
@@ -596,6 +600,7 @@ export class AgentSession {
         cwd: this.cwd,
         isFetchHostApproved: (h) => this.approvedFetchHosts.has(registrableDomain(h)),
         isKindApproved: (k) => this.perms?.isKindApproved(k) ?? false,
+        isToolApproved: (t) => this.perms?.isToolApproved(t) ?? false,
       });
       if (verdict.decision === "allow") {
         // updatedInput ist im CLI-Schema PFLICHT (Record) — sonst ZodError. Ursprünglichen
@@ -677,9 +682,16 @@ export class AgentSession {
       // „Immer erlauben" bei Bash → die KATEGORIE projektweit merken (persistent, via Orchestrator).
       // `danger` ist nie merkbar (classifyToolCall reicht es gar nicht als merkbar durch, und der
       // Orchestrator/Store filtert es zusätzlich) → destruktive Befehle fragen weiterhin.
-      if (decision.remember && toolName === "Bash" && commandKind && commandKind !== "danger") {
+      if (decision.remember && toolName === "Bash" && commandKind && isRememberableKind(commandKind) && commandKind !== "tool") {
         this.perms?.approveKind(commandKind);
         log(`[${this.agentId}] Befehls-Kategorie projektweit gemerkt: ${commandKind}`);
+      }
+      // „Immer erlauben" bei einem NICHT-Bash-Tool (MCP-Server o. Ä.) → genau DIESES Tool merken,
+      // nicht die ganze Klasse. Vorher gab es diesen Pfad nicht: der Knopf war wirkungslos und
+      // dieselbe Rückfrage kam nach jedem Aufruf und jedem Neustart wieder.
+      if (decision.remember && toolName && toolName !== "Bash" && commandKind === "tool") {
+        this.perms?.approveTool(toolName);
+        log(`[${this.agentId}] Tool projektweit gemerkt: ${toolName}`);
       }
       resolve({
         behavior: "allow",
