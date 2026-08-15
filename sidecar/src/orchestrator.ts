@@ -35,7 +35,16 @@ const SHARED_LANDFIRST_GLOBS = [
 ];
 import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, ResumableAgent, SavedPrompt, OpenReviewStreamMsg } from "../../shared/protocol.js";
 
-const POLL_INTERVAL_MS = 25_000;
+/**
+ * Grundtakt des Orchestrators. Früher 25 s — zusammen mit „eine Aktion pro Zyklus & Stream"
+ * ergab das 50–75 s von „Agent fertig" bis PR, unabhängig davon, wie schnell das Modell war.
+ * Das war der stärkste Beitrag zum Eindruck „mads ist zäh". Der Takt ist jetzt kürzer UND nur noch
+ * das Sicherheitsnetz: den Normalfall löst `schedulePollSoon()` ereignisgetrieben aus, sobald ein
+ * Stream seinen Status wechselt (z. B. fertig wird).
+ */
+const POLL_INTERVAL_MS = 10_000;
+/** Debounce für den ereignisgetriebenen Poll — bündelt die Statuswechsel eines Turn-Endes. */
+const POLL_SOON_MS = 1_200;
 
 /** Bot-Autoren (Renovate/Dependabot/…) — deren PRs gehören NICHT in die „eingehende PRs zum Review"-Liste.
  *  `gh pr list --json author` liefert GitHub-App-Actors mit „app/"-Präfix (z. B. „app/github-actions",
@@ -56,6 +65,7 @@ export class Orchestrator {
   // Dito, aber pro TOOL-NAME (MCP-/Nicht-Bash-Tools) — siehe permissions.ts.
   private readonly approvedTools = new Set<string>();
   private pollTimer?: ReturnType<typeof setInterval>;
+  private pollSoonTimer?: ReturnType<typeof setTimeout>;
   // Re-Entrancy-Schutz: dauert ein Poll-Zyklus (fetch + Autopilot commit/push/PR) länger als das
   // Intervall, würde `setInterval` einen ZWEITEN parallel starten → zwei Push-/Rebase-Zyklen kollidieren
   // (force-with-lease „cannot lock ref … expected …"). Der Guard lässt immer nur EINEN Zyklus laufen.
@@ -166,7 +176,7 @@ export class Orchestrator {
           log(`[orchestrator] agent ${msg.agentId} existiert bereits`);
           return;
         }
-        const session = new AgentSession(msg.agentId, () => this.persist(), this.permHooks(), () => this.activeStreamsSummary(msg.agentId));
+        const session = new AgentSession(msg.agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(msg.agentId));
         this.pool.set(msg.agentId, session);
         // Resume: den zuletzt gemerkten Auftrag aus agents.json in die frische Session vorladen. Sonst
         // stünde lastPrompt beim automatischen „Fortsetzen" (continuation) auf undefined und das nächste
@@ -296,7 +306,7 @@ export class Orchestrator {
           break;
         }
         // Neuen Sub-Stream im ausgelagerten Worktree starten (Autopilot committet/PRt die Änderungen).
-        const session = new AgentSession(msg.agentId, () => this.persist(), this.permHooks(), () => this.activeStreamsSummary(msg.agentId));
+        const session = new AgentSession(msg.agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(msg.agentId));
         this.pool.set(msg.agentId, session);
         await session.start({
           ...envelope(),
@@ -533,6 +543,7 @@ export class Orchestrator {
 
       case "shutdown":
         if (this.pollTimer) clearInterval(this.pollTimer);
+        if (this.pollSoonTimer) clearTimeout(this.pollSoonTimer); // sonst hielte er den Prozess offen
         await this.stopDevServerIf(); // laufenden Dev-Server sauber beenden (Prozess-Gruppen-Kill)
         if (this.project) releaseProjectLock(this.project.repoRoot); // Projekt-Lock freigeben
         for (const s of this.pool.values()) await s.stop(false);
@@ -1361,6 +1372,26 @@ export class Orchestrator {
     this.pollTimer = setInterval(() => void this.pollAll(), POLL_INTERVAL_MS);
   }
 
+  /**
+   * Ereignisgetriebener Poll: wird aufgerufen, wenn ein Stream seinen Status wechselt (Turn-Ende,
+   * Fehler, Freigabe erteilt). Statt bis zu einem vollen Intervall zu warten, reagiert der
+   * Orchestrator so binnen ~1 s — das ist der eigentliche Tempo-Gewinn; der Timer bleibt nur das
+   * Sicherheitsnetz für Zustandsänderungen ohne Ereignis (z. B. Remote-Pushes).
+   * Debounced (ein Turn-Ende erzeugt mehrere Statuswechsel) und re-armt sich, falls gerade ein
+   * Zyklus läuft — `pollAll()` würde sonst wegen des `polling`-Guards einfach verpuffen.
+   */
+  private schedulePollSoon(delayMs: number = POLL_SOON_MS): void {
+    if (this.pollSoonTimer || !this.project) return;
+    this.pollSoonTimer = setTimeout(() => {
+      this.pollSoonTimer = undefined;
+      if (this.polling) {
+        this.schedulePollSoon(1_500); // Zyklus läuft → gleich noch einmal versuchen
+        return;
+      }
+      void this.pollAll();
+    }, delayMs);
+  }
+
   private async pollAll(): Promise<void> {
     if (!this.project || this.polling) return; // nie zwei Zyklen parallel (Push-/Rebase-Race)
     this.polling = true;
@@ -1528,6 +1559,12 @@ export class Orchestrator {
         }
       } catch (e) {
         log(`[orchestrator] autopilot ${s.agentId} (${action}) failed: ${String(e)}`);
+      } finally {
+        // „EINE Aktion pro Zyklus & Stream" bleibt bewusst bestehen (der Zustand soll sich zwischen
+        // commit → push → PR setzen). Aber die WARTEZEIT dazwischen muss nicht ein voller Takt sein:
+        // eine ausgeführte Aktion ändert selbst keinen Agenten-Status, löste also bisher kein Ereignis
+        // aus — die Kette brauchte 3 volle Intervalle. Jetzt zieht sie sich selbst weiter.
+        this.schedulePollSoon();
       }
     }
   }
