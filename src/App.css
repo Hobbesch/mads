@@ -931,6 +931,11 @@ button.primary:hover {
   border-color: var(--s-green);
   color: #fff;
 }
+/* Teilweise gestartet (ein Dienst tot) — nicht gruen, sonst liest es sich als „alles laeuft". */
+.card-dev.on.degraded {
+  background: var(--s-yellow);
+  border-color: var(--s-yellow);
+}
 /* Laufend-Spinner auf der Agent-Karte (nutzt @keyframes spin). */
 .card-spin {
   width: 10px;
@@ -3937,6 +3942,12 @@ body.col-resizing .tree-resizer {
   border-color: var(--s-green);
   color: var(--s-green);
 }
+/* TEILWEISE gestartet: ein konfigurierter Dienst ist tot, andere laufen. Muss sich von „läuft"
+   unterscheiden — grün liest sich als „alles gut", und man sucht den Fehler dann im eigenen Code. */
+.devserver-btn.on.degraded {
+  border-color: var(--s-yellow);
+  color: var(--s-yellow);
+}
 /* „Konfigurieren"-Knopf (öffnet .mads/run.json im Editor). Kompaktes Zahnrad, prominent bei „unconfigured". */
 .devserver-config.prominent {
   border-color: var(--accent);
@@ -4002,6 +4013,7 @@ body.col-resizing .tree-resizer {
 .devserver-dot.starting,
 .devserver-dot.installing { background: var(--s-yellow); animation: pulse 1.1s infinite; }
 .devserver-dot.error { background: var(--s-red); }
+.devserver-dot.degraded { background: var(--s-yellow); }
 
 /* ============================================================================
    Prompt-Bibliothek (Composer-Popover + Verwaltungs-Dialog)

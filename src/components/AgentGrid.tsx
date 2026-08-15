@@ -99,11 +99,13 @@ function AgentCard({ agent }: { agent: AgentVM }) {
       {canDev && (
         <button
           type="button"
-          className={`card-dev${devOn ? " on" : ""}`}
+          className={`card-dev${devOn ? " on" : ""}${ds?.degraded ? " degraded" : ""}`}
           aria-label={devOn ? "Dev-Server stoppen" : "Dev-Server starten"}
           title={
             devOn
-              ? `Dev-Server dieses Streams stoppen${ds && ds.state !== "running" ? ` (${ds.state}…)` : " (läuft)"}`
+              ? ds?.degraded
+                ? `Dev-Server nur TEILWEISE gestartet — nicht (mehr) aktiv: ${ds.deadServices?.join(", ")}. Stoppen und neu starten.`
+                : `Dev-Server dieses Streams stoppen${ds && ds.state !== "running" ? ` (${ds.state}…)` : " (läuft)"}`
               : "Dev-Server dieses Streams starten — ein anderer laufender wird zuerst gestoppt (nur einer gleichzeitig)"
           }
           onClick={(e) => {

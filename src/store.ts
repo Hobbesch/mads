@@ -110,6 +110,9 @@ export interface DevServerVM {
   url?: string;
   services?: { name: string; ready: boolean; url?: string }[];
   message?: string;
+  /** Teilweise gestartet — mindestens ein Dienst tot, andere laufen. Steuert die gelbe Anzeige. */
+  degraded?: boolean;
+  deadServices?: string[];
 }
 
 export interface AgentVM {
@@ -875,7 +878,14 @@ export const useStore = create<MadsState>((set) => {
 
       case "devserver_status":
         patchAgent(msg.agentId, {
-          devServer: { state: msg.state, url: msg.url, services: msg.services, message: msg.message },
+          devServer: {
+            state: msg.state,
+            url: msg.url,
+            services: msg.services,
+            message: msg.message,
+            degraded: msg.degraded,
+            deadServices: msg.deadServices,
+          },
         });
         if (msg.state === "running" && msg.url) notice(msg.agentId, "ok", `▶ Dev-Server läuft → ${msg.url}`);
         else if (msg.state === "stopped") notice(msg.agentId, "info", "■ Dev-Server gestoppt");

@@ -333,6 +333,10 @@ export class DevServerRun {
       services: this.procs.map((p) => ({ name: p.spec.name, ready: p.ready, url: p.url })),
       url: this.primaryUrl(),
       message: message ?? partial,
+      // Nur melden, solange überhaupt noch etwas läuft — sind ALLE tot, ist das `state: "error"`
+      // bzw. „stopped" und kein Teil-Zustand.
+      degraded: !!partial,
+      deadServices: partial ? dead : undefined,
     });
   }
 

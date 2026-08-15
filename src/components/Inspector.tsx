@@ -532,9 +532,15 @@ export function Inspector() {
               const ds = agent.devServer;
               // „unconfigured" gilt als AUS (nicht laufend) — sonst würde der Knopf fälschlich „stoppen".
               const on = !!ds && ds.state !== "stopped" && ds.state !== "error" && ds.state !== "unconfigured";
+              // TEILWEISE: mindestens ein konfigurierter Dienst ist tot. Der Knopf darf dann NICHT
+              // grün „läuft" behaupten — sonst sucht man den Fehler im eigenen Code, während in
+              // Wahrheit z. B. das Frontend weg ist (und der Link auf die API zeigte).
+              const degraded = ds?.state === "running" && ds.degraded;
               const label =
                 ds?.state === "running"
-                  ? "■ Dev-Server (läuft)"
+                  ? degraded
+                    ? `■ Dev-Server (teilweise${ds.deadServices?.length ? ` — ${ds.deadServices.join(", ")} aus` : ""})`
+                    : "■ Dev-Server (läuft)"
                   : ds?.state === "installing"
                     ? "■ Dev-Server (install…)"
                     : ds?.state === "starting"
@@ -543,12 +549,15 @@ export function Inspector() {
               return (
                 <>
                   <button
-                    className={`devserver-btn${on ? " on" : ""}`}
+                    className={`devserver-btn${on ? " on" : ""}${degraded ? " degraded" : ""}`}
                     onClick={() => (on ? void stopDevServer(selectedId) : void startDevServer(selectedId))}
                     title={
-                      on
-                        ? "Dev-Server dieses Streams stoppen"
-                        : "Front-/Backend dieses Streams lokal starten (aus dem Worktree — main bleibt unberührt). Konfig: .mads/run.json"
+                      degraded
+                        ? `Nur teilweise gestartet — nicht (mehr) aktiv: ${ds?.deadServices?.join(", ")}. ` +
+                          "Zum Neustarten hier stoppen und erneut starten."
+                        : on
+                          ? "Dev-Server dieses Streams stoppen"
+                          : "Front-/Backend dieses Streams lokal starten (aus dem Worktree — main bleibt unberührt). Konfig: .mads/run.json"
                     }
                   >
                     {label}
@@ -687,9 +696,9 @@ export function Inspector() {
           }}
         >
           <summary>
-            <span className={`devserver-dot ${agent.devServer?.state ?? "stopped"}`} />
+            <span className={`devserver-dot ${agent.devServer?.degraded ? "degraded" : (agent.devServer?.state ?? "stopped")}`} />
             Dev-Server
-            {agent.devServer?.state ? ` — ${agent.devServer.state}` : ""}
+            {agent.devServer?.state ? ` — ${agent.devServer.degraded ? "teilweise" : agent.devServer.state}` : ""}
             {agent.devServer?.message ? ` · ${agent.devServer.message}` : ""}
           </summary>
           <div

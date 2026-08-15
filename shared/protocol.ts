@@ -534,6 +534,16 @@ export interface DevServerStatusMsg extends BaseMsg {
   url?: string;
   /** menschenlesbarer Hinweis (Fehlergrund / „Vorlage erzeugt" o. Ä.). */
   message?: string;
+  /**
+   * TEILWEISE gestartet: mindestens ein konfigurierter Service ist tot, andere laufen weiter
+   * (Survivor-Modus). `state` bleibt dabei bewusst „running" — sonst würde ein toter Backend-Dienst
+   * das ansehbare Frontend als „Fehler" darstellen. Ohne dieses Flag sah die UI aber schlicht GRÜN
+   * aus, obwohl genau der Dienst fehlte, den der Nutzer öffnen wollte (er landete auf einem
+   * API-Endpunkt mit 404 und suchte den Fehler im eigenen Code). Die UI zeigt damit „teilweise".
+   */
+  degraded?: boolean;
+  /** Namen der konfigurierten, aber nicht (mehr) laufenden Services — für die Anzeige. */
+  deadServices?: string[];
 }
 /** Antwort auf `configure_devserver`: Pfad der (sichergestellten) `.mads/run.json`, die der Client
  *  im Editor öffnet. `detected` = Anzahl automatisch erkannter Services in der frischen Vorlage. */
