@@ -16,6 +16,7 @@ import { createWorktree, removeWorktree, worktreeFingerprint } from "./git.js";
 import { ensureMadsDir } from "./persistence.js";
 import { classifyToolCall, isDeployCommand, isGitCommit, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
 import { scrubbedAgentEnv } from "./agentEnv.js";
+import { sandboxOptions } from "./sandbox.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -452,6 +453,10 @@ export class AgentSession {
           // Effort/Ultracode (SDK-nativ): low/medium/high/xhigh → options.effort;
           // ultracode → effort xhigh + settings.ultracode. Ohne Effort → SDK-Default (high).
           ...effortOptions(msg.effort),
+          // OS-Sandbox für Agenten-Bash (siehe sandbox.ts): Schreiben nur in Worktree/.git/Caches,
+          // Netz-Egress nur zu Paketquellen, Secret-Ablagen (~/.ssh, ~/.aws …) kernel-seitig dicht.
+          // Begrenzt den Schadensradius VORAB, statt jede Zeile per Regex vorher zu bewerten.
+          ...sandboxOptions({ cwd, repoRoot: this.repoRoot, enabled: msg.sandbox }),
           mcpServers,
           // SICHERHEIT (INJ-1): NUR die globalen Nutzer-Settings laden (~/.claude/settings.json).
           // NICHT "project"/"local" — die läsen die `.claude/settings.json` des (ggf. untrusted)

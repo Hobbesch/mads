@@ -272,6 +272,10 @@ export interface StartAgentMsg extends BaseMsg {
   mock?: boolean;
   /** Autopilot-Stufe (Default „assisted"). */
   autopilot?: AutopilotLevel;
+  /** OS-Sandbox für Agenten-Bash (macOS/Seatbelt, SDK-nativ). Default: AN (undefined = an).
+   *  `false` schaltet sie für diesen Stream ab — Notfall/Debug, wenn eine Toolchain am Sandkasten
+   *  scheitert. Global geht das auch per Env `MADS_SANDBOX=off`. Siehe sidecar/src/sandbox.ts. */
+  sandbox?: boolean;
   /** true = automatische „Setze die Arbeit fort"-Anweisung beim Resume (kein echter Nutzer-Auftrag).
    *  Der Sidecar überschreibt damit NICHT den zuletzt gemerkten Auftrag (`lastPrompt`) — die Kachel
    *  zeigt weiter den echten Auftrag, den der Mensch abgesetzt hat. */
