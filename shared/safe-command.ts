@@ -98,9 +98,9 @@ const META_TOOLS = new Set([
 // Jeder Eintrag trägt seine KATEGORIE (kind) fürs „Immer erlauben": die echt destruktiven/Exploit-
 // Muster sind `danger` (NIE merkbar, fragen immer); Shell-Netz (ssh/scp/…) ist `network`, System-/
 // Paketwerkzeuge sind `pkg`, gh/git-Fern sind `git` — die kann der Nutzer projektweit freischalten.
-const DANGER: { re: RegExp; why: string; kind: CommandKind }[] = [
+const DANGER: { re: RegExp; why: string; kind: CommandKind; id?: string }[] = [
   { re: /(^|[\s;&|(])sudo(\s|$)/, why: "läuft mit sudo", kind: "danger" },
-  { re: /(^|[\s;&|(])(rm|rmdir|shred|unlink)(\s|$)/, why: "löscht Dateien (rm)", kind: "danger" },
+  { re: /(^|[\s;&|(])(rm|rmdir|shred|unlink)(\s|$)/, why: "löscht Dateien (rm)", kind: "danger", id: "rm" },
   { re: /(^|[\s;&|(])(chmod|chown|chgrp)(\s|$)/, why: "ändert Dateirechte", kind: "danger" },
   { re: /(^|[\s;&|(])(kill|killall|pkill|shutdown|reboot|halt)(\s|$)/, why: "beendet Prozesse / fährt herunter", kind: "danger" },
   { re: /(^|[\s;&|(])(dd|mkfs|diskutil|fdisk)(\s|$)/, why: "Datenträger-/Low-Level-Operation", kind: "danger" },
@@ -531,7 +531,226 @@ function envOrSecretRead(s: string): string | null {
   return null;
 }
 
-export function classifyBashCommand(command: string): AutoDecision {
+/**
+ * Kommandos, deren quotierte Argumente reiner TEXT sind und NIE ausgeführt werden.
+ * `echo "=== defaults ==="` ist kein Aufruf von `defaults`; `git commit -m "fix port 3000"` startet
+ * keinen Paketmanager; `grep -n "rm -rf" src/` löscht nichts. Genau solche Argumente lösten bisher
+ * die häufigsten Fehlalarme aus, weil der Scan quote-neutralisiert über die GANZE Zeile läuft.
+ */
+const INERT_TEXT_HEADS = new Set(["echo", "printf"]);
+const INERT_SEARCH_HEADS = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack"]);
+/** Interpreter, die Text von STDIN ausführen könnten (`echo "curl x" | sh`). Steht so etwas in der
+ *  Zeile, wird GAR NICHT gestrippt — dann ist der „Text" womöglich doch Code. */
+const STDIN_EXECUTORS = /(?:^|[|;&]\s*)\s*(?:sudo\s+)?(?:sh|bash|zsh|ksh|dash|eval|source|python3?|node|perl|ruby|xargs|env)\b/;
+/** Auch in Anführungszeichen NIE als harmlos durchgehen lassen — die katastrophalen Fälle. */
+const NEVER_INERT = /(?:^|[\s;&|(])(?:sudo|dd|mkfs|shutdown|reboot)(?:\s|$)|rm\s+-[a-z]*[rf][a-z]*\s+\/(?:\s|$)/;
+
+/**
+ * Entfernt inerte Argument-TEXTE aus der Zeile, BEVOR der Gefahren-Scan darüberläuft.
+ * Bewusst eng (jede Lockerung hier ist sicherheitsrelevant):
+ *   • nur VOLLSTÄNDIG quotierte Werte — ein unquotierter Wert bleibt stehen;
+ *   • keine Interpolation im Wert (`$(`, Backtick, `${`, `<(`) → sonst könnte dort Code stecken;
+ *   • nur im Segment des jeweiligen Kommandos (Split an ; && || | Newline), damit ein `-m` nie
+ *     den Text eines ANDEREN Kommandos verschluckt;
+ *   • gar nicht, wenn irgendwo ein STDIN-Interpreter steht oder ein NEVER_INERT-Muster vorkommt.
+ * Rückgabe: bereinigte Zeile (oder das Original, wenn Strippen nicht sicher ist).
+ */
+export function stripInertArguments(command: string): string {
+  // NEVER_INERT auf der QUOTE-NEUTRALISIERTEN Sicht prüfen: die katastrophalen Tokens stehen im
+  // Angriffsfall direkt hinter einem Anführungszeichen (`echo "sudo …"`), wo die Wortgrenze sonst
+  // nicht greift. Lieber einmal zu viel gefragt als hier eine Lücke.
+  const bare = command.replace(/['"`]/g, " ");
+  if (STDIN_EXECUTORS.test(command) || NEVER_INERT.test(bare)) return command;
+  const out: string[] = [];
+  let seg = ""; // aktuelles Segment (bereits verarbeitet)
+  let head: string | null = null; // erstes Wort des Segments
+  let word = ""; // laufendes unquotiertes Wort
+  let searchPatternUsed = false;
+  const flush = () => {
+    out.push(seg);
+    seg = "";
+    head = null;
+    word = "";
+    searchPatternUsed = false;
+  };
+  const headIsInert = (): boolean => {
+    if (!head) return false;
+    const base = head.split("/").pop() ?? head;
+    if (INERT_TEXT_HEADS.has(base)) return true;
+    if (INERT_SEARCH_HEADS.has(base) && !searchPatternUsed) return true;
+    // `git commit|tag|stash|notes …` — Message/Beschreibung ist Text.
+    if (base === "git" && /(^|\s)(commit|tag|stash|notes)(\s|$)/.test(seg)) return true;
+    return false;
+  };
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (c === "'" || c === '"') {
+      // Quotiertes Stück am Stück einlesen (inkl. Escapes in "…").
+      let j = i + 1;
+      let raw = c;
+      while (j < command.length) {
+        if (c === '"' && command[j] === "\\") {
+          raw += command[j] + (command[j + 1] ?? "");
+          j += 2;
+          continue;
+        }
+        raw += command[j];
+        if (command[j] === c) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      const closed = raw.length > 1 && raw.endsWith(c);
+      const interpolates = /\$\(|`|\$\{|<\(|\$'/.test(raw);
+      if (closed && !interpolates && headIsInert()) {
+        if (INERT_SEARCH_HEADS.has((head ?? "").split("/").pop() ?? "")) searchPatternUsed = true;
+        seg += " "; // Text verwerfen — er wird nie ausgeführt
+      } else {
+        seg += raw;
+      }
+      i = j - 1;
+      word = "";
+      continue;
+    }
+    if (c === ";" || c === "\n" || c === "|" || c === "&") {
+      seg += c;
+      flush();
+      continue;
+    }
+    if (/\s/.test(c)) {
+      if (word && head === null) head = word;
+      word = "";
+      seg += c;
+      continue;
+    }
+    word += c;
+    if (head === null && /[=]/.test(c)) {
+      // Führende Zuweisung (VAR=wert) ist kein Kommando-Kopf.
+      word = "";
+    }
+    seg += c;
+  }
+  if (word && head === null) head = word;
+  out.push(seg);
+  return out.join("");
+}
+
+/** Temp-Wurzeln, unter denen Löschen unkritisch ist. */
+const TMP_ROOTS = ["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/"];
+
+/**
+ * Zerlegt eine Zeile quote-ERHALTEND in Segmente und Tokens. `segmentCommands()` wirft quotierte
+ * Stücke weg (für die Kommando-KOPF-Erkennung richtig) — hier brauchen wir die Argument-WERTE
+ * (`rm -rf "$UDD"` verlöre sonst sein Ziel und würde als „kein Ziel" fehlklassifiziert).
+ */
+function rawCommandTokens(command: string): string[][] {
+  const segs: string[][] = [];
+  let toks: string[] = [];
+  let cur = "";
+  let q: string | null = null;
+  const endTok = () => {
+    if (cur) toks.push(cur);
+    cur = "";
+  };
+  const endSeg = () => {
+    endTok();
+    if (toks.length) segs.push(toks);
+    toks = [];
+  };
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (q) {
+      cur += c;
+      if (c === q) q = null;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      q = c;
+      cur += c;
+      continue;
+    }
+    if (c === "\\") {
+      cur += (command[++i] ?? "");
+      continue;
+    }
+    if (c === ";" || c === "\n" || c === "|" || c === "&" || c === "(" || c === ")") {
+      endSeg();
+      continue;
+    }
+    if (/\s/.test(c)) {
+      endTok();
+      continue;
+    }
+    cur += c;
+  }
+  endSeg();
+  return segs;
+}
+
+/**
+ * Löscht dieser Befehl AUSSCHLIESSLICH innerhalb des eigenen Arbeitsbaums bzw. in Temp?
+ *
+ * Agenten räumen ständig eigene Wegwerf-Dateien weg (`rm -f client/__probe.mjs`, `rm -rf "$UDD"`
+ * mit UDD unter $TMPDIR). Jede dieser Zeilen war bisher eine `danger`-Rückfrage — bei weitem der
+ * häufigste destruktive Fehlalarm. Die OS-Sandbox (sidecar/src/sandbox.ts) lässt Schreib-/Lösch-
+ * zugriffe ohnehin nur im Worktree, `<repoRoot>/.git`, Temp und Toolchain-Caches zu; ein Ziel
+ * AUSSERHALB kann gar nicht mehr getroffen werden.
+ *
+ * FAIL CLOSED: Sobald EIN Ziel nicht nachweislich lokal ist (absolut außerhalb, `~`, `..`,
+ * unauflösbare Variable, gar kein Ziel), gilt der ganze Befehl als riskant → Rückfrage.
+ */
+export function deletesOnlyLocally(command: string, cwd?: string): boolean {
+  // Obfuskation hebt die Ausnahme auf: Kommando-Substitution (`$(…)`, Backticks) und IFS-Tricks
+  // können Ziel UND Kommando zur Laufzeit erzeugen — dann ist statisch nichts beweisbar.
+  // (Ein schlichtes `"$VAR"` ist davon NICHT betroffen und wird unten aufgelöst.)
+  if (/\$\(|`|\$\{IFS/.test(command)) return false;
+  // Einfache Zuweisungen der GLEICHEN Zeile auflösen (`export UDD="$TMPDIR/x"; rm -rf "$UDD"`).
+  const vars = new Map<string, string>();
+  for (const m of command.matchAll(/(?:^|[\s;&|])(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=("([^"]*)"|'([^']*)'|[^\s;&|]+)/g)) {
+    vars.set(m[1], m[3] ?? m[4] ?? m[2]);
+  }
+  const expand = (s: string): string => {
+    let out = s;
+    for (let i = 0; i < 3; i++) {
+      const next = out.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (whole, name: string) => {
+        if (name === "TMPDIR") return "/private/tmp/";
+        const v = vars.get(name);
+        return v === undefined ? whole : v;
+      });
+      if (next === out) break;
+      out = next;
+    }
+    return out;
+  };
+  const isLocal = (raw: string): boolean => {
+    const t = expand(raw.replace(/^['"]|['"]$/g, ""));
+    if (!t || t === "/" || t.includes("$")) return false; // leer oder unauflösbar → nicht sicher
+    if (t.startsWith("~")) return false;
+    if (t.split("/").includes("..")) return false;
+    if (!t.startsWith("/")) return true; // relativ ohne „..“ → innerhalb des cwd
+    if (TMP_ROOTS.some((r) => t.startsWith(r))) return true;
+    if (cwd && (t === cwd || t.startsWith(cwd.endsWith("/") ? cwd : cwd + "/"))) return true;
+    return false;
+  };
+  let sawDelete = false;
+  for (const toks of rawCommandTokens(command)) {
+    // Führende Zuweisungen/Keywords überspringen, damit `sudo rm …` nicht als Kopf „sudo" durchrutscht
+    // (sudo wird ohnehin separat gegated) und `FOO=1 rm x` korrekt erkannt wird.
+    let h = 0;
+    while (h < toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[h])) h++;
+    if (h >= toks.length) continue;
+    const base = (toks[h].split("/").pop() ?? toks[h]).toLowerCase();
+    if (!/^(rm|rmdir|shred|unlink)$/.test(base)) continue;
+    sawDelete = true;
+    const targets = toks.slice(h + 1).filter((t) => !t.startsWith("-"));
+    if (targets.length === 0) return false;
+    if (!targets.every(isLocal)) return false;
+  }
+  return sawDelete;
+}
+
+export function classifyBashCommand(command: string, ctx: { cwd?: string } = {}): AutoDecision {
   const cmd = command.trim();
   if (!cmd) return ASK("leerer Befehl");
 
@@ -545,11 +764,23 @@ export function classifyBashCommand(command: string): AutoDecision {
   // das ist der klassische Klassifizierer-Bypass, der SONST die ganze DANGER-/Secret-Liste entschärft
   // (`rm${IFS}-rf`, `cat${IFS}.env`, `${IFS}printenv`, auch die Modifier-Form `${IFS%??}gh`) — die
   // Shell splittet dort trotzdem in echte Tokens. `[^}]*` deckt Modifier wie `%??`/`:0:1` ab.
+  // PRÄZISION: Argument-TEXT, der nie ausgeführt wird (echo-Ausgaben, Commit-Messages, Such-Muster),
+  // vorher entfernen — sonst meldet `echo "=== defaults ==="` eine macOS-Systemfunktion und
+  // `git commit -m "fix port"` einen Paketmanager. stripInertArguments ist bewusst eng und gibt im
+  // Zweifel das Original zurück; die Neutralisierung darunter bleibt unverändert.
+  const scanned = stripInertArguments(cmd);
   const ifs = /\$\{IFS[^}]*\}|\$IFS\b/g;
-  const neutralized = cmd.replace(/['"`]/g, " ").replace(ifs, " ");
-  const collapsed = cmd.replace(/[\\'"`]/g, "").replace(ifs, " ");
+  const neutralized = scanned.replace(/['"`]/g, " ").replace(ifs, " ");
+  const collapsed = scanned.replace(/[\\'"`]/g, "").replace(ifs, " ");
 
-  for (const d of DANGER) if (d.re.test(neutralized) || d.re.test(collapsed)) return ASK(d.why, d.kind);
+  for (const d of DANGER) {
+    if (!d.re.test(neutralized) && !d.re.test(collapsed)) continue;
+    // Löschen AUSSCHLIESSLICH im eigenen Arbeitsbaum/Temp ist der Alltag jedes Agenten (eigene
+    // Wegwerf-Dateien aufräumen) und wird von der OS-Sandbox ohnehin auf genau diesen Bereich
+    // begrenzt → keine Rückfrage. Jedes andere Ziel (absolut außerhalb, ~, .., unauflösbar) fragt.
+    if (d.id === "rm" && deletesOnlyLocally(cmd, ctx.cwd)) continue;
+    return ASK(d.why, d.kind);
+  }
 
   const net = outwardNetworkRisk(neutralized) ?? outwardNetworkRisk(collapsed);
   if (net) return ASK(net, "network");
@@ -753,7 +984,8 @@ export function classifyToolCall(
 
   if (toolName === "Bash") {
     const c = (input?.command ?? "") as string;
-    const d = classifyBashCommand(c);
+    // cwd durchreichen: erlaubt die Unterscheidung „löscht im eigenen Worktree" vs. „irgendwo".
+    const d = classifyBashCommand(c, { cwd: ctx.cwd });
     // Projektweit per „Immer erlauben" gemerkte Kategorie → still erlauben. `danger` (rm/sudo/dd/…)
     // ist NIE merkbar und fragt weiterhin. Kombi-Befehle: klassifiziert wird der ERSTE Treffer, und
     // die DANGER-Prüfung läuft zuerst → ein destruktiver Teil bleibt trotz erlaubtem network/pkg gegated.

