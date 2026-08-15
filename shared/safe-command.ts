@@ -46,6 +46,23 @@ const READ_TOOLS = new Set(["Read", "Glob", "Grep", "LS", "NotebookRead", "TodoW
 // Tools, die Dateien (im Worktree) ändern → auto-erlaubt, sofern Pfad sicher.
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
+/**
+ * Orchestrierungs-/Meta-Tools: delegieren oder verwalten Arbeit, greifen selbst NICHT auf Dateien,
+ * Netz oder Prozesse zu. Die Aufrufe der so gestarteten Sub-Agenten werden weiterhin einzeln geprüft.
+ * `Agent` ist der reale Tool-Name (der SDK benennt `Task` intern um) — beide Schreibweisen abdecken,
+ * sonst greift die Regel je nach SDK-Version nicht. `TaskOutput`/`TaskStop` heißen als Legacy-Alias
+ * `BashOutput`/`KillShell` und betreffen nur Hintergrund-Tasks, die der Agent selbst gestartet hat.
+ */
+const META_TOOLS = new Set([
+  "Agent", "Task",
+  "Workflow",
+  "ToolSearch",
+  "TaskCreate", "TaskGet", "TaskUpdate", "TaskList",
+  "TaskOutput", "BashOutput",
+  "TaskStop", "KillShell",
+  "Monitor",
+]);
+
 // „Trusted-Local-Dev": LOKALE Ausführung ist im Auto-Modus erlaubt (Skripte, Interpreter,
 // `python -c`, `-m`, unbekannte lokale Tools). DANGER listet nur DIREKT riskante Aktionen —
 // auswärts/destruktiv/System/Secrets — die IMMER fragen. Der Scan läuft QUOTE-NEUTRALISIERT
@@ -712,6 +729,16 @@ export function classifyToolCall(
     return ALLOW;
   }
 
-  // Drittanbieter-MCP-Tools, Task, Unbekanntes → fragen.
+  // Orchestrierungs-/Meta-Tools: erlauben. Sie führen SELBST nichts aus — sie starten Sub-Agenten,
+  // planen Arbeit oder holen Zwischenstände ab. Jeder TATSÄCHLICHE Zugriff eines Sub-Agenten (Bash,
+  // Edit, WebFetch …) läuft weiterhin EINZELN durch dieses canUseTool — die Freigabe hier öffnet also
+  // keinen ungeprüften Pfad, sie erspart nur den Dialog für den Delegations-Akt selbst.
+  // Grund: der Catch-all fragte bei JEDEM `Workflow` (21 von 22 Aufrufen) und bei jedem Abholen eines
+  // Hintergrund-Ergebnisses — das bremste genau die Parallelarbeit aus, die mads schnell machen soll.
+  // BEWUSST NICHT hier: `ExitPlanMode` (könnte sich selbst Freigaben schreiben), `Skill` und
+  // Drittanbieter-MCP-Tools (fremder Code/fremde Instruktionen) — die fragen weiter.
+  if (META_TOOLS.has(toolName)) return ALLOW;
+
+  // Drittanbieter-MCP-Tools, Unbekanntes → fragen.
   return ASK(`Tool „${toolName}“ nicht als auto-sicher eingestuft`);
 }

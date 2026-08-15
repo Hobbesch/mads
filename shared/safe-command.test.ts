@@ -319,7 +319,9 @@ check("WebFetch freigegeben, aber SSRF → weiterhin ask", classifyToolCall("Web
 check("registrableDomain www.sec.gov = sec.gov", registrableDomain("www.sec.gov") === "sec.gov");
 check("registrableDomain a.b.co.uk = b.co.uk", registrableDomain("a.b.co.uk") === "b.co.uk");
 
-check("Task → ask", classifyToolCall("Task", {}).decision === "ask");
+// Task/Agent = Delegation, kein Zugriff → allow (siehe META_TOOLS; die Aufrufe des Sub-Agenten
+// werden weiterhin einzeln geprüft). Früher „ask" — das bremste die Parallelarbeit aus.
+check("Task/Agent → allow (Delegation, kein eigener Zugriff)", classifyToolCall("Task", {}).decision === "allow");
 check("Drittanbieter-mcp → ask", classifyToolCall("mcp__foo__bar", {}).decision === "ask");
 check(
   "mads spawn_substreams → ask",
@@ -403,6 +405,21 @@ check("docker build ist KEIN deploy", !isDeployCommand("docker build -t app ."))
 check("docker compose up ist KEIN deploy", !isDeployCommand("docker compose up -d"));
 check("npm publish --dry-run ist KEIN deploy (Probelauf)", !isDeployCommand("npm publish --dry-run"));
 check("Skript in deploy/-Ordner ist KEIN deploy (Basename zählt)", !isDeployCommand("./deploy/build.sh"));
+
+// --- Orchestrierungs-/Meta-Tools: erlaubt (die INNEREN Aufrufe werden weiterhin einzeln geprüft) ---
+check("Agent (Subagent starten) → allow", classifyToolCall("Agent", { description: "x" }).decision === "allow");
+check("Task (Legacy-Alias) → allow", classifyToolCall("Task", { description: "x" }).decision === "allow");
+check("Workflow → allow (Ultracode-Orchestrierung nicht ausbremsen)", classifyToolCall("Workflow", { script: "x" }).decision === "allow");
+check("ToolSearch → allow", classifyToolCall("ToolSearch", { query: "x" }).decision === "allow");
+check("TaskOutput/BashOutput (Hintergrund-Ergebnis abholen) → allow", classifyToolCall("TaskOutput", {}).decision === "allow" && classifyToolCall("BashOutput", {}).decision === "allow");
+check("TaskCreate/TaskUpdate → allow", classifyToolCall("TaskCreate", {}).decision === "allow" && classifyToolCall("TaskUpdate", {}).decision === "allow");
+// Gegenprobe: die riskanten bleiben gegated.
+check("ExitPlanMode bleibt ask (könnte sich Freigaben selbst schreiben)", classifyToolCall("ExitPlanMode", {}).decision === "ask");
+check("Skill bleibt ask", classifyToolCall("Skill", { skill: "x" }).decision === "ask");
+check("Drittanbieter-MCP bleibt ask", classifyToolCall("mcp__context7__query-docs", {}).decision === "ask");
+check("spawn_substreams bleibt ask (echte Streams/Worktrees)", classifyToolCall("mcp__mads__spawn_substreams", {}).decision === "ask");
+check("unbekanntes Tool bleibt ask", classifyToolCall("SomeNewTool", {}).decision === "ask");
+check("Bash bleibt gegated (Meta-Liste öffnet Bash NICHT)", classifyToolCall("Bash", { command: "sudo rm -rf /" }).decision === "ask");
 
 for (const r of results) console.log(r);
 console.log(`\n${results.length - failed} passed, ${failed} failed`);

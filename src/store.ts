@@ -1456,6 +1456,11 @@ export const useStore = create<MadsState>((set) => {
           prompt: text,
           label: a.label,
           role: a.role,
+          // Modell UND Effort MITSENDEN: ohne sie fällt der Sidecar auf DEFAULT_MODEL und
+          // effort=undefined zurück (session.ts) — ein Stream, der auf Ultracode/xhigh stand,
+          // lief nach dem Fortsetzen still auf SDK-Default weiter („warum ist das so langsam?").
+          model: a.model,
+          effort: clampEffort(a.model, a.effort),
           mock: false,
           permissionMode: a.permissionMode,
           autopilot: a.autopilot ?? "assisted",

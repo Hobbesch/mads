@@ -478,18 +478,28 @@ export class AgentSession {
               "aus — kein git push, kein rebase auf origin/main, kein `gh pr`/`gh merge`. Diese " +
               "Schritte (Sync, PR erstellen, Integrieren/Merge, Branch-Cleanup) übernimmt mads über " +
               "die UI-Buttons; manuelle Pushes/Rebases würden den Branch divergieren lassen." +
+              // Parallelität AKTIV ermutigen (rollenneutral). Vorher stand hier nur ein Verbot für den
+              // Integrator und für Sub-Streams gar nichts — messbar: der Integrator nutzte das
+              // Agent-Tool in 0 von 190 Tool-Calls. Das Absolutverbot („NIEMALS") sollte nur die
+              // Verwechslung mit spawn_substreams verhindern, wirkte aber als generelle Delegations-Sperre.
+              "\nArbeitstempo — nutze Parallelität aktiv:\n" +
+              "• Unabhängige Tool-Aufrufe (Read/Grep/Glob/Bash) in EINEM Zug absetzen statt nacheinander.\n" +
+              "• Für breite Recherche, Code-Suche über viele Dateien, Analysen und Reviews gerne MEHRERE " +
+              "`Agent`-Subagenten parallel starten (z. B. `subagent_type: Explore`) — das ist erwünscht und " +
+              "macht dich deutlich schneller.\n" +
+              "• Lange Builds/Tests mit `run_in_background` starten und später das Ergebnis abholen, statt " +
+              "blockierend zu warten.\n" +
               (this.role === "integrator"
-                ? "\nParallele Arbeit — ZWEI Mechanismen, NICHT verwechseln:\n" +
-                  "• spawn_substreams (mads-Tool): erzeugt ECHTE, im Dashboard sichtbare und steuerbare " +
-                  "mads-Sub-Streams mit eigenem Worktree/Branch. NUTZE IMMER DIESES, wenn der Mensch dich " +
-                  "bittet, Aufgaben/Punkte in Sub-Agenten/Sub-Streams aufzuteilen und parallel zu starten " +
+                ? "\nZwei Delegations-Mechanismen — unterschiedlicher Zweck, beide erwünscht:\n" +
+                  "• spawn_substreams (mads-Tool): für ECHTE, eigenständige Arbeitsströme mit eigenem " +
+                  "Worktree/Branch, im Dashboard sichtbar und vom Menschen steuerbar. NUTZE DIESES, wenn der " +
+                  "Mensch Aufgaben in Sub-Agenten/Sub-Streams aufteilen und parallel starten will " +
                   "(„starte Sub-Agenten“, „parallel aufteilen“, „eröffne Streams“). Ein Eintrag pro Stream; " +
-                  "sie laufen danach eigenständig weiter, der Mensch sieht und steuert sie. Erkläre kurz die " +
-                  "Aufteilung und führe sie dann WIRKLICH über spawn_substreams aus — nicht still seriell selbst.\n" +
-                  "• Das `Agent`/Task-Tool (SDK-Helfer-Subagent): NUR für kurze, interne Lese-/Analyse-Hilfen " +
-                  "innerhalb deiner eigenen Antwort (z. B. einen Diff security-reviewen). Es erscheint NICHT im " +
-                  "Dashboard, ist nicht steuerbar und ist KEIN Ersatz für spawn_substreams — nutze es NIEMALS, " +
-                  "um die vom Menschen gewünschte parallele Sub-Agenten-Arbeit zu erledigen.\n" +
+                  "erkläre kurz die Aufteilung und führe sie dann WIRKLICH aus — nicht still seriell selbst.\n" +
+                  "• Das `Agent`/Task-Tool: für Arbeit INNERHALB deiner eigenen Antwort (recherchieren, " +
+                  "analysieren, reviewen). Nutze es dafür ruhig oft und mehrfach parallel. Es erscheint nicht " +
+                  "im Dashboard und ersetzt spawn_substreams nicht, wenn eigenständige Streams gewünscht sind — " +
+                  "aber es ist dein Standardwerkzeug, um selbst schnell zu sein.\n" +
                   "Außen-git (push/pr/merge) macht weiterhin nur mads über die UI; mergen tust nur du."
                 : "") +
               // Stream-Zuständigkeit ist TRANSIENT (endet beim Merge) — verhindert das Routen an
