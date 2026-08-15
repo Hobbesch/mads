@@ -11,6 +11,7 @@ import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { AgentSession, type PermissionHooks } from "./session.js";
 import { loadApprovedKinds, saveApprovedKinds, loadApprovedTools, saveApprovedTools } from "./permissions.js";
+import { killProcessesInWorktree } from "./worktree-procs.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
 import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
@@ -232,8 +233,13 @@ export class Orchestrator {
 
       case "stop_agent": {
         const s = this.pool.get(msg.agentId);
+        const wt = s?.worktreePath;
         await this.stopDevServerIf(msg.agentId); // laufenden Dev-Server dieses Streams zuerst beenden
         await s?.stop(msg.removeWorktree ?? false);
+        // Vom AGENTEN selbst gestartete Prozesse (Repro-Server, Watcher, Headless-Browser) ueberleben
+        // das Stream-Ende sonst und belegen Ports. Erst JETZT — der CLI-Prozess der Session laeuft
+        // ebenfalls mit cwd = Worktree und wurde gerade regulaer beendet.
+        await this.reapWorktreeProcesses(msg.agentId, wt);
         this.pool.delete(msg.agentId);
         this.removed.add(msg.agentId); // bewusst entfernt → merge-persist nicht wiederbeleben
         this.persist();
@@ -414,6 +420,7 @@ export class Orchestrator {
             }
           }
           await this.stopDevServerIf(msg.agentId); // Dev-Server hält den Worktree offen → erst killen
+          await this.reapWorktreeProcesses(msg.agentId, path); // Agenten-Prozesse halten ihn ebenso offen
           this.emitSeedReclaimed(msg.agentId, await removeWorktree(root, path, msg.branch));
           this.removed.add(msg.agentId); // aufgeräumt → merge-persist nicht wiederbeleben
           saveRegistry(root, loadRegistry(root).filter((e) => e.agentId !== msg.agentId));
@@ -999,6 +1006,7 @@ export class Orchestrator {
     if (s.worktreePath) {
       try {
         await this.stopDevServerIf(agentId); // Dev-Server killen, bevor der Worktree entfernt wird
+        await this.reapWorktreeProcesses(agentId, s.worktreePath); // dito für vom Agenten gestartete Prozesse
         this.emitSeedReclaimed(agentId, await removeWorktree(s.repoRoot, s.worktreePath, s.branch));
       } catch (e) {
         log(`[orchestrator] worktree cleanup after merge failed: ${String(e)}`);
@@ -1959,6 +1967,7 @@ export class Orchestrator {
   private async teardownReview(agentId: string, rv: { branch: string; worktreePath: string }): Promise<void> {
     if (!this.project) return;
     await this.stopDevServerIf(agentId); // Dev-Server hält den Worktree offen → erst killen
+    await this.reapWorktreeProcesses(agentId, rv.worktreePath);
     try {
       await removeWorktree(this.project.repoRoot, rv.worktreePath, rv.branch);
     } catch (e) {
@@ -2087,6 +2096,26 @@ export class Orchestrator {
       this.handleDevServerCrash(agentId, service, code, logLines),
     );
     await this.devServer.start();
+  }
+
+  /**
+   * Prozesse aufräumen, die der Agent SELBST in seinem Worktree gestartet hat (mads' eigener
+   * Dev-Server wird separat über stopDevServerIf beendet). Ohne das überleben Repro-Server & Co. das
+   * Stream-Ende, halten Ports und tauchen später als „was antwortet da noch?" wieder auf.
+   * Sichtbar melden, statt still zu killen — der Mensch soll wissen, dass etwas beendet wurde.
+   */
+  private async reapWorktreeProcesses(agentId: string, worktree: string | undefined): Promise<void> {
+    const killed = await killProcessesInWorktree(worktree);
+    if (!killed.length) return;
+    this.emit({
+      ...envelope(),
+      type: "agent_event",
+      agentId,
+      event: {
+        kind: "assistant_text",
+        text: `↻ Aufgeräumt: ${killed.length} vom Agenten gestartete(r) Prozess(e) im Worktree beendet (PID ${killed.join(", ")}).`,
+      },
+    });
   }
 
   /** Laufenden Dev-Server stoppen — nur, wenn er zu `agentId` gehört (undefined = immer). */

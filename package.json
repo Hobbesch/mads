@@ -12,7 +12,7 @@
     "release:mac": "bash scripts/build-signed.sh",
     "sidecar:build": "npm --prefix sidecar run build",
     "sidecar:install": "npm --prefix sidecar install",
-    "test": "npm run test:ownership && npm run test:merge && npm run test:secrets && npm run test:collision && npm run test:safe && npm run test:autopilot && npm run test:adr && npm run test:hygiene && npm run test:persist && npm run test:outsource && npm run test:livepreview && npm run test:editops && npm run test:md && npm run test:ioredact && npm run test:agentenv && npm run test:derive && npm run test:reclaim && npm run test:relocate && npm run test:perms && npm run test:sandbox && npm run test:release",
+    "test": "npm run test:ownership && npm run test:merge && npm run test:secrets && npm run test:collision && npm run test:safe && npm run test:autopilot && npm run test:adr && npm run test:hygiene && npm run test:persist && npm run test:outsource && npm run test:livepreview && npm run test:editops && npm run test:md && npm run test:ioredact && npm run test:agentenv && npm run test:derive && npm run test:reclaim && npm run test:relocate && npm run test:perms && npm run test:sandbox && npm run test:wtprocs && npm run test:release",
     "test:relocate": "esbuild sidecar/src/git-relocate.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/relocate.test.mjs && node node_modules/.cache/relocate.test.mjs",
     "test:release": "esbuild sidecar/src/git-release.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/git-release.test.mjs && node node_modules/.cache/git-release.test.mjs",
     "test:ioredact": "esbuild sidecar/src/io.redact.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/ioredact.test.mjs && node node_modules/.cache/ioredact.test.mjs",
@@ -33,7 +33,8 @@
     "test:collision": "esbuild shared/collision.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/collision.test.mjs && node node_modules/.cache/collision.test.mjs",
     "test:safe": "esbuild shared/safe-command.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/safe-command.test.mjs && node node_modules/.cache/safe-command.test.mjs",
     "test:md": "esbuild src/mdPipeline.smoke.test.tsx --bundle --platform=node --format=esm --jsx=automatic --packages=external --outfile=node_modules/.cache/md.smoke.test.mjs && node node_modules/.cache/md.smoke.test.mjs",
-    "test:sandbox": "esbuild sidecar/src/sandbox.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/sandbox.test.mjs && node node_modules/.cache/sandbox.test.mjs"
+    "test:sandbox": "esbuild sidecar/src/sandbox.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/sandbox.test.mjs && node node_modules/.cache/sandbox.test.mjs",
+    "test:wtprocs": "esbuild sidecar/src/worktree-procs.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/wtprocs.test.mjs && node node_modules/.cache/wtprocs.test.mjs"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "^6.2.5",
