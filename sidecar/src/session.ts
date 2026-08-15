@@ -493,6 +493,10 @@ export class AgentSession {
               "macht dich deutlich schneller.\n" +
               "• Lange Builds/Tests mit `run_in_background` starten und später das Ergebnis abholen, statt " +
               "blockierend zu warten.\n" +
+              "• Startest du einen TEMPORÄREN Prozess (Repro-Server, Watcher, Headless-Browser), dann " +
+              "IMMER mit `run_in_background` — und beende ihn danach mit dem Stop-Tool für diesen Task. " +
+              "Nutze dafür NICHT `pkill`/`kill`: das braucht eine Rückfrage, und bleibt sie aus, läuft dein " +
+              "Prozess verwaist weiter und belegt Ports.\n" +
               (this.role === "integrator"
                 ? "\nZwei Delegations-Mechanismen — unterschiedlicher Zweck, beide erwünscht:\n" +
                   "• spawn_substreams (mads-Tool): für ECHTE, eigenständige Arbeitsströme mit eigenem " +

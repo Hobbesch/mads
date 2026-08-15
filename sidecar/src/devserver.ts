@@ -302,11 +302,29 @@ export class DevServerRun {
     // (Survivor-Modus) der tote Service (dessen `url` gesetzt bleibt) einen Connection-refused-Link liefern.
     const live = this.procs.filter((p) => p.child?.pid != null && p.url);
     const openable = live.filter((p) => p.spec.open);
-    const pool = openable.length ? openable : live;
-    return (pool.find((p) => p.ready) ?? pool[0])?.url;
+    if (openable.length) return (openable.find((p) => p.ready) ?? openable[0]).url;
+    // KEIN stiller Rückfall auf einen Nicht-`open`-Service, wenn das Projekt einen `open`-Service
+    // KENNT, dieser aber tot ist: sonst verlinkt mads das überlebende Backend, der Nutzer landet auf
+    // einem API-Endpunkt und sieht 404 — obwohl der Knopf grün „läuft" meldet. Lieber keine URL als
+    // eine falsche. Ohne konfigurierten `open`-Service bleibt der bisherige Rückfall bestehen.
+    if (this.procs.some((p) => p.spec.open)) return undefined;
+    return (live.find((p) => p.ready) ?? live[0])?.url;
+  }
+
+  /** Konfigurierte, aber nicht (mehr) laufende Services — für eine ehrliche Statusmeldung. */
+  private deadServiceNames(): string[] {
+    return this.procs.filter((p) => p.child?.pid == null).map((p) => p.spec.name);
   }
 
   private emitStatus(message?: string): void {
+    // Läuft nur noch ein TEIL der Services, das aber ungesagt, wirkt der grüne „läuft"-Zustand wie
+    // „alles gut" — und der Nutzer sucht den Fehler in seinem Code statt am toten Service. Deshalb
+    // die toten Dienste beim Namen nennen (nur solange überhaupt noch etwas läuft).
+    const dead = this.deadServiceNames();
+    const partial =
+      dead.length && dead.length < this.procs.length
+        ? `Nur teilweise gestartet — nicht (mehr) aktiv: ${dead.join(", ")}. „Dev-Server" neu starten, um sie wieder hochzufahren.`
+        : undefined;
     send({
       ...envelope(),
       type: "devserver_status",
@@ -314,7 +332,7 @@ export class DevServerRun {
       state: this.state,
       services: this.procs.map((p) => ({ name: p.spec.name, ready: p.ready, url: p.url })),
       url: this.primaryUrl(),
-      message,
+      message: message ?? partial,
     });
   }
 
