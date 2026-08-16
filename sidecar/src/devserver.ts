@@ -51,10 +51,15 @@ export interface ServiceDep {
   /** Optionaler Befehl, der die Abhängigkeit hochfährt, wenn sie fehlt (z. B. `docker compose up -d`).
    *  Wird im Repo-Root ausgeführt. Ohne diesen Eintrag meldet mads nur, dass etwas fehlt. */
   start?: string;
+  /** Zeitbudget für `start` in Sekunden (Default 180). Grosszügig, weil der Befehl eine ganze
+   *  Laufzeitumgebung hochfahren darf (Docker Desktop braucht kalt leicht eine Minute). */
+  startTimeoutSec?: number;
 }
 
 /** requires-Eintrag normalisieren (String-Kurzform ODER Objekt). */
-export function normalizeDep(d: string | ServiceDep): { host: string; port: number; name: string; start?: string } | null {
+export function normalizeDep(
+  d: string | ServiceDep,
+): { host: string; port: number; name: string; start?: string; startTimeoutSec?: number } | null {
   if (typeof d === "string") {
     const m = /^(?:([^\s:]+):)?(\d{2,5})$/.exec(d.trim());
     if (!m) return null;
@@ -62,7 +67,13 @@ export function normalizeDep(d: string | ServiceDep): { host: string; port: numb
   }
   const port = typeof d.port === "number" ? d.port : parseInt(String(d.port ?? ""), 10);
   if (!Number.isInteger(port) || port <= 0) return null;
-  return { host: d.host || "127.0.0.1", port, name: d.name || `:${port}`, start: typeof d.start === "string" ? d.start : undefined };
+  return {
+    host: d.host || "127.0.0.1",
+    port,
+    name: d.name || `:${port}`,
+    start: typeof d.start === "string" ? d.start : undefined,
+    startTimeoutSec: typeof d.startTimeoutSec === "number" ? d.startTimeoutSec : undefined,
+  };
 }
 export interface RunManifest {
   services: ServiceSpec[];
@@ -253,7 +264,10 @@ export function detectServices(repoRoot: string): ServiceSpec[] {
 const RUN_README =
   "mads Stream-Dev-Server. Jeder Service wird im WORKTREE des Streams gestartet (nicht in main). " +
   "Felder: name, cwd (rel. zum Worktree), install (+installIfMissing = nur wenn Pfad fehlt), command, " +
-  "env (Werte dürfen ${VAR} nutzen), url, open:true (=im-Browser-öffnen-URL), ready (Teilstring der " +
+  "env (Werte dürfen ${VAR} nutzen), url, open:true (=im-Browser-öffnen-URL), ready (Teilstring der "
+  + "Ausgabe, der Bereitschaft signalisiert), requires (externe Abhängigkeiten wie Datenbanken — "
+  + "\"5433\" bzw. {port, name, start, startTimeoutSec}; mads prüft sie, zeigt einen eigenen "
+  + "Indikator und fährt sie per `start` im Repo-Root hoch). " +
   "Ausgabe = 'bereit'). Es läuft immer nur EIN Stream-Dev-Server gleichzeitig. Automatisch erzeugte " +
   "Vorlage — Befehle/Ports/Runtime bitte prüfen und anpassen.";
 
@@ -619,8 +633,8 @@ export class DevServerRun {
   }
 
   /** Alle deklarierten Abhängigkeiten über alle Services, dedupliziert (host:port ist der Schlüssel). */
-  private deps(): { host: string; port: number; name: string; start?: string }[] {
-    const byKey = new Map<string, { host: string; port: number; name: string; start?: string }>();
+  private deps(): NonNullable<ReturnType<typeof normalizeDep>>[] {
+    const byKey = new Map<string, NonNullable<ReturnType<typeof normalizeDep>>>();
     for (const p of this.procs) {
       for (const raw of p.spec.requires ?? []) {
         const d = normalizeDep(raw);
@@ -644,18 +658,29 @@ export class DevServerRun {
       if (!ok && autoStart && d.start && !this.depStarted.has(`${d.host}:${d.port}`)) {
         this.depStarted.add(`${d.host}:${d.port}`);
         this.emitLog("dependencies", "stderr", `${d.name} nicht erreichbar — starte: ${d.start}`);
+        // Grosszuegiges Budget: Ein Startbefehl darf eine ganze Laufzeitumgebung hochfahren (Docker
+        // Desktop braucht auf einem kalten Mac gut und gerne eine Minute). Zu knapp bemessen sah es
+        // vorher so aus, als haette der Auto-Start "nicht funktioniert".
+        const budgetMs = Math.max(30_000, (d.startTimeoutSec ?? 180) * 1000);
         await new Promise<void>((resolve) => {
           const c = spawn("/bin/sh", ["-lc", d.start!], { cwd: this.repoRoot, detached: false, stdio: ["ignore", "pipe", "pipe"] });
           c.stdout?.on("data", (b: Buffer) => this.emitLog("dependencies", "stdout", String(b).trimEnd()));
           c.stderr?.on("data", (b: Buffer) => this.emitLog("dependencies", "stderr", String(b).trimEnd()));
-          c.on("exit", () => resolve());
-          c.on("error", () => resolve());
-          setTimeout(resolve, 120_000); // nie ewig blockieren
+          const t = setTimeout(() => {
+            this.emitLog("dependencies", "stderr", `Startbefehl fuer ${d.name} laeuft laenger als ${Math.round(budgetMs / 1000)} s — abgebrochen.`);
+            try { c.kill("SIGTERM"); } catch { /* schon weg */ }
+            resolve();
+          }, budgetMs);
+          const done = () => { clearTimeout(t); resolve(); };
+          c.on("exit", done);
+          c.on("error", done);
         });
-        // nach dem Start Zeit zum Hochkommen geben
-        for (let i = 0; i < 20 && !ok; i++) {
+        // Nach dem Startbefehl braucht der Dienst selbst noch Zeit (Container-Boot). Mit sichtbarem
+        // Fortschritt, damit "es passiert nichts" nicht wie ein Fehlschlag aussieht.
+        for (let i = 0; i < 60 && !ok; i++) {
           await new Promise((r) => setTimeout(r, 1_000));
           ok = await probePort(d.port, 600);
+          if (!ok && i > 0 && i % 15 === 0) this.emitLog("dependencies", "stderr", `warte weiter auf ${d.name} (${i} s)…`);
         }
         this.emitLog("dependencies", "stderr", ok ? `${d.name} ist jetzt erreichbar.` : `${d.name} weiterhin NICHT erreichbar.`);
       }
