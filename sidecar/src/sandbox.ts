@@ -126,10 +126,28 @@ export interface SandboxInput {
   cwd?: string;
   /** Haupt-Repo — liefert `<repoRoot>/.git` als Schreibpfad (git-Objekte/Refs). */
   repoRoot?: string;
-  /** Aus. Default: an. */
+  /** Explizit an/aus. Ohne Angabe entscheidet die ROLLE (siehe `role`). */
   enabled?: boolean;
   /** Bash ohne mads-Rückfrage freigeben, WEIL sandboxed. Default: AUS — siehe Modul-Kommentar. */
   autoAllowBash?: boolean;
+  /**
+   * Rolle des Streams — bestimmt den Default.
+   *
+   * `sub` → Sandbox AN. Sub-Agents laufen autonom im Autopilot, verarbeiten Repo-Inhalte mit
+   *   möglicher Prompt-Injection, und niemand sieht jeden Schritt. Genau dort verdient die Sandbox
+   *   ihren Preis — und laut Projekt-Invarianten deployt ein Sub-Agent nie.
+   *
+   * `integrator` → Sandbox AUS. Zwei Gründe, beide inhaltlich:
+   *   (1) AUFSICHT: Der Integrator ist der Stream, mit dem der Mensch direkt spricht — das ist die
+   *       Claude-Code-Situation (jemand schaut zu), nicht der unbeaufsichtigte Autopilot.
+   *   (2) AUFGABE: Sync/Deploy sind seine Kernaufgabe. Die brauchen SSH-Schlüssel (denyRead ~/.ssh)
+   *       UND ausgehende Verbindungen zu Prod-/Test-Servern (Egress-Allowlist). Eine Sandbox, die
+   *       beides erlaubt, schützt praktisch nichts mehr — dann ist Ehrlichkeit besser als ein
+   *       Feigenblatt, das nur so lange hält, bis jemand es für Schutz hält.
+   * Per `enabled: true` lässt sie sich für den Integrator bewusst erzwingen (dann scheitern
+   * allerdings SSH-basierte Deploys — das ist der Preis).
+   */
+  role?: "integrator" | "sub";
 }
 
 /**
@@ -140,7 +158,10 @@ export interface SandboxInput {
  * wissen. Notfalls `MADS_SANDBOX=off`.
  */
 export function sandboxOptions(input: SandboxInput = {}): Record<string, unknown> {
-  const enabled = input.enabled !== false && !envDisabled();
+  // Rollen-Default: Sub-Streams an, Integrator aus (Begründung an `role`). Eine EXPLIZITE Angabe
+  // (`enabled`) schlägt den Default in beide Richtungen; `MADS_SANDBOX=off` schaltet global ab.
+  const byRole = input.role !== "integrator";
+  const enabled = (input.enabled ?? byRole) && !envDisabled();
   if (!enabled) return {};
   return {
     sandbox: {

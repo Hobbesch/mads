@@ -460,7 +460,7 @@ export class AgentSession {
           // OS-Sandbox für Agenten-Bash (siehe sandbox.ts): Schreiben nur in Worktree/.git/Caches,
           // Netz-Egress nur zu Paketquellen, Secret-Ablagen (~/.ssh, ~/.aws …) kernel-seitig dicht.
           // Begrenzt den Schadensradius VORAB, statt jede Zeile per Regex vorher zu bewerten.
-          ...sandboxOptions({ cwd, repoRoot: this.repoRoot, enabled: msg.sandbox }),
+          ...sandboxOptions({ cwd, repoRoot: this.repoRoot, enabled: msg.sandbox, role: this.role }),
           mcpServers,
           // SICHERHEIT (INJ-1): NUR die globalen Nutzer-Settings laden (~/.claude/settings.json).
           // NICHT "project"/"local" — die läsen die `.claude/settings.json` des (ggf. untrusted)

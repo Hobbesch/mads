@@ -33,6 +33,21 @@ check(
 check("autoAllowBash:true setzt das Flag explizit", (sandboxOptions({ cwd: WT, autoAllowBash: true }) as { sandbox?: Record<string, unknown> }).sandbox?.autoAllowBashIfSandboxed === true);
 check("enabled:false → leeres Objekt (Sandbox aus)", Object.keys(sandboxOptions({ cwd: WT, enabled: false })).length === 0);
 
+// --- Rollen-Default: sandboxen, wo NIEMAND zusieht --------------------------
+const asSub = sandboxOptions({ cwd: WT, repoRoot: ROOT, role: "sub" }) as { sandbox?: Record<string, unknown> };
+const asInteg = sandboxOptions({ cwd: ROOT, repoRoot: ROOT, role: "integrator" }) as { sandbox?: unknown };
+check("Sub-Stream (autonom, Autopilot) → Sandbox AN", asSub.sandbox?.enabled === true);
+check("Integrator (Mensch sieht zu, deployt per SSH) → Sandbox AUS", Object.keys(asInteg).length === 0);
+check("ohne Rollenangabe bleibt es AN (sicherer Default)", (sandboxOptions({ cwd: WT }) as { sandbox?: unknown }).sandbox !== undefined);
+check(
+  "Integrator kann sie BEWUSST erzwingen (enabled schlaegt Rolle)",
+  (sandboxOptions({ cwd: ROOT, role: "integrator", enabled: true }) as { sandbox?: unknown }).sandbox !== undefined,
+);
+check(
+  "Sub kann sie bewusst abschalten (Debug)",
+  Object.keys(sandboxOptions({ cwd: WT, role: "sub", enabled: false })).length === 0,
+);
+
 // --- Schreibpfade -----------------------------------------------------------
 const w = sandboxWritePaths(WT, ROOT);
 check("Worktree ist schreibbar", w.includes(WT));
