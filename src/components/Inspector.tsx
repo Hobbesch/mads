@@ -576,6 +576,30 @@ export function Inspector() {
               );
             })()
           )}
+          {/* PRO DIENST ein eigener Indikator (frontend/backend). Der Sammel-Knopf allein log:
+              „läuft" konnte heißen „Frontend oben, Backend kompiliert noch" — und das Login lief
+              gegen ein Backend, das es noch nicht gab. Grün = am Port bestätigt, gelb = startet
+              bzw. nur angenommen, rot = Prozess weg. */}
+          {agent.role === "sub" && agent.devServer?.services && agent.devServer.services.length > 1 && (
+            <span className="devsvc-row">
+              {agent.devServer.services.map((sv) => {
+                const cls = !sv.alive ? "dead" : sv.ready ? (sv.assumed ? "assumed" : "ok") : "starting";
+                const what = !sv.alive
+                  ? "läuft nicht (mehr)"
+                  : sv.ready
+                    ? sv.assumed
+                      ? "vermutlich bereit (kein Port prüfbar)"
+                      : "bereit — antwortet"
+                    : "startet noch …";
+                return (
+                  <span key={sv.name} className={`devsvc ${cls}`} title={`${sv.name}: ${what}${sv.url ? ` · ${sv.url}` : ""}`}>
+                    <span className="devsvc-dot" />
+                    {sv.name}
+                  </span>
+                );
+              })}
+            </span>
+          )}
           {agent.role === "sub" && agent.devServer?.state === "running" && agent.devServer.url && (
             <button
               className="devserver-open"

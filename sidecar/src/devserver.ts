@@ -16,6 +16,7 @@
  * `dotnet run`→Host). Ausgabe wird zeilenweise (readline) als NDJSON an die UI weitergereicht.
  */
 import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { connect } from "node:net";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import readline from "node:readline";
@@ -248,6 +249,28 @@ interface ServiceProc {
   child?: ChildProcess;
   ready: boolean;
   url?: string;
+  /** Bereitschaft wurde ANGENOMMEN (kein Ready-Marker, kein Port zum Prüfen) statt bestätigt.
+   *  Die UI zeigt das gelb — „vermutlich bereit" ist nicht dasselbe wie „antwortet". */
+  assumed?: boolean;
+}
+
+/** Antwortet auf diesem lokalen Port jemand? Das ist der einzige BEWEIS für „Dienst ist oben" —
+ *  ein Ready-Marker im Log kann fehlen (Serilog formatiert Kestrel anders) oder zu früh kommen. */
+function probePort(port: number, timeoutMs = 700): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = connect({ port, host: "127.0.0.1" });
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      sock.destroy();
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.once("connect", () => finish(true));
+    sock.once("timeout", () => finish(false));
+    sock.once("error", () => finish(false));
+  });
 }
 
 const MAX_LINE = 2000; // eine Zeile deckeln (schützt die NDJSON-Pipe vor Riesen-Zeilen)
@@ -330,7 +353,14 @@ export class DevServerRun {
       type: "devserver_status",
       agentId: this.agentId,
       state: this.state,
-      services: this.procs.map((p) => ({ name: p.spec.name, ready: p.ready, url: p.url })),
+      services: this.procs.map((p) => ({
+        name: p.spec.name,
+        ready: p.ready,
+        url: p.url,
+        // `alive` trennt „startet noch" von „abgestürzt" — ohne das sähe beides gleich aus.
+        alive: p.child?.pid != null,
+        assumed: p.assumed,
+      })),
       url: this.primaryUrl(),
       message: message ?? partial,
       // Nur melden, solange überhaupt noch etwas läuft — sind ALLE tot, ist das `state: "error"`
@@ -517,17 +547,54 @@ export class DevServerRun {
     // LEBENDEN — sonst bliebe es wegen des toten Prozesses fälschlich in „starting".
     this.state = (this.degraded ? this.liveAllReady() : this.allUp()) ? "running" : "starting";
     this.emitStatus();
-    // Fallback: greift ein Ready-Marker nach 15 s nicht (z. B. Serilog formatiert die Kestrel-Zeile
-    // anders), Bereitschaft annehmen — die Server laufen, nur die Erkennung schlug fehl.
-    if (this.state === "starting") {
-      this.readyTimer = setTimeout(() => {
-        if (this.stopping || this.state !== "starting") return;
-        for (const p of this.procs) if (p.child?.pid != null) p.ready = true; // nur LEBENDE Dienste
-        this.state = "running";
-        this.emitStatus("Bereitschaft angenommen (Ready-Marker nicht erkannt) — siehe Log.");
-      }, 15_000);
-      this.readyTimer.unref?.();
+    // Greift ein Ready-Marker nicht (z. B. Serilog formatiert die Kestrel-Zeile anders), wurde früher
+    // nach 15 s einfach BEHAUPTET, alles sei bereit. Das log bei langsamen Diensten: `dotnet run`
+    // kompiliert beim ersten Start deutlich länger, mads meldete trotzdem grün — und das Login gegen
+    // ein noch nicht gestartetes Backend schlug fehl. Jetzt wird am PORT nachgewiesen statt geraten,
+    // und so lange weiter geprüft, wie der Dienst noch startet.
+    if (this.state === "starting") this.scheduleReadyProbe(3_000);
+  }
+
+  /**
+   * Bereitschaft am Port BEWEISEN statt annehmen. Wiederholt sich, solange noch etwas startet.
+   * Nur Dienste OHNE ermittelbaren Port fallen nach einer Karenzzeit auf „angenommen" zurück —
+   * die werden in der UI gelb (nicht grün) dargestellt, damit der Unterschied sichtbar bleibt.
+   */
+  private scheduleReadyProbe(delayMs: number, elapsedMs = 0): void {
+    if (this.readyTimer) clearTimeout(this.readyTimer);
+    this.readyTimer = setTimeout(() => void this.probeReadiness(elapsedMs + delayMs), delayMs);
+    this.readyTimer.unref?.();
+  }
+
+  private async probeReadiness(elapsedMs: number): Promise<void> {
+    if (this.stopping || this.state === "stopped" || this.state === "error") return;
+    let changed = false;
+    for (const p of this.procs) {
+      if (p.ready || p.child?.pid == null) continue;
+      const port = portOf(p.spec);
+      if (port) {
+        if (await probePort(port)) {
+          p.ready = true;
+          changed = true;
+          this.emitLog(p.spec.name, "stderr", `Bereit bestätigt (Port ${port} antwortet).`);
+        }
+      } else if (elapsedMs >= 15_000) {
+        // Kein Port ableitbar → nach Karenzzeit annehmen, aber als „angenommen" markieren.
+        p.ready = true;
+        p.assumed = true;
+        changed = true;
+      }
     }
+    const allReady = this.degraded ? this.liveAllReady() : this.allUp();
+    if (allReady && this.state !== "running") {
+      this.state = "running";
+      changed = true;
+    }
+    if (changed) this.emitStatus();
+    // Weiter prüfen, solange etwas Lebendes noch nicht bereit ist. Nach 5 Minuten aufgeben (der
+    // Dienst kommt dann nicht mehr; das Log zeigt warum) — sonst liefe der Timer endlos.
+    const pending = this.procs.some((p) => p.child?.pid != null && !p.ready);
+    if (pending && elapsedMs < 300_000) this.scheduleReadyProbe(elapsedMs < 30_000 ? 2_000 : 5_000, elapsedMs);
   }
 
   /** Signal an die ganze Prozess-Gruppe (detached → -pid); Fallback auf den Einzel-PID. */

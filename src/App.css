@@ -931,6 +931,42 @@ button.primary:hover {
   border-color: var(--s-green);
   color: #fff;
 }
+/* ── Pro-Dienst-Indikatoren (frontend/backend) ─────────────────────────────
+   Der Sammelzustand allein reichte nicht: „laeuft" konnte heissen „Frontend oben,
+   Backend kompiliert noch". Gruen = am Port bestaetigt, gelb = startet/angenommen, rot = weg. */
+.devsvc-row {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: 2px;
+}
+.devsvc {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.devsvc-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--s-gray);
+  flex: none;
+}
+.devsvc.ok { border-color: var(--s-green); color: var(--s-green); }
+.devsvc.ok .devsvc-dot { background: var(--s-green); }
+.devsvc.starting { border-color: var(--s-yellow); color: var(--s-yellow); }
+.devsvc.starting .devsvc-dot { background: var(--s-yellow); animation: pulse 1.1s infinite; }
+.devsvc.assumed { border-color: var(--s-yellow); color: var(--s-yellow); }
+.devsvc.assumed .devsvc-dot { background: var(--s-yellow); }
+.devsvc.dead { border-color: var(--s-red); color: var(--s-red); }
+.devsvc.dead .devsvc-dot { background: var(--s-red); }
+
 /* Teilweise gestartet (ein Dienst tot) — nicht gruen, sonst liest es sich als „alles laeuft". */
 .card-dev.on.degraded {
   background: var(--s-yellow);

@@ -519,8 +519,14 @@ export interface ProjectLockedMsg extends BaseMsg {
 /** Ein einzelner Service des Stream-Dev-Servers (aus `.mads/run.json`), für die Statusanzeige. */
 export interface DevServerService {
   name: string;
+  /** BEWIESEN bereit (Ready-Marker erkannt oder Port antwortet) — nicht bloß „Prozess läuft". */
   ready: boolean;
   url?: string;
+  /** Prozess lebt. Trennt „startet noch" (alive && !ready) von „abgestürzt" (!alive) — ohne das
+   *  sähen beide Zustände in der UI gleich aus. */
+  alive?: boolean;
+  /** Bereitschaft nur ANGENOMMEN (kein Ready-Marker, kein prüfbarer Port) → UI zeigt gelb statt grün. */
+  assumed?: boolean;
 }
 /** Zustand des Stream-Dev-Servers (treibt Button/Badge/„im Browser öffnen"-Link im Frontend). */
 export interface DevServerStatusMsg extends BaseMsg {

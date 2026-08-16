@@ -108,7 +108,7 @@ export interface DevLogLine {
 export interface DevServerVM {
   state: "installing" | "starting" | "running" | "stopped" | "error" | "unconfigured";
   url?: string;
-  services?: { name: string; ready: boolean; url?: string }[];
+  services?: { name: string; ready: boolean; url?: string; alive?: boolean; assumed?: boolean }[];
   message?: string;
   /** Teilweise gestartet — mindestens ein Dienst tot, andere laufen. Steuert die gelbe Anzeige. */
   degraded?: boolean;
