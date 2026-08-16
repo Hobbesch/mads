@@ -2092,8 +2092,12 @@ export class Orchestrator {
     log(`[orchestrator] devserver start für ${agentId} (${manifest.services.length} service(s)) in ${worktree}`);
     // Frischer Start → Selbstheilungs-Versuche für diesen Stream zurücksetzen.
     for (const k of [...this.devHealAttempts.keys()]) if (k.startsWith(`${agentId}:`)) this.devHealAttempts.delete(k);
-    this.devServer = new DevServerRun(agentId, worktree, manifest, (service, code, logLines) =>
-      this.handleDevServerCrash(agentId, service, code, logLines),
+    this.devServer = new DevServerRun(
+      agentId,
+      worktree,
+      manifest,
+      (service, code, logLines) => this.handleDevServerCrash(agentId, service, code, logLines),
+      this.project?.repoRoot,
     );
     await this.devServer.start();
   }

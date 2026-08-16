@@ -965,6 +965,8 @@ button.primary:hover {
 .devsvc.assumed { border-color: var(--s-yellow); color: var(--s-yellow); }
 .devsvc.assumed .devsvc-dot { background: var(--s-yellow); }
 .devsvc.dead { border-color: var(--s-red); color: var(--s-red); }
+/* Externe Abhaengigkeit (DB/Cache) — gestrichelt, weil sie nicht mads gehoert. */
+.devsvc.dep { border-style: dashed; }
 .devsvc.dead .devsvc-dot { background: var(--s-red); }
 
 /* Teilweise gestartet (ein Dienst tot) — nicht gruen, sonst liest es sich als „alles laeuft". */

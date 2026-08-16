@@ -108,7 +108,8 @@ export interface DevLogLine {
 export interface DevServerVM {
   state: "installing" | "starting" | "running" | "stopped" | "error" | "unconfigured";
   url?: string;
-  services?: { name: string; ready: boolean; url?: string; alive?: boolean; assumed?: boolean }[];
+  services?: { name: string; ready: boolean; url?: string; alive?: boolean; assumed?: boolean; depMissing?: string }[];
+  dependencies?: { name: string; target: string; ok: boolean }[];
   message?: string;
   /** Teilweise gestartet — mindestens ein Dienst tot, andere laufen. Steuert die gelbe Anzeige. */
   degraded?: boolean;
@@ -885,6 +886,7 @@ export const useStore = create<MadsState>((set) => {
             message: msg.message,
             degraded: msg.degraded,
             deadServices: msg.deadServices,
+            dependencies: msg.dependencies,
           },
         });
         if (msg.state === "running" && msg.url) notice(msg.agentId, "ok", `▶ Dev-Server läuft → ${msg.url}`);

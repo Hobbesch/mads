@@ -527,6 +527,15 @@ export interface DevServerService {
   alive?: boolean;
   /** Bereitschaft nur ANGENOMMEN (kein Ready-Marker, kein prüfbarer Port) → UI zeigt gelb statt grün. */
   assumed?: boolean;
+  /** Nicht erreichbare Abhängigkeit (z. B. „:5433") — der Dienst lauscht, kann aber nicht arbeiten. */
+  depMissing?: string;
+}
+/** Externe Abhängigkeit eines Dienstes (Datenbank, Cache …) — eigener Indikator in der UI. */
+export interface DevServerDependency {
+  name: string;
+  /** host:port — was geprüft wurde. */
+  target: string;
+  ok: boolean;
 }
 /** Zustand des Stream-Dev-Servers (treibt Button/Badge/„im Browser öffnen"-Link im Frontend). */
 export interface DevServerStatusMsg extends BaseMsg {
@@ -536,6 +545,9 @@ export interface DevServerStatusMsg extends BaseMsg {
   // „Konfigurieren" an, statt einen toten Fehler zu zeigen.
   state: "installing" | "starting" | "running" | "stopped" | "error" | "unconfigured";
   services?: DevServerService[];
+  /** Geprüfte externe Abhängigkeiten (aus `requires` in run.json). Eigene Indikatoren, weil ein
+   *  Dienst OHNE seine Datenbank zwar lauscht, aber nichts kann — das sah vorher grün aus. */
+  dependencies?: DevServerDependency[];
   /** primäre URL zum Öffnen im Browser (i. d. R. das Frontend), sobald bereit. */
   url?: string;
   /** menschenlesbarer Hinweis (Fehlergrund / „Vorlage erzeugt" o. Ä.). */

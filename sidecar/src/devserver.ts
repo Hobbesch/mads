@@ -32,6 +32,37 @@ export interface ServiceSpec {
   url?: string; // URL, unter der der Service erreichbar ist
   open?: boolean; // true = dies ist die „im Browser öffnen"-URL (i. d. R. das Frontend)
   ready?: string; // Teilstring in der Ausgabe, der „bereit" signalisiert (sonst: sofort nach Spawn)
+  /**
+   * Externe Abhängigkeiten, die erreichbar sein MÜSSEN, damit der Dienst funktioniert —
+   * als "host:port" oder nur "port" (z. B. "5433" für Postgres aus docker-compose).
+   * Grund: ein Backend LAUSCHT auch dann, wenn seine Datenbank fehlt — es meldet dann fleissig
+   * "läuft" und liefert bei jedem Login "Passwort falsch". Ohne diese Angabe kann mads den
+   * Unterschied nicht sehen und zeigt gruen, obwohl nichts geht.
+   */
+  requires?: (string | ServiceDep)[];
+}
+/** Eine externe Abhängigkeit eines Dienstes (Datenbank, Cache, Queue …). */
+export interface ServiceDep {
+  /** "5433" oder "host:5433" — was erreichbar sein muss. */
+  port: string | number;
+  host?: string;
+  /** Anzeigename für den Indikator (Default: der Port). */
+  name?: string;
+  /** Optionaler Befehl, der die Abhängigkeit hochfährt, wenn sie fehlt (z. B. `docker compose up -d`).
+   *  Wird im Repo-Root ausgeführt. Ohne diesen Eintrag meldet mads nur, dass etwas fehlt. */
+  start?: string;
+}
+
+/** requires-Eintrag normalisieren (String-Kurzform ODER Objekt). */
+export function normalizeDep(d: string | ServiceDep): { host: string; port: number; name: string; start?: string } | null {
+  if (typeof d === "string") {
+    const m = /^(?:([^\s:]+):)?(\d{2,5})$/.exec(d.trim());
+    if (!m) return null;
+    return { host: m[1] || "127.0.0.1", port: parseInt(m[2], 10), name: m[1] ? d.trim() : `:${m[2]}` };
+  }
+  const port = typeof d.port === "number" ? d.port : parseInt(String(d.port ?? ""), 10);
+  if (!Number.isInteger(port) || port <= 0) return null;
+  return { host: d.host || "127.0.0.1", port, name: d.name || `:${port}`, start: typeof d.start === "string" ? d.start : undefined };
 }
 export interface RunManifest {
   services: ServiceSpec[];
@@ -99,6 +130,9 @@ export function loadRunManifest(repoRoot: string): RunManifest | null {
         url: typeof s.url === "string" ? s.url : undefined,
         open: s.open === true,
         ready: typeof s.ready === "string" ? s.ready : undefined,
+        requires: Array.isArray(s.requires)
+          ? (s.requires as unknown[]).filter((x): x is string | ServiceDep => typeof x === "string" || (!!x && typeof x === "object"))
+          : undefined,
       });
     }
   }
@@ -252,6 +286,8 @@ interface ServiceProc {
   /** Bereitschaft wurde ANGENOMMEN (kein Ready-Marker, kein Port zum Prüfen) statt bestätigt.
    *  Die UI zeigt das gelb — „vermutlich bereit" ist nicht dasselbe wie „antwortet". */
   assumed?: boolean;
+  /** Nicht erreichbare Abhängigkeit (z. B. "5433") — der Dienst lauscht, kann aber nicht arbeiten. */
+  depMissing?: string;
 }
 
 /** Antwortet auf diesem lokalen Port jemand? Das ist der einzige BEWEIS für „Dienst ist oben" —
@@ -295,10 +331,18 @@ export class DevServerRun {
   private degraded = false; // true, sobald ein Service abstürzte, andere aber weiterlaufen (Survivor-Modus)
   private started = false; // true erst NACH der Spawn-Schleife — nie „running" melden, solange noch Services fehlen
   private readonly recentLogs = new Map<string, string[]>(); // pro Service, für die Crash-Diagnose
+  /** Zustand je Abhängigkeit (host:port → erreichbar?) — speist den dritten Indikator. */
+  private readonly depState = new Map<string, { host: string; port: number; name: string; ok: boolean }>();
+  /** Abhängigkeiten, deren `start` bereits versucht wurde (nur EIN Versuch pro Lauf). */
+  private readonly depStarted = new Set<string>();
+  /** Repo-Root (NICHT der Worktree): Abhängigkeits-Startbefehle laufen hier, damit z. B.
+   *  `docker compose` denselben Projektnamen wie sonst nutzt und keine Zweit-Container erzeugt. */
+  private readonly repoRoot: string;
 
-  constructor(agentId: string, worktree: string, manifest: RunManifest, onCrash?: DevCrashHandler) {
+  constructor(agentId: string, worktree: string, manifest: RunManifest, onCrash?: DevCrashHandler, repoRoot?: string) {
     this.agentId = agentId;
     this.worktree = worktree;
+    this.repoRoot = repoRoot || worktree;
     this.procs = manifest.services.map((spec) => ({ spec, ready: false, url: spec.url }));
     this.onCrash = onCrash;
   }
@@ -360,7 +404,9 @@ export class DevServerRun {
         // `alive` trennt „startet noch" von „abgestürzt" — ohne das sähe beides gleich aus.
         alive: p.child?.pid != null,
         assumed: p.assumed,
+        depMissing: p.depMissing,
       })),
+      dependencies: [...this.depState.values()].map((d) => ({ name: d.name, target: `${d.host}:${d.port}`, ok: d.ok })),
       url: this.primaryUrl(),
       message: message ?? partial,
       // Nur melden, solange überhaupt noch etwas läuft — sind ALLE tot, ist das `state: "error"`
@@ -517,6 +563,12 @@ export class DevServerRun {
     this.crashReported = false; // frischer Start → Selbstheilung wieder scharf
     this.degraded = false; // frischer Start → wieder Normalstart-Semantik (allUp), kein Survivor-Modus
     this.started = false; // Spawn-Schleife läuft noch → „running" frühestens nach der Schleife
+    this.depStarted.clear();
+    this.emitStatus();
+    // ZUERST die Abhängigkeiten (DB/Cache/…): fehlt eine und ist ein `start` deklariert, wird sie
+    // hochgefahren. Sonst startet z. B. das Backend zwar, kann aber keine Anfrage beantworten —
+    // und der Nutzer sucht den Fehler in seinem Code statt bei einem nicht laufenden Docker.
+    await this.checkDeps(true);
     this.emitStatus();
     for (const p of this.procs) {
       if (this.stopping) return;
@@ -566,8 +618,63 @@ export class DevServerRun {
     this.readyTimer.unref?.();
   }
 
+  /** Alle deklarierten Abhängigkeiten über alle Services, dedupliziert (host:port ist der Schlüssel). */
+  private deps(): { host: string; port: number; name: string; start?: string }[] {
+    const byKey = new Map<string, { host: string; port: number; name: string; start?: string }>();
+    for (const p of this.procs) {
+      for (const raw of p.spec.requires ?? []) {
+        const d = normalizeDep(raw);
+        if (d && !byKey.has(`${d.host}:${d.port}`)) byKey.set(`${d.host}:${d.port}`, d);
+      }
+    }
+    return [...byKey.values()];
+  }
+
+  /**
+   * Abhängigkeiten prüfen — und fehlende, für die ein `start` deklariert ist, EINMAL hochfahren.
+   * Ohne das meldet ein Backend fröhlich „läuft", obwohl seine Datenbank fehlt: es lauscht ja, kann
+   * aber keine Anfrage beantworten (real: jeder Login schlug mit „Passwort falsch" fehl, weil Docker
+   * und damit Postgres nicht lief — und NICHTS in der UI wies darauf hin).
+   */
+  private async checkDeps(autoStart: boolean): Promise<void> {
+    const deps = this.deps();
+    if (!deps.length) return;
+    for (const d of deps) {
+      let ok = await probePort(d.port, 600);
+      if (!ok && autoStart && d.start && !this.depStarted.has(`${d.host}:${d.port}`)) {
+        this.depStarted.add(`${d.host}:${d.port}`);
+        this.emitLog("dependencies", "stderr", `${d.name} nicht erreichbar — starte: ${d.start}`);
+        await new Promise<void>((resolve) => {
+          const c = spawn("/bin/sh", ["-lc", d.start!], { cwd: this.repoRoot, detached: false, stdio: ["ignore", "pipe", "pipe"] });
+          c.stdout?.on("data", (b: Buffer) => this.emitLog("dependencies", "stdout", String(b).trimEnd()));
+          c.stderr?.on("data", (b: Buffer) => this.emitLog("dependencies", "stderr", String(b).trimEnd()));
+          c.on("exit", () => resolve());
+          c.on("error", () => resolve());
+          setTimeout(resolve, 120_000); // nie ewig blockieren
+        });
+        // nach dem Start Zeit zum Hochkommen geben
+        for (let i = 0; i < 20 && !ok; i++) {
+          await new Promise((r) => setTimeout(r, 1_000));
+          ok = await probePort(d.port, 600);
+        }
+        this.emitLog("dependencies", "stderr", ok ? `${d.name} ist jetzt erreichbar.` : `${d.name} weiterhin NICHT erreichbar.`);
+      }
+      this.depState.set(`${d.host}:${d.port}`, { ...d, ok });
+    }
+    // Dienste, deren Abhängigkeit fehlt, tragen den Grund — damit der Indikator nicht grün lügt.
+    for (const p of this.procs) {
+      const missing = (p.spec.requires ?? [])
+        .map((r) => normalizeDep(r))
+        .filter((d): d is NonNullable<typeof d> => !!d)
+        .filter((d) => this.depState.get(`${d.host}:${d.port}`)?.ok === false)
+        .map((d) => d.name);
+      p.depMissing = missing.length ? missing.join(", ") : undefined;
+    }
+  }
+
   private async probeReadiness(elapsedMs: number): Promise<void> {
     if (this.stopping || this.state === "stopped" || this.state === "error") return;
+    await this.checkDeps(false); // laufend nachprüfen — eine DB kann auch SPÄTER wegfallen
     let changed = false;
     for (const p of this.procs) {
       if (p.ready || p.child?.pid == null) continue;
