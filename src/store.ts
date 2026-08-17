@@ -1244,8 +1244,14 @@ export const useStore = create<MadsState>((set) => {
     importHandoff: async () => {
       const file = await pickHandoffFile();
       if (!file) return;
+      // ZIELORDNER BEWUSST WÄHLEN LASSEN. Ohne `targetRepoRoot` nimmt das Handoff-Skript seinen
+      // Default — und der landet bei ABWEICHENDEM Benutzernamen (Cross-Machine, genau der
+      // Normalfall beim Import) unter ~/Documents/…, das auf Macs mit „Schreibtisch & Dokumente"
+      // in iCloud liegt. Repos in iCloud sind der Weg in verwaiste Worktrees und aufgeblähte
+      // Sync-Ordner. Der Nutzer wählt jetzt selbst (Abbruch = Skript-Default wie bisher).
+      const targetRepoRoot = await pickFolder("Zielordner für das importierte Projekt (NICHT in iCloud/Dokumente)");
       set({ handoff: undefined });
-      await sendHost({ ...envelope(), type: "handoff_import", file });
+      await sendHost({ ...envelope(), type: "handoff_import", file, ...(targetRepoRoot ? { targetRepoRoot } : {}) });
     },
 
     dismissHandoff: () => set({ handoff: undefined }),
