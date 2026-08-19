@@ -1102,13 +1102,22 @@ function parseUntrackedObstacles(text: string): string {
  * frisch fetchen (remote-tracking-Ref auffrischen → Lease wird korrekt) und EINMAL neu versuchen.
  * mads-Branches sind single-owner → der lokale (neueste) Rebase überschreibt sicher. Fängt die
  * Autopilot-Push-Race ab, falls sich doch zwei Zyklen ins Gehege kommen.
+ *
+ * Der Retry MUSS `--prune` fetchen: Ist der Remote-Branch GELÖSCHT worden (GitHub-Repo-Option
+ * „automatically delete head branches" räumt den Head-Branch beim Merge weg — bei mads der
+ * Normalfall nach jeder Integration), dann bleibt refs/remotes/origin/<branch> ohne prune ewig
+ * auf dem alten Commit stehen. git vergleicht diesen Lease-Wert mit „existiert nicht" und lehnt
+ * dauerhaft mit „stale info" ab — ein Fetch ohne prune ändert daran NICHTS, der Retry lief ins
+ * exakt gleiche Messer und der Stream blieb bis zum manuellen Eingriff blockiert.
+ * Mit gepruntem (also fehlendem) Tracking-Ref lautet die Lease-Erwartung „darf nicht existieren";
+ * die trifft auf das Remote zu → der Push legt den Branch sauber neu an.
  */
 async function pushForceWithLease(worktree: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   let push = await git(["-C", worktree, "push", "--force-with-lease", ...args], worktree);
   const leaseFailed = (p: { stdout: string; stderr: string }) =>
     /cannot lock ref|stale info|\[rejected\]|is at [0-9a-f]+ but expected|force[- ]with[- ]lease/i.test(`${p.stderr}\n${p.stdout}`);
   if (push.code !== 0 && leaseFailed(push)) {
-    await run("git", ["-C", worktree, "fetch", "origin"], worktree);
+    await run("git", ["-C", worktree, "fetch", "--prune", "origin"], worktree);
     push = await git(["-C", worktree, "push", "--force-with-lease", ...args], worktree);
   }
   return push;
@@ -1119,7 +1128,10 @@ export async function syncBranch(
   branch: string,
   defaultBranch: string,
 ): Promise<{ ok: true; renamedAdrs?: { num: string; to: string }[] } | { ok: false; kind: EscalationKind; error: string }> {
-  await run("git", ["-C", worktree, "fetch", "origin"], worktree);
+  // `--prune`: gelöschte Remote-Branches (GitHub räumt den Head-Branch beim Merge weg) müssen auch
+  // lokal als Tracking-Ref verschwinden — sonst blockiert ihr Leichnam den force-with-lease-Push
+  // unten dauerhaft mit „stale info" (siehe pushForceWithLease).
+  await run("git", ["-C", worktree, "fetch", "--prune", "origin"], worktree);
   // Der Worktree MUSS auf seinem Branch stehen, bevor rebased wird. Ein detached HEAD (der Zustand, den
   // mads nach einer sauberen Integration hinterlässt) würde sonst den LOSEN Commit rebasen (No-Op) statt
   // den Branch — der Branch-Ref bliebe „behind", und Auto-Sync liefe endlos. Reattach, verlustfrei:
