@@ -1000,6 +1000,14 @@ export class Orchestrator {
     if (pr) this.emit({ ...envelope(), type: "pr_update", agentId, pr: { ...pr, state: "MERGED" } });
     this.emit({ ...envelope(), type: "status_update", agentId, status: "done", currentStep: "merged" });
 
+    // Session ZUERST schließen — VOR jedem Aufräumen im Worktree. Der CLI-Prozess dieser Session
+    // läuft mit cwd = Worktree; das Reap unten würde ihn sonst per SIGTERM erwischen, während der
+    // Stream noch offen ist → „consume_failed: exited with code 143" als roter Fehler auf einem
+    // GELUNGENEN Merge (siehe Kontrakt in worktree-procs.ts: erst Session beenden, dann reapen —
+    // der stop_agent-Pfad hält diese Reihenfolge bereits ein).
+    s.status = "done";
+    await s.stop(false); // Query schließen; Karte bleibt als "merged" sichtbar
+
     // Aufräumen (best effort — blockiert das erfolgreiche Merge-Ergebnis NICHT):
     // Worktree zuerst entfernen (gibt den ausgecheckten Branch frei + löscht den lokalen
     // Branch), danach den Remote-Branch löschen.
@@ -1021,8 +1029,6 @@ export class Orchestrator {
     const doneStatus: GitStatusResult = { behind: 0, ahead: 0, dirty: false };
     this.gitState.set(agentId, doneStatus);
     this.emitGitStatus(agentId, doneStatus);
-    s.status = "done";
-    await s.stop(false); // Query schließen; Karte bleibt als "merged" sichtbar
     this.removed.add(agentId); // gemergt+aufgeräumt → nicht mehr in die Resume-Registry
     this.persist(); // gemergten Agenten aus der Resume-Registry entfernen
     await this.rebaseOthersOnMain(agentId); // 3.1: origin/main bewegte sich → andere nachziehen
