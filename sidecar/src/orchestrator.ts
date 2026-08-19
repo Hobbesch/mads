@@ -2115,6 +2115,17 @@ export class Orchestrator {
    * Sichtbar melden, statt still zu killen — der Mensch soll wissen, dass etwas beendet wurde.
    */
   private async reapWorktreeProcesses(agentId: string, worktree: string | undefined): Promise<void> {
+    // KONTRAKT SELBSTDURCHSETZEND (statt ihn an jeder Aufrufstelle zu wiederholen): Der CLI-Prozess
+    // einer laufenden Session hat cwd = Worktree und faellt damit in genau das Raster, das
+    // killProcessesInWorktree() findet. Wird er per SIGTERM erwischt, waehrend der Stream noch offen
+    // ist, meldet consume() „exited with code 143" als ROTEN Fehler auf einer GELUNGENEN Aktion.
+    // Genau das passierte auf dem Integrate-Pfad (5a7a527). Der cleanup_worktree-Pfad fasst den Pool
+    // gar nicht an und haette dieselbe Falle gestellt — deshalb hier zentral: lebt noch eine Session
+    // zu diesem Stream, wird sie ZUERST regulaer geschlossen.
+    // Nur STOPPEN, nicht aus dem Pool entfernen: wer den Stream aus dem Pool nimmt (und wann die
+    // Registry geschrieben wird), entscheiden die Aufrufstellen — daran wird hier nichts geaendert.
+    // stop(false) ist idempotent (schliesst nur die Queues), ein zweiter Aufruf schadet also nicht.
+    await this.pool.get(agentId)?.stop(false);
     const killed = await killProcessesInWorktree(worktree);
     if (!killed.length) return;
     this.emit({
