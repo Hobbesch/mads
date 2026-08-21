@@ -1726,7 +1726,18 @@ export class Orchestrator {
       this.gitState.set(s.agentId, status);
       // 3.4: Hat der Branch wieder aufgeholt (behind=0), ist ein zuvor pausierter Sync-Konflikt
       // gelöst (manuell oder vom Agenten rebaset) → Auto-Sync-Pause aufheben (Flag clearen).
-      if (status.behind === 0 && this.autoSyncConflicted.has(s.agentId)) this.autoSyncConflicted.delete(s.agentId);
+      // ABER: eine PUSH-Rejection in syncOne() (Rebase onto main gelang, nur der anschließende
+      // force-with-lease-Push zum EIGENEN origin/<branch> scheiterte — z. B. „stale info" durch
+      // einen doppelt erzeugten Checkpoint) macht behind schon durch den Rebase-Schritt selbst 0,
+      // OHNE dass je gepusht wurde. Reines behind===0 löschte das syncBlocked-Flag dann sofort im
+      // nächsten Poll — der Sync-Button (Inspector: `behind>0 || syncBlocked`) verschwindet, obwohl
+      // der Branch weiter ungepusht/divergiert bleibt und die Eskalation unverändert im Verlauf
+      // steht (realer Vorfall: „Zähler Handling"). Zusätzlich prüfen, ob der Branch gegenüber
+      // seinem EIGENEN origin/<branch> synchron ist — fail-closed (Flag bleibt bei Unsicherheit).
+      if (status.behind === 0 && this.autoSyncConflicted.has(s.agentId)) {
+        const up = await run("git", ["-C", s.worktreePath, "rev-list", "--count", `origin/${s.branch}..${s.branch}`], s.worktreePath);
+        if (up.code === 0 && parseInt(up.stdout.trim() || "0", 10) === 0) this.autoSyncConflicted.delete(s.agentId);
+      }
       this.emitGitStatus(s.agentId, status);
       const pr = await prStatus(s.repoRoot, s.branch);
       const suppressed = this.suppressedMergedPr.get(s.agentId);
