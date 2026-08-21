@@ -98,6 +98,11 @@ export class Orchestrator {
   private readonly removed = new Set<string>();
   // 3.2: Integrationen serialisieren (kein Merge-Race zweier fast gleichzeitiger Merges).
   private integrateLock: Promise<void> = Promise.resolve();
+  // Streams, die gerade doIntegrate() durchlaufen (Merge + Cleanup) — autopilotPass() muss sie
+  // währenddessen aussparen, sonst pusht ein paralleler Poll-Zyklus auf Basis des Vor-Merge-Stands
+  // noch, während der Worktree schon entfernt wird (git-Unterprozess ohne cwd → push_rejected,
+  // obwohl längst alles gemerged ist — realer Vorfall, siehe „Tooltip-Erweiterung"/PR #430).
+  private readonly integrating = new Set<string>();
   // A: PR-Erstellungen serialisieren, damit die ADR-Nummern-Vergabe (Scan aller Worktrees +
   // Umbenennen) atomar ist und zwei Streams nie dieselbe Nummer ziehen.
   private createPrLock: Promise<void> = Promise.resolve();
@@ -326,7 +331,10 @@ export class Orchestrator {
           resumeWorktreePath: res.worktreePath,
           label: msg.label,
           role: "sub",
-          model: "claude-sonnet-4-6",
+          // Kein hartcodiertes Modell (war vorher ein veraltetes "claude-sonnet-4-6" — ignorierte
+          // die Picker-Wahl komplett) — das Modell des Integrators übernehmen, dessen main-Änderungen
+          // hier ausgelagert werden. Undefined coerciert session.ts ohnehin auf DEFAULT_MODEL.
+          model: integ.model,
           permissionMode: "auto",
           autopilot: "assisted",
         });
@@ -908,9 +916,11 @@ export class Orchestrator {
     let release!: () => void;
     this.integrateLock = new Promise<void>((r) => (release = r));
     await prev.catch(() => {});
+    this.integrating.add(agentId);
     try {
       await this.doIntegrate(agentId, method, keepBranch);
     } finally {
+      this.integrating.delete(agentId);
       release();
     }
   }
@@ -1462,6 +1472,9 @@ export class Orchestrator {
       // B2: aufgeräumte Streams (Worktree weg) überspringen — der Autopilot darf keine
       // Aktionen (commit/push/PR) gegen einen nicht mehr existierenden Worktree anstoßen.
       if (this.removed.has(s.agentId) || !existsSync(s.worktreePath)) continue;
+      // Läuft doIntegrate() gerade für diesen Stream (Merge + Cleanup), NICHT parallel drauf
+      // pushen — der Worktree kann währenddessen jederzeit verschwinden (push_rejected-Race).
+      if (this.integrating.has(s.agentId)) continue;
       const st = this.gitState.get(s.agentId);
       // B3: unreliable-Status = git-Fehler → daraus keine Autopilot-Entscheidung ableiten.
       if (!st || st.unreliable) continue;
@@ -1633,6 +1646,10 @@ export class Orchestrator {
 
   private async pollAgent(s: AgentSession, skipFetch = false): Promise<void> {
     if (!this.project || !s.repoRoot) return;
+    // Bereits aufgeräumte Streams (gemergt+entfernt) NICHT weiterpollen — sonst schlägt gitStatus()
+    // gegen den (bewusst entfernten) Worktree-Pfad fehl und löst nach 5 Fehlversuchen fälschlich die
+    // „Worktree beschädigt oder extern entfernt?"-Warnung aus, obwohl mads ihn selbst aufgeräumt hat.
+    if (this.removed.has(s.agentId)) return;
     const defaultBranch = this.project.defaultBranch;
     try {
       // Integrator (G1): kein Worktree/Branch — er sitzt im Haupt-Checkout auf
