@@ -809,14 +809,18 @@ export function classifyBashCommand(command: string, ctx: { cwd?: string } = {})
   return ALLOW; // lokale Ausführung — im Trusted-Local-Dev-Modus erlaubt
 }
 
-// Für SCHREIB-Zugriffe (Edit/Write): innerhalb des Worktrees ok, ausserhalb bzw. auf geschützte
+// Für SCHREIB-Zugriffe (Edit/Write): innerhalb des Worktrees oder Temp ok, sonst bzw. auf geschützte
 // Pfade → fragen. Trusted-Local-Dev lockert das Lesen (siehe sensitivePath), NICHT das Schreiben.
+// Die Temp-Ausnahme (TMP_ROOTS) gilt für Bash-Schreibzugriffe (unsafeWriteRedirect,
+// writesOutsideProject, deletesOnlyLocally) bereits — Write/Edit auf denselben Temp-Pfad fragte
+// bislang trotzdem, reine Inkonsistenz zwischen den beiden Gates auf identisches Ziel.
 function pathUnsafe(p: string | undefined, cwd?: string): string | null {
   if (typeof p !== "string" || !p) return "kein Pfad angegeben";
   if (/(^|\/)\.(git|ssh|aws|gnupg)(\/|$)/.test(p)) return "geschützter Ordner";
   if (/(^|\/)(\.env(\.|$)|\.npmrc$|\.mcp\.json$|\.netrc$|id_rsa)/.test(p)) return "geschützte Datei";
   if (p.startsWith("/")) {
     if (cwd && (p === cwd || p.startsWith(cwd.endsWith("/") ? cwd : cwd + "/"))) return null;
+    if (TMP_ROOTS.some((r) => p.startsWith(r))) return null;
     return "Pfad außerhalb des Arbeitsverzeichnisses";
   }
   if (p.split("/").includes("..")) return "Pfad verlässt das Arbeitsverzeichnis (..)";

@@ -277,6 +277,9 @@ check("Edit ausserhalb cwd → ask", classifyToolCall("Edit", { file_path: "/etc
 check("Write .env → ask", classifyToolCall("Write", { file_path: "/repo/.env" }, { cwd: "/repo" }).decision === "ask");
 check("Edit .git → ask", classifyToolCall("Edit", { file_path: "/repo/.git/config" }, { cwd: "/repo" }).decision === "ask");
 check("Write .. escape → ask", classifyToolCall("Write", { file_path: "../outside.ts" }, { cwd: "/repo" }).decision === "ask");
+check("Write nach /tmp → allow (Temp, konsistent zu Bash)", classifyToolCall("Write", { file_path: "/tmp/x/y.cs" }, { cwd: "/repo" }).decision === "allow");
+check("Edit in /private/var/folders → allow (Temp)", classifyToolCall("Edit", { file_path: "/private/var/folders/ab/x.txt" }, { cwd: "/repo" }).decision === "allow");
+check("Write /tmpXYZ (kein Temp-Präfix) → ask", classifyToolCall("Write", { file_path: "/tmpXYZ/y.cs" }, { cwd: "/repo" }).decision === "ask");
 
 check("WebFetch bekannter Host → allow", classifyToolCall("WebFetch", { url: "https://docs.rs/foo" }).decision === "allow");
 check("WebFetch github → allow", classifyToolCall("WebFetch", { url: "https://raw.githubusercontent.com/a/b/main/x" }).decision === "allow");
