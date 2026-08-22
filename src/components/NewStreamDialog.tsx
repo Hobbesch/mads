@@ -3,7 +3,7 @@ import { useStore } from "../store";
 import type { AgentRole } from "../store";
 import type { PermissionMode, EffortMode } from "../../shared/protocol";
 import { ModelEffortPicker } from "./ModelEffortPicker";
-import { clampEffort, defaultEffortForRole } from "../modelCatalog";
+import { clampEffort, defaultEffortForRole, defaultModelForRole } from "../modelCatalog";
 import { loadNewStreamDraft, saveNewStreamDraft, clearNewStreamDraft, draftHasContent } from "../newStreamDraft";
 
 export function NewStreamDialog({ onClose }: { onClose: () => void }) {
@@ -20,13 +20,14 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const [prompt, setPrompt] = useState(draft?.prompt ?? "");
   const initialRole = draft?.role ?? (hasIntegrator ? "sub" : "integrator");
   const [role, setRole] = useState<AgentRole>(initialRole);
-  // Modell wird aus dem globalen Default (linke Navigation) vorbelegt, hier überschreibbar. Effort
-  // zusätzlich rollenbewusst: Sub-Agents starten mit "low" (Anthropics eigene Empfehlung für
-  // Subagents), der Integrator mit dem globalen Default — beides nur ein Vorschlag, im Picker
-  // direkt darunter frei änderbar.
-  const [model, setModel] = useState(draft?.model ?? defaultModel);
+  // Modell + Effort rollenbewusst vorbelegt, hier überschreibbar: Sub-Agents starten auf
+  // DEFAULT_SUB_MODEL ("opusplan") mit Effort "low" (Anthropics eigene Empfehlung für Subagents),
+  // der Integrator bleibt beim globalen Default (linke Navigation) — beides nur ein Vorschlag, im
+  // Picker direkt darunter frei änderbar.
+  const initialModel = draft?.model ?? defaultModelForRole(initialRole, defaultModel);
+  const [model, setModel] = useState(initialModel);
   const [effort, setEffort] = useState<EffortMode | undefined>(
-    draft?.effort ?? defaultEffortForRole(initialRole, defaultModel, defaultEffort),
+    draft?.effort ?? defaultEffortForRole(initialRole, initialModel, defaultEffort),
   );
   const [branch, setBranch] = useState(draft?.branch ?? "");
   const [mode, setMode] = useState<PermissionMode>(draft?.mode ?? "auto");
@@ -41,9 +42,10 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
     setPrompt("");
     setBranch("");
     const r = hasIntegrator ? "sub" : "integrator";
+    const m = defaultModelForRole(r, defaultModel);
     setRole(r);
-    setModel(defaultModel);
-    setEffort(defaultEffortForRole(r, defaultModel, defaultEffort));
+    setModel(m);
+    setEffort(defaultEffortForRole(r, m, defaultEffort));
     setMode("auto");
     clearNewStreamDraft();
     setShowRestored(false);
@@ -136,9 +138,11 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
             value={role}
             onChange={(e) => {
               const r = e.target.value as AgentRole;
+              // Vorschlag neu ausrichten (Sub-Agent → opusplan/low), bleibt weiterhin frei überschreibbar.
+              const m = defaultModelForRole(r, defaultModel);
               setRole(r);
-              // Vorschlag neu ausrichten (Sub-Agent → "low"), bleibt weiterhin frei überschreibbar.
-              setEffort(defaultEffortForRole(r, model, defaultEffort));
+              setModel(m);
+              setEffort(defaultEffortForRole(r, m, defaultEffort));
             }}
           >
             <option value="integrator" disabled={hasIntegrator}>

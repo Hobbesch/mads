@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { DEFAULT_MODEL } from "../../shared/protocol.js";
+import { DEFAULT_MODEL, DEFAULT_SUB_MODEL } from "../../shared/protocol.js";
 import type {
   StartAgentMsg,
   PermissionDecision,
@@ -320,8 +320,11 @@ export class AgentSession {
     this.role = msg.role;
     // PRÄVENTION (Doppel-Check, Schicht 1): NIE undefined ans SDK — sonst wählt es sein Flaggschiff
     // (Fable 5) und verbrennt teure Tokens „blind". Ein verlorenes Modell beim Resume (msg.model
-    // undefined) fällt hier auf den Default (Opus) zurück, statt still auf Fable zu laufen.
-    this.model = msg.model || DEFAULT_MODEL;
+    // undefined) fällt hier rollenbewusst zurück: Integrator auf DEFAULT_MODEL (Opus), Sub-Agent auf
+    // DEFAULT_SUB_MODEL (opusplan — Sonnet-Kosten in der Ausführung, Opus nur beim tatsächlichen
+    // Planen) statt still auf Fable ODER unnötig teuer auf Opus zu laufen. Deckt auch den
+    // programmatischen Auslagern-Flow ab (outsource_main), der keinen Model-Picker durchläuft.
+    this.model = msg.model || (msg.role === "sub" ? DEFAULT_SUB_MODEL : DEFAULT_MODEL);
     this.effort = msg.effort;
     // Die automatische „Setze die Arbeit fort"-Anweisung beim Resume ist KEIN Nutzer-Auftrag: sie darf
     // den zuletzt gemerkten (ggf. via Orchestrator aus der Registry vorgeladenen) Auftrag nicht
@@ -775,7 +778,13 @@ export class AgentSession {
     const norm = normalizeModelId(actual);
     if (norm === this.activeModel) return; // nur bei echter Änderung — drosselt den Emit
     this.activeModel = norm;
-    const mismatch = !!this.model && norm !== normalizeModelId(this.model);
+    // "opusplan" (Claude-Code-eigener Alias) lässt die Session ABSICHTLICH zwischen Opus (Plan
+    // Mode) und Sonnet (Ausführung) wechseln — reale ID gleicht nie dem angeforderten String
+    // "opusplan" selbst. Das ist kein Mismatch, sondern die Funktion des Alias; nur eine Abweichung
+    // AUSSERHALB dieser beiden Familien (z. B. stiller Fallback auf Haiku) zählt hier als echter.
+    const mismatch =
+      !!this.model &&
+      (this.model === "opusplan" ? !/opus|sonnet/.test(norm) : norm !== normalizeModelId(this.model));
     this.emit({ ...envelope(), type: "model_active", agentId: this.agentId, active: norm, requested: this.model, mismatch });
     if (mismatch) {
       // Je konkretem Fehl-Modell EINMAL warnen+nachziehen; driftet der SDK auf ein ANDERES falsches

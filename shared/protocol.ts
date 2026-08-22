@@ -177,6 +177,16 @@ export interface ReviewStreamMsg extends BaseMsg {
 export const DEFAULT_MODEL = "claude-opus-5";
 
 /**
+ * Standard-Modell für SUB-Agents (role "sub") — dieselbe Coercion-Stelle wie DEFAULT_MODEL, nur
+ * rollenbewusst. "opusplan" ist Claude Codes eigener Alias: Opus fürs Planen (nur wenn die Session
+ * tatsächlich in Plan Mode läuft), automatischer Wechsel zu Sonnet für die Ausführung — im
+ * Ausführungs-Regelfall also Sonnet-Kosten, ohne bei tatsächlich komplexen Teilaufgaben auf
+ * Opus-Qualität beim Planen zu verzichten. Strikt nie teurer als durchgehendes Sonnet, potenziell
+ * besser bei Aufgaben, die den Agenten selbst planen lassen. Der Integrator bleibt bei DEFAULT_MODEL.
+ */
+export const DEFAULT_SUB_MODEL = "opusplan";
+
+/**
  * Doppel-Check gegen „blindes Fahren auf dem falschen Modell": Der Sidecar liest aus JEDER
  * Assistant-/Init-Nachricht das TATSÄCHLICH gelaufene Modell und meldet es hier. `mismatch=true`
  * heißt: der SDK lief auf einem anderen Modell als angefordert (z. B. Fable statt Opus) — der Sidecar

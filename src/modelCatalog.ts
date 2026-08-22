@@ -8,7 +8,7 @@
  * „Ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung (SDK-Session-Flag `ultracode`).
  */
 import type { EffortMode } from "../shared/protocol";
-import { DEFAULT_MODEL as SHARED_DEFAULT_MODEL } from "../shared/protocol";
+import { DEFAULT_MODEL as SHARED_DEFAULT_MODEL, DEFAULT_SUB_MODEL as SHARED_DEFAULT_SUB_MODEL } from "../shared/protocol";
 
 export interface ModelOption {
   id: string;
@@ -25,6 +25,16 @@ const FULL: EffortMode[] = ["low", "medium", "high", "xhigh", "ultracode"];
 export const MODELS: ModelOption[] = [
   { id: "claude-fable-5", label: "Fable 5", hint: "Anthropics fähigstes Modell — anspruchsvollste, lang laufende Agenten-Arbeit (teuerste Stufe: $10/$50 pro Mio.)", effort: FULL },
   { id: "claude-opus-5", label: "Opus 5", hint: "Stärkster fürs agentische Coding — Standard/Empfehlung für den Integrator; halb so teuer wie Fable 5 ($5/$25)", effort: FULL },
+  {
+    id: "opusplan",
+    label: "Opus+Plan",
+    hint:
+      "Offizieller Claude-Code-Alias: Opus fürs Planen, automatischer Wechsel zu Sonnet für die Ausführung — " +
+      "kostet wie Opus 5 waehrend des Planens, wie Sonnet 5 waehrend des Umsetzens. Der Opus-Anteil greift nur, " +
+      "wenn die Session tatsächlich in Plan Mode läuft (Permission-Modus „Plan\" oder wenn der Agent selbst " +
+      "planend vorgeht) — bei durchgehend direkter Ausführung entspricht es schlicht Sonnet 5.",
+    effort: FULL,
+  },
   { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Vorgänger-Opus (gleicher Preis wie Opus 5)", effort: FULL },
   { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Nahe Opus bei Coding/Agentik, ~40 % günstiger ($3/$15) — bestes Preis/Leistung für Sub-Agents", effort: FULL },
   { id: "claude-sonnet-4-6", label: "Sonnet 4.6", hint: "Vorgänger-Sonnet (kein xhigh/Ultracode)", effort: ["low", "medium", "high"] },
@@ -52,6 +62,9 @@ export const DEFAULT_EFFORT: EffortMode = "high";
 /** Standard-Modell für neue Streams (Integrator-Default nach CLAUDE.md). Single Source in
  *  shared/protocol.ts — dieselbe Konstante, die der Sidecar zur undefined-Coercion nutzt. */
 export const DEFAULT_MODEL = SHARED_DEFAULT_MODEL;
+/** Standard-Modell für SUB-Agents ("opusplan" — Sonnet-Kosten in der Ausführung, Opus nur beim
+ *  tatsächlichen Planen). Single Source in shared/protocol.ts, siehe defaultModelForRole(). */
+export const DEFAULT_SUB_MODEL = SHARED_DEFAULT_SUB_MODEL;
 
 export function modelLabel(id: string | undefined): string {
   if (!id) return "?";
@@ -74,8 +87,18 @@ export function clampEffort(modelId: string | undefined, effort: EffortMode | un
 }
 
 /**
- * Vorbelegung für einen NEUEN Stream, rollenbewusst statt einem einzigen globalen Default für
- * Integrator UND Sub-Agent gleichermaßen: Anthropics eigene Empfehlung ist "low" für Subagents
+ * Modell-Vorbelegung für einen NEUEN Stream, rollenbewusst statt einem einzigen globalen Default
+ * für Integrator UND Sub-Agent gleichermaßen: Sub-Agents starten auf DEFAULT_SUB_MODEL
+ * ("opusplan" — nie teurer als durchgehendes Sonnet, potenziell besser bei Aufgaben, die den
+ * Agenten selbst planen lassen). Der Integrator behält den bisherigen globalen Default (typischerweise
+ * Opus 5). Reiner Vorschlag — im Dialog direkt darunter frei überschreibbar.
+ */
+export function defaultModelForRole(role: "integrator" | "sub", fallback: string): string {
+  return role === "sub" ? DEFAULT_SUB_MODEL : fallback;
+}
+
+/**
+ * Effort-Vorbelegung, analog rollenbewusst: Anthropics eigene Empfehlung ist "low" für Subagents
  * (steuert Text/Tool-Calls/Thinking zusammen, invalidiert bei Änderung aber den Prompt-Cache-Präfix
  * — deshalb hier nur die STARTBELEGUNG, keine Live-Umschaltung während der Session). Der Integrator
  * behält den bisherigen globalen Default (typischerweise "high", CLAUDE.md-Empfehlung). Bleibt in
