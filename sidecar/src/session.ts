@@ -829,6 +829,23 @@ export class AgentSession {
               // parent_tool_use_id — die darf das Stream-Modell NICHT als „Haiku" fehlmelden.
               if (isMainLoop(m)) this.reconcileActiveModel(m.model as string | undefined);
               this.onChange?.();
+            } else if (m.subtype === "status" && m.status === "compacting") {
+              // Client-seitiges Auto-Compact (SDK, ~95% Kontextfüllung) lief bisher komplett still
+              // durch — der Sidecar bekam den Status zwar zugestellt, ignorierte ihn aber (default-
+              // Zweig unten). Sichtbar machen kostet nichts: derselbe Mechanismus wie für Tool-Namen.
+              this.setStatus("running", "Kontext wird komprimiert…");
+            } else if (m.subtype === "status" && m.compact_result === "failed") {
+              // Fehlgeschlagene Kompaktierung darf nicht stillschweigend untergehen — die Session
+              // läuft mit vollem (oder wachsendem) Kontext weiter, ohne dass wer davon erfährt.
+              this.emit({
+                ...envelope(),
+                type: "error",
+                agentId: this.agentId,
+                scope: "agent",
+                code: "compact_failed",
+                message: `Kontext-Komprimierung fehlgeschlagen: ${String(m.compact_error ?? "unbekannter Fehler")}`,
+                recoverable: true,
+              });
             }
             break;
           case "assistant": {
