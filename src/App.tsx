@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -26,6 +26,19 @@ export default function App() {
   const init = useStore((s) => s.init);
   const escalations = useStore((s) => s.escalations);
   const agents = useStore((s) => s.agents);
+  // Laufende Summe über alle Streams dieser Session — macht Effort-/Modell-Sparmaßnahmen sichtbar,
+  // statt nur pro Stream einzeln in AgentGrid/Inspector zu stehen. Reine API-Schätzung (siehe dort).
+  const sessionCost = useMemo(() => {
+    const list = Object.values(agents);
+    return list.reduce(
+      (acc, a) => ({
+        usd: acc.usd + (a.costUsd || 0),
+        input: acc.input + (a.inputTokens || 0),
+        output: acc.output + (a.outputTokens || 0),
+      }),
+      { usd: 0, input: 0, output: 0 },
+    );
+  }, [agents]);
   const sidecar = useStore((s) => s.sidecar);
   const project = useStore((s) => s.project);
   const projectLocked = useStore((s) => s.projectLocked);
@@ -280,6 +293,14 @@ export default function App() {
                 title={`Sidecar läuft auf Commit ${sidecar.buildCommit}, älter als main. npm run sidecar:build + mads neu starten.`}
               >
                 Sidecar veraltet
+              </span>
+            )}
+            {sessionCost.usd > 0 && (
+              <span
+                className="pill cost"
+                title={`↑ ${sessionCost.input.toLocaleString()} Input · ↓ ${sessionCost.output.toLocaleString()} Output Tokens über alle Streams dieser Session — API-Schätzung, bei Abo nicht abgerechnet`}
+              >
+                Σ ${sessionCost.usd.toFixed(2)}
               </span>
             )}
             {project && (

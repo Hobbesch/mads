@@ -72,3 +72,20 @@ export function clampEffort(modelId: string | undefined, effort: EffortMode | un
   if (effort && DEFAULT_EFFORT && levels.includes(DEFAULT_EFFORT)) return DEFAULT_EFFORT;
   return levels[levels.length - 1];
 }
+
+/**
+ * Vorbelegung für einen NEUEN Stream, rollenbewusst statt einem einzigen globalen Default für
+ * Integrator UND Sub-Agent gleichermaßen: Anthropics eigene Empfehlung ist "low" für Subagents
+ * (steuert Text/Tool-Calls/Thinking zusammen, invalidiert bei Änderung aber den Prompt-Cache-Präfix
+ * — deshalb hier nur die STARTBELEGUNG, keine Live-Umschaltung während der Session). Der Integrator
+ * behält den bisherigen globalen Default (typischerweise "high", CLAUDE.md-Empfehlung). Bleibt in
+ * beiden Fällen ein reiner Vorschlag — im Dialog direkt darunter frei überschreibbar.
+ */
+export function defaultEffortForRole(
+  role: "integrator" | "sub",
+  modelId: string | undefined,
+  fallback: EffortMode | undefined,
+): EffortMode | undefined {
+  if (role === "sub") return clampEffort(modelId, "low");
+  return clampEffort(modelId, fallback);
+}
