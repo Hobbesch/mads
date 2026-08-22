@@ -586,6 +586,11 @@ export interface SidecarReadyMsg extends BaseMsg {
   sdkVersion: string;
   sdkAvailable: boolean;
   resumableAgents: Array<{ agentId: string; sessionId: string; branch?: string }>;
+  /** Kurzer Git-Commit, mit dem dist/index.js gebaut wurde (sidecar/scripts/build.mjs stempelt ihn ein). */
+  buildCommit: string;
+  /** true, wenn buildCommit vom aktuellen Repo-HEAD abweicht — der laufende Sidecar ist älter als main
+   *  (z. B. Fix gemergt, aber `npm run sidecar:build` + Neustart vergessen). */
+  buildStale: boolean;
 }
 
 export type AgentEvent =

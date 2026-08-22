@@ -274,6 +274,14 @@ export default function App() {
                   : "Mock-Modus"
                 : sidecar.status}
             </span>
+            {sidecar.status === "ready" && sidecar.buildStale && (
+              <span
+                className="pill stale"
+                title={`Sidecar läuft auf Commit ${sidecar.buildCommit}, älter als main. npm run sidecar:build + mads neu starten.`}
+              >
+                Sidecar veraltet
+              </span>
+            )}
             {project && (
               <>
                 <button

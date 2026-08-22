@@ -183,6 +183,10 @@ export interface SidecarInfo {
   status: "down" | "starting" | "ready" | "error";
   sdkAvailable: boolean;
   sdkVersion?: string;
+  /** true, wenn der laufende Sidecar-Build älter ist als der aktuelle Repo-HEAD (siehe sidecar_ready). */
+  buildStale?: boolean;
+  /** Kurzer Git-Commit, mit dem der laufende Sidecar gebaut wurde. */
+  buildCommit?: string;
 }
 
 // ── Change-Overview (docs/design/09-change-overview.md §3.2) ──
@@ -712,7 +716,15 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "sidecar_ready": {
-        set({ sidecar: { status: "ready", sdkAvailable: msg.sdkAvailable, sdkVersion: msg.sdkVersion } });
+        set({
+          sidecar: {
+            status: "ready",
+            sdkAvailable: msg.sdkAvailable,
+            sdkVersion: msg.sdkVersion,
+            buildStale: msg.buildStale,
+            buildCommit: msg.buildCommit,
+          },
+        });
         // Beim Start das zuletzt geöffnete Projekt automatisch wiederöffnen, damit man
         // nach App-Neustart/Release nicht jedes Mal neu suchen muss.
         const st = useStore.getState();
