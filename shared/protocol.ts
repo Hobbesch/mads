@@ -713,6 +713,13 @@ export interface StatusUpdateMsg extends BaseMsg {
   /** Menschlicher Stream-Name + Rolle — für Remote-Clients (iOS zeigt sonst nur die UUID). */
   label?: string;
   role?: "integrator" | "sub";
+  /**
+   * Claude-Konto, unter dem dieser Stream WIRKLICH läuft (Profil-ID). Der Sidecar startet den
+   * Prozess und besitzt damit die Wahrheit — die Oberfläche spiegelt sie nur. Ohne diese
+   * Bestätigung konnte eine Kachel dauerhaft ein anderes Konto anzeigen als das laufende
+   * (`CLAUDE_CONFIG_DIR` steht nach dem Spawn fest), ohne dass es je auffiel.
+   */
+  accountId?: string;
 }
 
 export interface CostUpdateMsg extends BaseMsg {

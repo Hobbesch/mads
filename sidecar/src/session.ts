@@ -1325,7 +1325,10 @@ export class AgentSession {
   }
   private setStatus(status: AgentStatus, currentStep?: string): void {
     this.status = status;
-    this.emit({ ...envelope(), type: "status_update", agentId: this.agentId, status, currentStep, label: this.label, role: this.role });
+    // `accountId` mitschicken: der Sidecar hat den Prozess gestartet und kennt das reale Konto,
+    // die Oberfläche kann es nur raten. Damit heilt jede Abweichung von selbst, statt bis zum
+    // nächsten Kontingent-Anschlag unbemerkt zu bleiben.
+    this.emit({ ...envelope(), type: "status_update", agentId: this.agentId, status, currentStep, label: this.label, role: this.role, accountId: this.accountId });
     this.onChange?.();
   }
   private fail(code: string, message: string, recoverable: boolean): void {

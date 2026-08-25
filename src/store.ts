@@ -810,10 +810,14 @@ export const useStore = create<MadsState>((set) => {
           // Terminaler Status (fertig/Fehler) → keine Teil-Agenten mehr aktiv (fängt den Rand-Fall ab,
           // dass ein Stream endet, während ein Sub-Agent noch als „laufend" gemerkt war).
           const subAgents = msg.status === "done" || msg.status === "error" ? undefined : a.subAgents;
+          // Konto: der Sidecar meldet das REAL laufende (er hat den Prozess gestartet) — es gewinnt
+          // immer gegen den lokalen Stand. Eine optimistisch gesetzte Auswahl, die im Sidecar gar
+          // nicht angekommen ist, wird hier also wieder eingefangen statt still weiterzuleben.
+          const accountId = msg.accountId ?? a.accountId;
           return {
             agents: {
               ...s.agents,
-              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now(), subAgents },
+              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now(), subAgents, accountId },
             },
           };
         });
@@ -992,6 +996,11 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "rate_limit_notice": {
+        // Diese Meldung nennt das Konto, unter dem der Stream WIRKLICH läuft (der Sidecar liest sie
+        // aus dem laufenden Prozess). Sie ist damit dieselbe Grundwahrheit wie in status_update —
+        // hier sofort nachziehen, damit die Meldung „Kontingent von X erreicht" nie neben einer
+        // Kopfzeile steht, die ein anderes Konto behauptet.
+        patchAgent(msg.agentId, { accountId: msg.accountId });
         // Fallback-Anreicherung: das Ereignis nennt genau EIN Fenster. Die vollständige Aufteilung
         // liefert `account_usage` — hier wird nur das genannte Fenster nachgezogen, falls die
         // Usage-Abfrage (EXPERIMENTAL) auf diesem Rechner nicht verfügbar sein sollte.
