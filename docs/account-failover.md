@@ -44,6 +44,24 @@ Robustheit trotzdem eingebaut:
   Limit doch anders ankommt als über `rate_limit_event`, steht es damit im Log.
 * Wiederholte Events desselben Fensters werden entprellt (`lastRateLimitKey`).
 
+## Wo man den Verbrauch sieht
+
+Im Kopf des Streams, in der Auswahl **KONTO**:
+
+* Laufend: `power-blox — 62% verbraucht` (aus `utilization` des jeweils letzten `rate_limit_event`,
+  auch bei `status: "allowed"`).
+* Bei Vorwarnung/Anschlag zusätzlich eine Meldung im Verlauf mit Reset-Uhrzeit und, falls ein Konto
+  frei ist, dem Hinweis aufs Umschalten.
+* Im Cooldown ersetzt `— Limit bis 15:40` die Prozentanzeige.
+
+Der Verbrauch liegt **nur im Speicher** (`store.accountUsage`), nicht in der Registry: es ist eine
+Momentaufnahme, die nach einem Neustart ohnehin veraltet wäre, und `accounts.json` soll nicht bei
+jedem Prozentpunkt neu geschrieben werden.
+
+Sichtbar wird der Wert erst, **nachdem** ein Stream mindestens einen Turn auf dem Konto gelaufen
+ist — vorher hat das SDK noch nichts gemeldet. Für ein Konto, das gerade nicht benutzt wird, gibt
+es folglich keine Anzeige; es gibt keine Abfrage des Kontingents ohne laufende Sitzung.
+
 ## Registry: `~/.mads/accounts.json`
 
 Bewusst **benutzerweit**, nicht projektlokal wie der übrige Sidecar-State: Kontingente gelten pro

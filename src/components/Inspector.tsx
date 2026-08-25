@@ -65,6 +65,7 @@ export function Inspector() {
   const setStreamEffort = useStore((s) => s.setStreamEffort);
   const setStreamAccount = useStore((s) => s.setStreamAccount);
   const accounts = useStore((s) => s.accounts);
+  const accountUsage = useStore((s) => s.accountUsage);
   const defaultModel = useStore((s) => s.defaultModel);
   // Composer-Entwürfe je Agent (im Store) — beim Umschalten bleibt jeder Entwurf erhalten.
   const draft = useStore((s) => (s.selectedId ? s.drafts[s.selectedId] ?? "" : ""));
@@ -400,10 +401,19 @@ export function Inspector() {
                   const cd = accounts.cooldowns[p.id];
                   const blocked = !!cd && cd.rejected && cd.until > Date.now();
                   const until = cd ? new Date(cd.until).toLocaleTimeString("de-CH", { hour: "2-digit", minute: "2-digit" }) : "";
+                  // Laufender Verbrauch, sobald das SDK ihn für dieses Konto gemeldet hat. Erst damit
+                  // sieht man das Limit KOMMEN statt es erst beim Anschlag zu bemerken.
+                  const use = accountUsage[p.id];
+                  const pct = use?.utilization !== undefined ? Math.round(use.utilization * 100) : undefined;
+                  const suffix = blocked
+                    ? ` — Limit bis ${until}`
+                    : pct !== undefined
+                      ? ` — ${pct}% verbraucht`
+                      : "";
                   return (
                     <option key={p.id} value={p.id} title={p.email ?? p.configDir}>
                       {p.label}
-                      {blocked ? ` — Limit bis ${until}` : ""}
+                      {suffix}
                     </option>
                   );
                 })}

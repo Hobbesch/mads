@@ -355,6 +355,9 @@ export interface MadsState {
   /** Claude-Konten + Cooldowns. Quelle ist der Sidecar (`accounts_update`) — hier nur gespiegelt.
    *  undefined = noch nicht geladen (dann bleibt die Konto-Auswahl schlicht unsichtbar). */
   accounts?: AccountsState;
+  /** Laufender Kontingent-Verbrauch je Konto (aus `rate_limit_notice`). Bewusst NUR im Speicher:
+   *  eine Momentaufnahme, die nach einem Neustart ohnehin veraltet wäre. */
+  accountUsage: Record<string, { utilization?: number; resetsAt?: number; window?: string; at: number }>;
   /** Change-Overview-Overlay an/aus (Owner: doc 09). Der Rail-„Änderungen"-Eintrag toggelt es (§2.3). */
   changeOverviewOn: boolean;
   /** Live-Diff-Quelle: Datei-Edits je Stream×Datei (doc 09 §3.2). Key: `${agentId}::${path}`. */
@@ -966,6 +969,24 @@ export const useStore = create<MadsState>((set) => {
         break;
 
       case "rate_limit_notice": {
+        // Verbrauchsstand IMMER mitschreiben — auch bei status "allowed". Das ist die Grundlage der
+        // laufenden Anzeige im Konto-Menü: ohne sie sähe man erst beim Anschlag etwas, und genau
+        // dann ist es für ein geordnetes Umschalten zu spät.
+        if (msg.utilization !== undefined || msg.resetsAt !== undefined) {
+          set((s) => ({
+            accountUsage: {
+              ...s.accountUsage,
+              [msg.accountId]: {
+                utilization: msg.utilization,
+                resetsAt: msg.resetsAt,
+                window: msg.window,
+                at: Date.now(),
+              },
+            },
+          }));
+        }
+        if (msg.status === "allowed") break; // reine Verbrauchsanzeige → keine Meldung im Verlauf
+
         // Kontingent erreicht oder Vorwarnung. mads wechselt bewusst NICHT von selbst — der Wechsel
         // startet den Claude-Prozess neu und bleibt eine menschliche Entscheidung.
         const state = useStore.getState();
@@ -1220,6 +1241,7 @@ export const useStore = create<MadsState>((set) => {
     railCollapsed: loadUiPrefs().railCollapsed,
     defaultModel: loadUiPrefs().defaultModel,
     defaultEffort: loadUiPrefs().defaultEffort,
+    accountUsage: {},
     changeOverviewOn: false,
     editsByFile: {},
 

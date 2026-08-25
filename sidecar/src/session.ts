@@ -1033,32 +1033,38 @@ export class AgentSession {
   private onRateLimit(info: Record<string, unknown> | undefined): void {
     if (!info) return;
     const status = typeof info.status === "string" ? info.status : "";
-    if (status !== "rejected" && status !== "allowed_warning") return; // "allowed" = nichts zu melden
+    if (status !== "rejected" && status !== "allowed_warning" && status !== "allowed") return;
 
     const rejected = status === "rejected";
     const resetsAt = toEpochMs(info.resetsAt);
     const window = typeof info.rateLimitType === "string" ? info.rateLimitType : undefined;
     const utilization = typeof info.utilization === "number" ? info.utilization : undefined;
 
-    // Nicht bei jedem Event neu schreiben: sonst flutet eine Vorwarnung Registry und Timeline.
-    const key = `${status}:${window ?? ""}:${resetsAt ?? 0}`;
+    // Entprellen. Die Auslastung MIT in den Schlüssel (auf Prozentpunkte gerundet): sonst käme bei
+    // "allowed" nur das allererste Event durch und die Verbrauchsanzeige bliebe für immer stehen.
+    const pct = utilization === undefined ? -1 : Math.round(utilization * 100);
+    const key = `${status}:${window ?? ""}:${resetsAt ?? 0}:${pct}`;
     if (this.lastRateLimitKey === key) return;
     this.lastRateLimitKey = key;
 
     log(
-      `[${this.agentId}] Kontingent-Meldung: status=${status} fenster=${window ?? "?"} ` +
-        `reset=${resetsAt ? new Date(resetsAt).toISOString() : "?"} auslastung=${utilization ?? "?"}`,
+      `[${this.agentId}] Kontingent: status=${status} fenster=${window ?? "?"} ` +
+        `reset=${resetsAt ? new Date(resetsAt).toISOString() : "?"} auslastung=${pct >= 0 ? `${pct}%` : "?"}`,
     );
 
     let suggestId: string | undefined;
-    try {
-      const state = loadAccounts();
-      if (rejected && resetsAt) {
-        saveAccounts(withCooldown(state, this.accountId, { until: resetsAt, window, rejected, utilization }));
+    if (status !== "allowed") {
+      // Nur bei Vorwarnung/Abweisung an die Registry: eine reine Verbrauchsanzeige soll die
+      // Datei nicht bei jedem Prozentpunkt neu schreiben.
+      try {
+        const state = loadAccounts();
+        if (rejected && resetsAt) {
+          saveAccounts(withCooldown(state, this.accountId, { until: resetsAt, window, rejected, utilization }));
+        }
+        suggestId = pickFallback(loadAccounts(), this.accountId)?.id;
+      } catch (e) {
+        log(`[${this.agentId}] Cooldown konnte nicht gespeichert werden: ${String(e)}`);
       }
-      suggestId = pickFallback(loadAccounts(), this.accountId)?.id;
-    } catch (e) {
-      log(`[${this.agentId}] Cooldown konnte nicht gespeichert werden: ${String(e)}`);
     }
 
     this.emit({
@@ -1066,13 +1072,14 @@ export class AgentSession {
       type: "rate_limit_notice",
       agentId: this.agentId,
       accountId: this.accountId,
+      status,
       rejected,
       resetsAt,
       window,
       utilization,
       suggestId,
     });
-    this.onChange?.(); // Registry-Änderung sichtbar machen
+    if (status !== "allowed") this.onChange?.(); // Registry-Änderung sichtbar machen
   }
 
   // ---------------------------- Mock-Modus ----------------------------------

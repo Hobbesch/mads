@@ -908,10 +908,13 @@ export interface RateLimitNoticeMsg extends BaseMsg {
   type: "rate_limit_notice";
   agentId: string;
   accountId: string;
-  /** true = Anfrage wurde abgewiesen (Limit erreicht); false = Vorwarnung, läuft noch. */
+  /** Vom SDK gemeldeter Stand. "allowed" = reine Verbrauchsanzeige, keine Meldung im Verlauf. */
+  status: "allowed" | "allowed_warning" | "rejected";
+  /** true = Anfrage wurde abgewiesen (Limit erreicht); false = läuft noch. */
   rejected: boolean;
   resetsAt?: number;
   window?: string;
+  /** Auslastung 0..1 des genannten Fensters — Grundlage der laufenden Verbrauchsanzeige. */
   utilization?: number;
   /** ID eines verfügbaren Ausweich-Kontos, falls vorhanden → die UI kann den Wechsel anbieten. */
   suggestId?: string;
