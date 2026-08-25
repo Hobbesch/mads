@@ -53,7 +53,14 @@ const DEF = "/Users/x/.claude";
 const ALT = "/Users/x/.claude-zweit";
 
 const std = accountAgentEnv(DEF, DEF, base);
-check("Standard-Konto: CLAUDE_CONFIG_DIR gesetzt", std.env.CLAUDE_CONFIG_DIR === DEF);
+// Regressionsschutz: `CLAUDE_CONFIG_DIR=~/.claude` zu SETZEN bricht die Anmeldung des
+// Standardkontos ("Not logged in") — Claude Code sucht dann einen abgeleiteten
+// Schlüsselbund-Eintrag, den es dafür nicht gibt. Die Variable muss FEHLEN.
+check("Standard-Konto: CLAUDE_CONFIG_DIR ist NICHT gesetzt", !("CLAUDE_CONFIG_DIR" in std.env));
+check(
+  "Standard-Konto: geerbtes CLAUDE_CONFIG_DIR wird entfernt (deterministisch)",
+  !("CLAUDE_CONFIG_DIR" in accountAgentEnv(DEF, DEF, { ...base, CLAUDE_CONFIG_DIR: ALT }).env),
+);
 check(
   "Standard-Konto: Auth-Übersteuerer BLEIBEN (bestehende API-Key-Anmeldung darf nicht brechen)",
   std.env.ANTHROPIC_API_KEY === "sk-ant-keep" && std.env.CLAUDE_CODE_OAUTH_TOKEN === "oauth-keep",

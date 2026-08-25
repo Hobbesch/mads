@@ -93,6 +93,23 @@ anderen Ordner und wäre für Agenten-Bash lesbar geblieben — ausgerechnet das
 ungeschützt. `sandboxDenyReadPaths()` deckt jetzt alle Konto-Verzeichnisse ab (fail-closed, wenn
 die Registry unlesbar ist).
 
+## Falle: das Standardkonto braucht die Variable ABWESEND
+
+`CLAUDE_CONFIG_DIR` auf `~/.claude` zu **setzen** ist nicht dasselbe wie es **wegzulassen**.
+Claude Code leitet den Schlüsselbund-Eintrag unterschiedlich ab, sobald die Variable gesetzt ist —
+und sucht dann einen Eintrag, den es für das Standardkonto gar nicht gibt. Verifiziert mit
+`claude auth status`:
+
+| `CLAUDE_CONFIG_DIR` | `loggedIn` |
+|---|---|
+| nicht gesetzt | `true` (power-blox) |
+| `~/.claude` | **`false`** — „Not logged in · Please run /login" |
+| `~/.claude-medici` | `true` (medici) |
+
+`accountAgentEnv()` **löscht** die Variable deshalb für das Standardkonto, statt sie zu setzen
+(Löschen statt Weglassen: so wirkt auch eine vom Sidecar geerbte Variable nicht hinein).
+Der Regressionstest dazu steht in `agentEnv.test.ts`.
+
 ## Auth-Übersteuerer
 
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` haben Vorrang vor dem
