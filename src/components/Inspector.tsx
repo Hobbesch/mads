@@ -393,11 +393,22 @@ export function Inspector() {
               title="Claude-Konto NUR für diesen Stream. Beim Wechsel wird der Prozess im anderen Konto neu gestartet und dasselbe Gespräch fortgesetzt."
             >
               <span className="insp-me-label">Konto</span>
+              {/* KEIN Fallback auf `accounts.activeId`: das ist das Standardkonto für NEUE Streams
+                  und sagt nichts darüber, unter welchem Konto DIESER Prozess gestartet wurde. Der
+                  Fallback behauptete ein Konto, das der Stream gar nicht benutzte — samt dessen
+                  beruhigendem Verbrauchsbalken, während das echte Konto an sein Limit lief.
+                  Unbekannt heißt jetzt unbekannt; der Sidecar bestätigt das reale Konto mit dem
+                  nächsten status_update, dann steht es hier von selbst richtig. */}
               <select
                 className="mode-select"
-                value={agent.accountId ?? accounts.activeId}
+                value={agent.accountId ?? ""}
                 onChange={(e) => void setStreamAccount(selectedId, e.target.value)}
               >
+                {agent.accountId === undefined && (
+                  <option value="" disabled>
+                    — noch unbekannt
+                  </option>
+                )}
                 {accounts.profiles.map((p) => {
                   const cd = accounts.cooldowns[p.id];
                   const blocked = !!cd && cd.rejected && cd.until > Date.now();
@@ -424,7 +435,7 @@ export function Inspector() {
                 })}
               </select>
               {/* Plan-Nutzungslimits des gewählten Kontos — 5-Stunden- und Wochenfenster als Balken. */}
-              <UsageMeter usage={accountUsage[agent.accountId ?? accounts.activeId]} />
+              <UsageMeter usage={agent.accountId ? accountUsage[agent.accountId] : undefined} />
             </div>
           )}
           {/* Doppel-Check: läuft der Stream real auf einem ANDEREN Modell als angefordert (stiller

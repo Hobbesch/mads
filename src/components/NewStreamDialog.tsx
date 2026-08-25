@@ -86,7 +86,10 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
       branch: branch.trim() || undefined,
       permissionMode: mode,
       images: images.length ? images : undefined,
-      accountId: account || undefined,
+      // Dasselbe wie im Auswahlfeld angezeigt (dort `account || accounts.activeId`) — nicht
+      // `account || undefined`: das überliess die Wahl still dem Sidecar, obwohl das Feld bereits
+      // ein konkretes Konto behauptete.
+      accountId: account || accounts?.activeId,
     });
     clearNewStreamDraft(); // Entwurf verbraucht → aufräumen
     onClose();
@@ -220,8 +223,10 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
         {accounts && accounts.profiles.length > 1 && (
           <label className="field">
             <span>Claude-Konto</span>
-            {/* `account` bleibt leer, wenn die Registry beim Öffnen noch nicht geladen war —
-                dann zeigt (und sendet) der Dialog den aktuellen Default. */}
+            {/* `account` bleibt leer, wenn die Registry beim Öffnen noch nicht geladen war — dann
+                gilt der aktuelle Default. Wichtig: GENAU dieser Wert geht auch ab (siehe
+                handleSubmit). Anzeige und gesendeter Wert dürfen nie auseinanderlaufen, sonst
+                behauptet der Dialog ein Konto und der Stream startet auf einem anderen. */}
             <select value={account || accounts.activeId} onChange={(e) => setAccount(e.target.value)}>
               {accounts.profiles.map((p) => {
                 const cd = accounts.cooldowns[p.id];
