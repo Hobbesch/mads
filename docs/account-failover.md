@@ -50,8 +50,8 @@ Gegen die echten Konten gemessen (minimaler Haiku-Turn, Usage-API abgefragt):
 
 | Konto | `five_hour` | `seven_day` |
 |---|---|---|
-| power-blox | 11 % (Reset 11:59) | **100 %** (Reset Mi. 15:59) |
-| medici | 2 % | 0 % |
+| Konto A | 11 % (Reset 11:59) | **100 %** (Reset Mi. 15:59) |
+| Konto B | 2 % | 0 % |
 
 Deckungsgleich mit den „Plan-Nutzungslimits" in den Claude-Apps.
 
@@ -75,7 +75,7 @@ Der Wert erscheint deshalb, sobald ein Stream auf dem Konto seinen ersten Turn b
 
 Im Kopf des Streams, in der Auswahl **KONTO**:
 
-* Laufend: `power-blox — 100% verbraucht` (schlimmstes der Fenster) plus Balken fuer 5 Std. und Woche,
+* Laufend: `Konto A — 100% verbraucht` (schlimmstes der Fenster) plus Balken fuer 5 Std. und Woche,
   gespeist aus der Usage-Abfrage nach jedem Turn.
 * Bei Vorwarnung/Anschlag zusätzlich eine Meldung im Verlauf mit Reset-Uhrzeit und, falls ein Konto
   frei ist, dem Hinweis aufs Umschalten.
@@ -116,10 +116,10 @@ Konto global. Läge die Datei im Repo, hätte jedes Projekt eigene Cooldowns —
 ```json
 {
   "v": 1,
-  "activeId": "pbx",
+  "activeId": "haupt",
   "profiles": [
-    { "id": "pbx", "label": "power-blox", "configDir": "/Users/amedici/.claude" },
-    { "id": "med", "label": "medici",     "configDir": "/Users/amedici/.claude-medici" }
+    { "id": "haupt", "label": "Konto A", "configDir": "~/.claude"       },
+    { "id": "zweit", "label": "Konto B", "configDir": "~/.claude-zweit" }
   ],
   "cooldowns": {}
 }
@@ -166,9 +166,9 @@ und sucht dann einen Eintrag, den es für das Standardkonto gar nicht gibt. Veri
 
 | `CLAUDE_CONFIG_DIR` | `loggedIn` |
 |---|---|
-| nicht gesetzt | `true` (power-blox) |
+| nicht gesetzt | `true` (Konto A) |
 | `~/.claude` | **`false`** — „Not logged in · Please run /login" |
-| `~/.claude-medici` | `true` (medici) |
+| `~/.claude-zweit` | `true` (Konto B) |
 
 `accountAgentEnv()` **löscht** die Variable deshalb für das Standardkonto, statt sie zu setzen
 (Löschen statt Weglassen: so wirkt auch eine vom Sidecar geerbte Variable nicht hinein).
@@ -200,7 +200,7 @@ Auf diesem Rechner ist keine der drei Variablen gesetzt — die Regel ist ein Si
   auf Bestellung erzeugen. Die Auswertung folgt der SDK-Typdefinition (`sdk.d.ts`,
   `SDKRateLimitEvent`). Beim ersten echten Treffer sollte das Sidecar-Log gegengeprüft werden;
   dank Roh-Logging steht die tatsächliche Form dann dort.
-* **Zwei mads-Instanzen gleichzeitig sind gefährlich**, seit `~/.claude-medici/projects` ein Symlink
+* **Zwei mads-Instanzen gleichzeitig sind gefährlich**, seit `~/.claude-zweit/projects` ein Symlink
   auf `~/.claude/projects` ist: Zwei Prozesse dürfen nie dieselbe Session-ID fortsetzen, sonst
   laufen die Transcripts ineinander. Der Projekt-Lock verhindert nur dasselbe *Projekt* zweimal.
 * **Konten anlegen/bearbeiten geht bisher nur per Hand** in `~/.mads/accounts.json`. Eine
