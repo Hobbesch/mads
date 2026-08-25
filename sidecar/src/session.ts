@@ -85,6 +85,9 @@ interface QueryHandle extends AsyncIterable<unknown> {
   // (Effort/Ultracode) mitten in der Session mergen — ohne die query neu zu starten.
   setModel?: (model?: string) => Promise<void>;
   applyFlagSettings?: (settings: Record<string, unknown>) => Promise<void>;
+  /** Plan-Nutzungslimits (5h/Woche/…) auf Abruf. Als EXPERIMENTAL markiert → immer optional
+   *  behandeln und Fehler schlucken; die Anzeige darf nie einen Stream gefährden. */
+  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: () => Promise<unknown>;
   close?: () => void;
 }
 
@@ -893,7 +896,12 @@ export class AgentSession {
               // NUR den Hauptloop gegenprüfen: ein Sub-Agent (Task/Explore-Tool) läuft bewusst auf
               // dem schnellen Modell (Haiku) und emittiert eine EIGENE init mit gesetztem
               // parent_tool_use_id — die darf das Stream-Modell NICHT als „Haiku" fehlmelden.
-              if (isMainLoop(m)) this.reconcileActiveModel(m.model as string | undefined);
+              if (isMainLoop(m)) {
+                this.reconcileActiveModel(m.model as string | undefined);
+                // Verbrauch gleich beim Sitzungsstart holen: sonst stünde die Anzeige bis zum Ende
+                // des ersten Turns leer — genau dann, wenn man wissen will, ob das Konto noch trägt.
+                void this.reportUsage();
+              }
               this.onChange?.();
             } else if (m.subtype === "status" && m.status === "compacting") {
               // Client-seitiges Auto-Compact (SDK, ~95% Kontextfüllung) lief bisher komplett still
@@ -1005,6 +1013,9 @@ export class AgentSession {
                 /* git-Fehler → Fingerprint bleibt wie er war; Guard fällt im Zweifel auf „kein Vergleich" */
               }
             }
+            // Verbrauch nach jedem Turn nachführen (nicht awaiten — der Turn ist fertig, die
+            // Anzeige darf ihn nicht aufhalten; Fehler schluckt reportUsage selbst).
+            void this.reportUsage();
             break;
           }
           case "rate_limit_event":
@@ -1022,6 +1033,60 @@ export class AgentSession {
       // sich ein Kontingent-Fehler von einem Transportfehler unterscheiden lässt.
       log(`[${this.agentId}] consume-Fehler (roh): ${describeError(e)}`);
       this.fail("consume_failed", `Stream-Fehler: ${String(e)}`, false);
+    }
+  }
+
+  /**
+   * Plan-Nutzungslimits abfragen und ans Frontend melden (5-Stunden-, Wochen-Fenster).
+   *
+   * Anders als `rate_limit_event` ist das eine AKTIVE Abfrage: sie liefert alle Fenster auf einmal,
+   * ohne auf ein Ereignis zu warten. Damit sieht man das Limit kommen, statt es beim Anschlag zu
+   * bemerken. Braucht eine laufende Sitzung — ein unbenutztes Konto lässt sich so nicht abfragen.
+   *
+   * Best effort: die API ist als EXPERIMENTAL markiert. Jeder Fehler wird geschluckt und nur
+   * geloggt — eine Verbrauchsanzeige darf niemals einen laufenden Auftrag gefährden.
+   */
+  async reportUsage(): Promise<void> {
+    const fn = this.q?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (!fn || this.mock) return;
+    try {
+      const res = (await fn.call(this.q)) as Record<string, unknown> | undefined;
+      if (!res) return;
+      if (res.rate_limits_available === false) {
+        log(`[${this.agentId}] Plan-Limits nicht verfügbar (API-Key-/Drittanbieter-Sitzung)`);
+        return;
+      }
+      const limits = res.rate_limits as Record<string, unknown> | null | undefined;
+      if (!limits) return;
+
+      const win = (raw: unknown): { utilization?: number; resetsAt?: number } | undefined => {
+        if (!raw || typeof raw !== "object") return undefined;
+        const r = raw as { utilization?: unknown; resets_at?: unknown };
+        const utilization = typeof r.utilization === "number" ? r.utilization : undefined;
+        const resetsAt = toEpochMs(r.resets_at);
+        return utilization === undefined && resetsAt === undefined ? undefined : { utilization, resetsAt };
+      };
+
+      const fiveHour = win(limits.five_hour);
+      const sevenDay = win(limits.seven_day);
+      const sevenDayOpus = win(limits.seven_day_opus);
+      if (!fiveHour && !sevenDay && !sevenDayOpus) return;
+
+      log(
+        `[${this.agentId}] Plan-Limits (${this.accountId}): 5h=${fiveHour?.utilization ?? "?"}% ` +
+          `Woche=${sevenDay?.utilization ?? "?"}% Woche-Opus=${sevenDayOpus?.utilization ?? "?"}%`,
+      );
+      this.emit({
+        ...envelope(),
+        type: "account_usage",
+        accountId: this.accountId,
+        fiveHour,
+        sevenDay,
+        sevenDayOpus,
+        subscription: typeof res.subscription_type === "string" ? res.subscription_type : undefined,
+      });
+    } catch (e) {
+      log(`[${this.agentId}] Plan-Limits nicht abrufbar: ${String(e)}`);
     }
   }
 

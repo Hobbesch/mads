@@ -11,6 +11,7 @@ import { saveNewStreamDraft, loadNewStreamDraft, draftHasContent } from "../newS
 import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
 import { ModelEffortPicker } from "./ModelEffortPicker";
+import { UsageMeter } from "./UsageMeter";
 import { modelLabel } from "../modelCatalog";
 import { PromptButton, PromptManagerDialog } from "./PromptLibrary";
 import { Elapsed } from "./Elapsed";
@@ -404,11 +405,15 @@ export function Inspector() {
                   // Laufender Verbrauch, sobald das SDK ihn für dieses Konto gemeldet hat. Erst damit
                   // sieht man das Limit KOMMEN statt es erst beim Anschlag zu bemerken.
                   const use = accountUsage[p.id];
-                  const pct = use?.utilization !== undefined ? Math.round(use.utilization * 100) : undefined;
+                  // Im Menü das ENGSTE Fenster zeigen — das ist es, was zuerst blockiert.
+                  const pct = [use?.fiveHour?.utilization, use?.sevenDay?.utilization].filter(
+                    (v): v is number => v !== undefined,
+                  );
+                  const worst = pct.length ? Math.round(Math.max(...pct)) : undefined;
                   const suffix = blocked
                     ? ` — Limit bis ${until}`
-                    : pct !== undefined
-                      ? ` — ${pct}% verbraucht`
+                    : worst !== undefined
+                      ? ` — ${worst}% verbraucht`
                       : "";
                   return (
                     <option key={p.id} value={p.id} title={p.email ?? p.configDir}>
@@ -418,6 +423,8 @@ export function Inspector() {
                   );
                 })}
               </select>
+              {/* Plan-Nutzungslimits des gewählten Kontos — 5-Stunden- und Wochenfenster als Balken. */}
+              <UsageMeter usage={accountUsage[agent.accountId ?? accounts.activeId]} />
             </div>
           )}
           {/* Doppel-Check: läuft der Stream real auf einem ANDEREN Modell als angefordert (stiller

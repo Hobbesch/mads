@@ -519,6 +519,7 @@ export type SidecarMessage =
   | HandoffResultMsg
   | PromptsUpdateMsg
   | AccountsUpdateMsg
+  | AccountUsageMsg
   | RateLimitNoticeMsg
   | ModelActiveMsg;
 
@@ -891,6 +892,32 @@ export interface AccountsState {
   activeId: string;
   /** Cooldowns je Profil-ID; fehlender Eintrag = verfügbar. */
   cooldowns: Record<string, AccountCooldown>;
+}
+
+/** Ein Kontingent-Fenster (5 Stunden, Woche, …) wie es die Plan-Nutzungslimits ausweisen. */
+export interface UsageWindow {
+  /** Auslastung in PROZENT (0–100), so wie die Usage-API sie liefert. */
+  utilization?: number;
+  /** Zeitpunkt der Zurücksetzung (ms seit Epoche). */
+  resetsAt?: number;
+}
+
+/**
+ * Sidecar → Host: Plan-Nutzungslimits eines Kontos, abgefragt über die Usage-API des SDK.
+ * Anders als `rate_limit_notice` (reagiert nur auf Ereignisse) liefert das ALLE Fenster auf einmal
+ * und auf Abruf — damit lässt sich das Limit kommen sehen, statt es erst beim Anschlag zu merken.
+ */
+export interface AccountUsageMsg extends BaseMsg {
+  type: "account_usage";
+  accountId: string;
+  /** 5-Stunden-Fenster. */
+  fiveHour?: UsageWindow;
+  /** Wochenfenster über alle Modelle. */
+  sevenDay?: UsageWindow;
+  /** Wochenfenster für die teuersten Modelle (separat limitiert). */
+  sevenDayOpus?: UsageWindow;
+  /** Abo-Art ("max", "pro", …) — rein informativ. */
+  subscription?: string;
 }
 
 /** Sidecar → Host: vollständiger Account-Zustand (Registry + Cooldowns). Ersetzt lokal alles. */

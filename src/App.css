@@ -2301,6 +2301,57 @@ button.primary:hover {
 .field .composer-wrap textarea {
   width: 100%;
 }
+
+/* ---------------- Plan-Nutzungslimits (Konto-Verbrauch im Stream-Kopf) ---------------- */
+.usage-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 190px;
+}
+.usage-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-dim);
+}
+.usage-label {
+  flex: 0 0 auto;
+  min-width: 40px;
+}
+.usage-track {
+  flex: 1 1 auto;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+.usage-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--s-blue);
+  transition: width 0.3s ease;
+}
+.usage-fill.warn { background: var(--s-yellow); }
+.usage-fill.crit { background: var(--s-red); }
+.usage-pct {
+  flex: 0 0 auto;
+  min-width: 30px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.usage-pct.warn { color: var(--s-yellow); font-weight: 600; }
+.usage-pct.crit { color: var(--s-red); font-weight: 600; }
+.usage-reset {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+@media (prefers-reduced-motion: reduce) {
+  .usage-fill { transition: none; }
+}
 .field-row {
   display: flex;
   gap: 12px;

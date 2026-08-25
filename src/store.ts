@@ -33,6 +33,7 @@ import type {
   TimelineAttachment,
   SavedPrompt,
   AccountsState,
+  UsageWindow,
 } from "../shared/protocol";
 import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultModelForRole, defaultEffortForRole } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
@@ -355,9 +356,12 @@ export interface MadsState {
   /** Claude-Konten + Cooldowns. Quelle ist der Sidecar (`accounts_update`) — hier nur gespiegelt.
    *  undefined = noch nicht geladen (dann bleibt die Konto-Auswahl schlicht unsichtbar). */
   accounts?: AccountsState;
-  /** Laufender Kontingent-Verbrauch je Konto (aus `rate_limit_notice`). Bewusst NUR im Speicher:
-   *  eine Momentaufnahme, die nach einem Neustart ohnehin veraltet wäre. */
-  accountUsage: Record<string, { utilization?: number; resetsAt?: number; window?: string; at: number }>;
+  /** Plan-Nutzungslimits je Konto (aus `account_usage`, Fallback `rate_limit_notice`).
+   *  Bewusst NUR im Speicher: eine Momentaufnahme, die nach einem Neustart veraltet wäre. */
+  accountUsage: Record<
+    string,
+    { fiveHour?: UsageWindow; sevenDay?: UsageWindow; sevenDayOpus?: UsageWindow; subscription?: string; at: number }
+  >;
   /** Change-Overview-Overlay an/aus (Owner: doc 09). Der Rail-„Änderungen"-Eintrag toggelt es (§2.3). */
   changeOverviewOn: boolean;
   /** Live-Diff-Quelle: Datei-Edits je Stream×Datei (doc 09 §3.2). Key: `${agentId}::${path}`. */
@@ -968,22 +972,38 @@ export const useStore = create<MadsState>((set) => {
         set({ accounts: msg.accounts });
         break;
 
-      case "rate_limit_notice": {
-        // Verbrauchsstand IMMER mitschreiben — auch bei status "allowed". Das ist die Grundlage der
-        // laufenden Anzeige im Konto-Menü: ohne sie sähe man erst beim Anschlag etwas, und genau
-        // dann ist es für ein geordnetes Umschalten zu spät.
-        if (msg.utilization !== undefined || msg.resetsAt !== undefined) {
-          set((s) => ({
-            accountUsage: {
-              ...s.accountUsage,
-              [msg.accountId]: {
-                utilization: msg.utilization,
-                resetsAt: msg.resetsAt,
-                window: msg.window,
-                at: Date.now(),
-              },
+      case "account_usage":
+        // Plan-Nutzungslimits (5h / Woche) des Kontos, aktiv abgefragt — alle Fenster auf einmal.
+        set((s) => ({
+          accountUsage: {
+            ...s.accountUsage,
+            [msg.accountId]: {
+              fiveHour: msg.fiveHour,
+              sevenDay: msg.sevenDay,
+              sevenDayOpus: msg.sevenDayOpus,
+              subscription: msg.subscription,
+              at: Date.now(),
             },
-          }));
+          },
+        }));
+        break;
+
+      case "rate_limit_notice": {
+        // Fallback-Anreicherung: das Ereignis nennt genau EIN Fenster. Die vollständige Aufteilung
+        // liefert `account_usage` — hier wird nur das genannte Fenster nachgezogen, falls die
+        // Usage-Abfrage (EXPERIMENTAL) auf diesem Rechner nicht verfügbar sein sollte.
+        if (msg.utilization !== undefined || msg.resetsAt !== undefined) {
+          const w: UsageWindow = {
+            // `rate_limit_event` liefert 0..1, die Usage-API 0..100 → hier vereinheitlichen.
+            utilization: msg.utilization !== undefined ? Math.round(msg.utilization * 100) : undefined,
+            resetsAt: msg.resetsAt,
+          };
+          const slot = msg.window === "seven_day" ? "sevenDay" : msg.window === "five_hour" ? "fiveHour" : undefined;
+          if (slot) {
+            set((s) => ({
+              accountUsage: { ...s.accountUsage, [msg.accountId]: { ...s.accountUsage[msg.accountId], [slot]: w, at: Date.now() } },
+            }));
+          }
         }
         if (msg.status === "allowed") break; // reine Verbrauchsanzeige → keine Meldung im Verlauf
 

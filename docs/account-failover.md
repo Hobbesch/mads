@@ -14,7 +14,10 @@ den Umschalter an. Der Klick löst den Wechsel aus.
 
 ## Wie die Erkennung funktioniert — ohne Textparsing
 
-Das Agent SDK sendet ein **maschinenlesbares** `rate_limit_event`:
+Primär durch die **aktive Usage-Abfrage** (siehe nächster Abschnitt), ergänzend durch das
+Ereignis `rate_limit_event`. Beides ist **maschinenlesbar** — kein Fehlertext wird geparst.
+
+Das Ereignis (`sidecar/src/session.ts` → `onRateLimit()`), bis dahin ignoriert (`default: break;`):
 
 ```
 rate_limit_info {
@@ -25,10 +28,7 @@ rate_limit_info {
 }
 ```
 
-mads hat dieses Event bisher ignoriert (`default: break;` in der Consume-Schleife). Jetzt wird es
-ausgewertet — `sidecar/src/session.ts` → `onRateLimit()`.
-
-**Deshalb ist keine Mustertabelle für Fehlertexte nötig.** Ein früherer Entwurf sah vor, Meldungen
+**Es ist keine Mustertabelle für Fehlertexte nötig.** Ein früherer Entwurf sah vor, Meldungen
 wie `"You've hit your session limit · resets 3:45pm"` zu parsen und die Uhrzeit defensiv in eine
 Zeitzone umzurechnen. Das wäre unnötig fragil gewesen: Anthropic kann diese Texte jederzeit ändern,
 `resetsAt` dagegen kommt strukturiert.
@@ -44,12 +44,39 @@ Robustheit trotzdem eingebaut:
   Limit doch anders ankommt als über `rate_limit_event`, steht es damit im Log.
 * Wiederholte Events desselben Fensters werden entprellt (`lastRateLimitKey`).
 
+## Verifiziert am 2026-08-25: die Usage-Abfrage trägt, das Ereignis nicht
+
+Gegen die echten Konten gemessen (minimaler Haiku-Turn, Usage-API abgefragt):
+
+| Konto | `five_hour` | `seven_day` |
+|---|---|---|
+| power-blox | 11 % (Reset 11:59) | **100 %** (Reset Mi. 15:59) |
+| medici | 2 % | 0 % |
+
+Deckungsgleich mit den „Plan-Nutzungslimits" in den Claude-Apps.
+
+**Zwei Korrekturen an früheren Annahmen:**
+
+1. **`rate_limit_event` kam in keinem der Testläufe.** Die Annahme, das Ereignis liefere den
+   laufenden Verbrauch, trägt nicht — es feuert offenbar nur in Sondersituationen (wenn überhaupt).
+   Die aktive Abfrage `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET()` ist deshalb der
+   PRIMÄRE Weg; das Ereignis bleibt nur als Ergänzung für den Cooldown erhalten.
+2. **Die Antwort enthält mehr als die Typdefinition zeigt.** Neben `five_hour`/`seven_day`
+   (`utilization` als PROZENT 0–100, `resets_at` als ISO-String) liefert sie ein `limits`-Array mit
+   `kind`/`group`/`percent`/`severity`/`scope` sowie zahlreiche Felder unter Codenamen. mads liest
+   bewusst nur die beiden dokumentierten Fenster — die übrigen sind unbenannt und könnten sich
+   jederzeit ändern.
+
+**Grenze:** Die Abfrage braucht eine laufende Sitzung. Ein Konto, auf dem gerade kein Stream läuft,
+lässt sich nicht abfragen — es gibt keinen CLI-Unterbefehl dafür (`claude usage` existiert nicht).
+Der Wert erscheint deshalb, sobald ein Stream auf dem Konto seinen ersten Turn beginnt.
+
 ## Wo man den Verbrauch sieht
 
 Im Kopf des Streams, in der Auswahl **KONTO**:
 
-* Laufend: `power-blox — 62% verbraucht` (aus `utilization` des jeweils letzten `rate_limit_event`,
-  auch bei `status: "allowed"`).
+* Laufend: `power-blox — 100% verbraucht` (schlimmstes der Fenster) plus Balken fuer 5 Std. und Woche,
+  gespeist aus der Usage-Abfrage nach jedem Turn.
 * Bei Vorwarnung/Anschlag zusätzlich eine Meldung im Verlauf mit Reset-Uhrzeit und, falls ein Konto
   frei ist, dem Hinweis aufs Umschalten.
 * Im Cooldown ersetzt `— Limit bis 15:40` die Prozentanzeige.
