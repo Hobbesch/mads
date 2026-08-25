@@ -1649,9 +1649,14 @@ export const useStore = create<MadsState>((set) => {
     },
 
     setStreamAccount: async (id, accountId) => {
+      // BEWUSST nicht optimistisch: `CLAUDE_CONFIG_DIR` steht nach dem Spawn fest, ein Wechsel ist
+      // ein Prozess-Neustart — und der kann im Sidecar auch ausfallen (Stream nicht aktiv, keine
+      // fortsetzbare Session, schon auf diesem Konto). Wer die Auswahl hier vorwegnimmt, behauptet
+      // ein Konto, auf dem nichts läuft; genau so lief ein Stream sichtbar auf „A" und real auf „B",
+      // bis er an dessen Limit stiess. Der Sidecar meldet Vollzug (oder den Grund) selbst zurück
+      // und bestätigt das Konto laufend per status_update.
       const label = useStore.getState().accounts?.profiles.find((p) => p.id === accountId)?.label ?? accountId;
-      patchAgent(id, { accountId });
-      notice(id, "accent", `⇄ Konto: ${label} — Stream wird im selben Gespräch dort fortgesetzt…`);
+      notice(id, "accent", `⇄ Konto „${label}" angefordert — warte auf Bestätigung des Sidecars…`);
       await sendHost({ ...envelope(), type: "set_account", agentId: id, accountId });
     },
 

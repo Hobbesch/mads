@@ -1962,7 +1962,21 @@ export class Orchestrator {
     const state = loadAccounts();
     const target = state.profiles.find((p) => p.id === accountId);
     if (!target) {
+      // Früher nur ein stderr-Log. Das Frontend hatte seine Auswahl da längst optimistisch
+      // übernommen und behielt sie — die Anzeige log dauerhaft. Jeder Zweig, der den Wechsel
+      // NICHT ausführt, muss das sichtbar sagen.
       log(`[orchestrator] set_account: unbekanntes Konto "${accountId}" — ignoriert`);
+      if (agentId) {
+        this.emit({
+          ...envelope(),
+          type: "error",
+          agentId,
+          scope: "agent",
+          code: "account_switch_failed",
+          message: `Kontowechsel nicht möglich: unbekanntes Konto „${accountId}".`,
+          recoverable: true,
+        });
+      }
       return;
     }
 
@@ -1974,10 +1988,36 @@ export class Orchestrator {
 
     const s = this.pool.get(agentId);
     if (!s) {
-      log(`[orchestrator] set_account: Stream ${agentId} nicht im Pool — ignoriert`);
+      // Passiv wiederhergestellter Stream (keine laufende Session). Der Wunsch ist trotzdem
+      // sinnvoll — er soll beim nächsten Fortsetzen greifen. Also in agents.json festhalten,
+      // statt ihn wegzuwerfen: von dort liest der Resume das Konto (siehe start_agent).
+      log(`[orchestrator] set_account: Stream ${agentId} nicht im Pool → für das nächste Fortsetzen vormerken`);
+      const noted = this.noteAccountForResume(agentId, accountId);
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: {
+          kind: "system",
+          subtype: noted
+            ? `⇄ Konto „${target.label}" vorgemerkt — dieser Stream läuft gerade nicht; es greift beim nächsten Fortsetzen.`
+            : `⚠ Kontowechsel nicht möglich: Stream läuft nicht und ist nicht fortsetzbar.`,
+        },
+      });
       return;
     }
-    if (s.accountId === accountId) return; // schon dort, kein unnötiger Neustart
+    if (s.accountId === accountId) {
+      // KEIN stiller Abbruch mehr: genau hier lief der Wechsel bisher ins Leere, wenn die Anzeige
+      // ein anderes Konto behauptete als das laufende — der Mensch tippte auf das scheinbar andere
+      // Konto und traf damit das, auf dem der Stream ohnehin schon lief. Bestätigen statt schweigen.
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: { kind: "system", subtype: `⇄ Dieser Stream läuft bereits auf Konto „${target.label}" — kein Neustart nötig.` },
+      });
+      return;
+    }
 
     // Ohne Session-ID gäbe es nichts fortzusetzen → der Wechsel würde den Verlauf verlieren.
     // Dann lieber ablehnen und es dem Menschen sagen, statt still Kontext wegzuwerfen.
@@ -2028,7 +2068,32 @@ export class Orchestrator {
     });
     this.persist();
     this.emitAccounts();
+    // Vollzug melden. Bisher schrieb das Frontend die Meldung optimistisch, BEVOR der Sidecar sie
+    // überhaupt gesehen hatte — sie stand also auch dann im Verlauf, wenn der Wechsel nie stattfand.
+    // Jetzt sagt sie aus, was wirklich passiert ist.
+    this.emit({
+      ...envelope(),
+      type: "agent_event",
+      agentId,
+      event: { kind: "system", subtype: `⇄ Konto: ${target.label} — Stream im selben Gespräch dort fortgesetzt.` },
+    });
     void this.pollAgent(session);
+  }
+
+  /**
+   * Konto-Wunsch für einen NICHT laufenden Stream in agents.json festhalten, damit das nächste
+   * Fortsetzen ihn übernimmt (start_agent liest von dort, wenn der Aufrufer keins mitgibt).
+   * `false` = kein Eintrag vorhanden, es gibt also nichts vorzumerken.
+   */
+  private noteAccountForResume(agentId: string, accountId: string): boolean {
+    if (!this.project) return false;
+    const repoRoot = this.project.repoRoot;
+    const entries = loadRegistry(repoRoot);
+    const idx = entries.findIndex((e) => e.agentId === agentId);
+    if (idx < 0) return false;
+    entries[idx] = { ...entries[idx], accountId, updatedAt: Date.now() };
+    saveRegistry(repoRoot, entries);
+    return true;
   }
 
   // ---------------------------------------------------------------- Dev-Server
