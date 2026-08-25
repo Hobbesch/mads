@@ -2072,6 +2072,15 @@ export const useStore = create<MadsState>((set) => {
         ahead: 0,
         dirty: false,
         live: true,
+        // Modell/Effort/Konto MITNEHMEN. Dieses Objekt ERSETZT die bisherige Kachel komplett —
+        // fehlten die Felder, stünden sie danach auf undefined und die Kopfzeile zeigte still den
+        // jeweiligen Default. Beim Konto war das nicht nur kosmetisch: die Anzeige fiel auf das
+        // GLOBALE Standardkonto zurück, während der Sidecar den Stream (korrekt, aus agents.json)
+        // im tatsächlichen Konto fortsetzte — der Stream lief sichtbar auf „A", real auf „B",
+        // bis er an dessen Limit lief.
+        model: r.model ?? existing?.model,
+        effort: clampEffort(r.model ?? existing?.model, r.effort ?? existing?.effort),
+        accountId: r.accountId ?? existing?.accountId,
         // Auftrag über das Resume hinweg behalten — der automatische „Fortsetzen"-Nudge ersetzt ihn nicht.
         lastPrompt: r.lastPrompt ?? existing?.lastPrompt,
       };
@@ -2114,6 +2123,11 @@ export const useStore = create<MadsState>((set) => {
         role: r.role,
         model: r.model,
         effort: clampEffort(r.model, r.effort),
+        // Konto MITSENDEN (wie im Resume aus sendInput): die Claude-Session liegt im `projects/`
+        // GENAU dieses Kontos. Ohne die Angabe fällt der Sidecar zwar auf agents.json zurück, die
+        // Kachel hier aber auf das globale Standardkonto — genau diese Asymmetrie war die Ursache
+        // dafür, dass ein Stream sichtbar auf einem anderen Konto lief als real.
+        accountId: r.accountId,
         mock: false,
         permissionMode: "auto",
         autopilot: "assisted",

@@ -348,6 +348,10 @@ export class Orchestrator {
           // die Picker-Wahl komplett) — das Modell des Integrators übernehmen, dessen main-Änderungen
           // hier ausgelagert werden. Undefined coerciert session.ts ohnehin auf DEFAULT_MODEL.
           model: integ.model,
+          // Konto des Integrators übernehmen, aus dessen main-Checkout ausgelagert wird. Ohne die
+          // Angabe fiele der neue Stream auf das globale Standardkonto — also womöglich auf ein
+          // anderes Abo als das, unter dem die Arbeit entstanden ist.
+          accountId: integ.accountId,
           permissionMode: "auto",
           autopilot: "assisted",
         });
