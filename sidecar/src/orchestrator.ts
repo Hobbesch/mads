@@ -34,7 +34,8 @@ const SHARED_LANDFIRST_GLOBS = [
   "**/pnpm-lock.yaml",
   "**/go.sum",
 ];
-import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, ResumableAgent, SavedPrompt, OpenReviewStreamMsg } from "../../shared/protocol.js";
+import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, ResumableAgent, SavedPrompt, OpenReviewStreamMsg, StartAgentMsg } from "../../shared/protocol.js";
+import { loadAccounts, pruneCooldowns, saveAccounts } from "./accounts.js";
 
 /**
  * Grundtakt des Orchestrators. Früher 25 s — zusammen mit „eine Aktion pro Zyklus & Stream"
@@ -187,11 +188,15 @@ export class Orchestrator {
         // Resume: den zuletzt gemerkten Auftrag aus agents.json in die frische Session vorladen. Sonst
         // stünde lastPrompt beim automatischen „Fortsetzen" (continuation) auf undefined und das nächste
         // persist() würde den guten Wert auf der Platte überschreiben — der Auftrag ginge verloren.
+        let startMsg = msg;
         if (this.project) {
           const known = loadRegistry(this.project.repoRoot).find((e) => e.agentId === msg.agentId);
           if (known?.lastPrompt) session.lastPrompt = known.lastPrompt;
+          // Konto aus der Registry übernehmen, wenn der Aufrufer keins mitgibt — sonst würde ein
+          // Resume nach Neustart im falschen Konto nach der Session suchen.
+          if (!startMsg.accountId && known?.accountId) startMsg = { ...startMsg, accountId: known.accountId };
         }
-        await session.start(msg);
+        await session.start(startMsg);
         this.persist();
         void this.pollAgent(session); // initialer Status
         break;
@@ -234,6 +239,14 @@ export class Orchestrator {
       case "set_model_effort":
         await this.pool.get(msg.agentId)?.setModelEffort(msg.model, msg.effort);
         this.persist(); // Modell/Effort in agents.json festhalten (Resume-fest)
+        break;
+
+      case "set_account":
+        await this.setAccount(msg.accountId, msg.agentId);
+        break;
+
+      case "request_accounts":
+        this.emitAccounts();
         break;
 
       case "stop_agent": {
@@ -1144,6 +1157,10 @@ export class Orchestrator {
         status: s.status,
         model: s.model,
         effort: s.effort as ResumableAgent["effort"],
+        // Konto mitschreiben: die Claude-Session liegt im `projects/` GENAU dieses Kontos —
+        // ohne diese Angabe würde ein Resume nach Neustart im falschen Konto suchen, nichts finden
+        // und still frisch starten (= Kontextverlust).
+        accountId: s.accountId,
         mock: false,
         // „Mergen & weiterarbeiten"-Absicht mitschreiben — sonst überlebt sie den Neustart nicht und
         // der Stream fällt beim ersten Poll als „erledigt" aus dem Grid.
@@ -1921,6 +1938,93 @@ export class Orchestrator {
   }
   private emit(obj: unknown): void {
     void send(obj);
+  }
+
+  // ------------------------------------------------------- Claude-Konten
+  /** Aktuellen Kontenzustand ans Frontend spiegeln (Registry ist die Wahrheit, nicht das UI). */
+  private emitAccounts(): void {
+    const state = pruneCooldowns(loadAccounts());
+    this.emit({ ...envelope(), type: "accounts_update", accounts: state });
+  }
+
+  /**
+   * Konto wechseln. Ohne `agentId` nur das Default-Konto für NEUE Streams.
+   *
+   * Mit `agentId`: der laufende Claude-Prozess muss neu gestartet werden — `CLAUDE_CONFIG_DIR` wird
+   * beim Spawn gesetzt und ist danach unveränderlich. Damit dabei kein Kontext verloren geht, wird
+   * dieselbe Session per `resumeSessionId` im selben Worktree fortgesetzt.
+   */
+  private async setAccount(accountId: string, agentId?: string): Promise<void> {
+    const state = loadAccounts();
+    const target = state.profiles.find((p) => p.id === accountId);
+    if (!target) {
+      log(`[orchestrator] set_account: unbekanntes Konto "${accountId}" — ignoriert`);
+      return;
+    }
+
+    if (!agentId) {
+      saveAccounts({ ...state, activeId: accountId });
+      this.emitAccounts();
+      return;
+    }
+
+    const s = this.pool.get(agentId);
+    if (!s) {
+      log(`[orchestrator] set_account: Stream ${agentId} nicht im Pool — ignoriert`);
+      return;
+    }
+    if (s.accountId === accountId) return; // schon dort, kein unnötiger Neustart
+
+    // Ohne Session-ID gäbe es nichts fortzusetzen → der Wechsel würde den Verlauf verlieren.
+    // Dann lieber ablehnen und es dem Menschen sagen, statt still Kontext wegzuwerfen.
+    if (!s.sessionId) {
+      this.emit({
+        ...envelope(),
+        type: "error",
+        agentId,
+        scope: "agent",
+        code: "account_switch_failed",
+        message: "Kontowechsel nicht möglich: dieser Stream hat noch keine fortsetzbare Session.",
+        recoverable: true,
+      });
+      return;
+    }
+
+    const prev = s.accountId;
+    const sessionId = s.sessionId;
+    const worktreePath = s.worktreePath;
+    log(`[orchestrator] Stream ${agentId}: Konto ${prev} → ${accountId} (Resume ${sessionId})`);
+
+    await this.stopDevServerIf(agentId); // Dev-Server hängt am alten Prozess
+    await s.stop(false); // Worktree BEHALTEN — die Arbeit soll ja weiterlaufen
+    this.pool.delete(agentId);
+
+    const session = new AgentSession(agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(agentId));
+    session.lastPrompt = s.lastPrompt;
+    this.pool.set(agentId, session);
+    await session.start({
+      ...envelope(),
+      type: "start_agent",
+      agentId,
+      prompt: "",            // kein neuer Auftrag — nur Kontowechsel, die Session lebt weiter
+      continuation: true,    // markiert: kein echter Nutzer-Auftrag (lastPrompt bleibt erhalten)
+      accountId,
+      label: s.label,
+      role: s.role,
+      model: s.model,
+      effort: s.effort as StartAgentMsg["effort"],
+      mock: false,
+      permissionMode: s.permissionMode,
+      autopilot: s.autopilot,
+      resumeSessionId: sessionId,
+      resumeWorktreePath: worktreePath,
+      repoRoot: this.project?.repoRoot,
+      cwd: worktreePath ?? this.project?.repoRoot,
+      branch: s.branch,
+    });
+    this.persist();
+    this.emitAccounts();
+    void this.pollAgent(session);
   }
 
   // ---------------------------------------------------------------- Dev-Server

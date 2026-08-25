@@ -15,7 +15,8 @@ import { send, log, envelope, randomUUID } from "./io.js";
 import { createWorktree, removeWorktree, worktreeFingerprint } from "./git.js";
 import { ensureMadsDir } from "./persistence.js";
 import { classifyToolCall, isDeployCommand, isGitCommit, isRememberableKind, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
-import { scrubbedAgentEnv } from "./agentEnv.js";
+import { accountAgentEnv } from "./agentEnv.js";
+import { DEFAULT_ACCOUNT_ID, loadAccounts, pickFallback, resolveProfile, saveAccounts, withCooldown } from "./accounts.js";
 import { sandboxOptions } from "./sandbox.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -29,6 +30,7 @@ import type {
   ImageInput,
   TimelineAttachment,
   AutopilotLevel,
+  PermissionMode,
   PullRequestInfo,
 } from "../../shared/protocol.js";
 
@@ -197,6 +199,41 @@ export interface PermissionHooks {
   approveTool: (toolName: string) => void;
 }
 
+/** Claude Codes eigenes Standard-Config-Verzeichnis (= Verhalten ohne gesetztes CLAUDE_CONFIG_DIR). */
+function defaultClaudeConfigDir(): string {
+  return join(homedir(), ".claude");
+}
+
+/**
+ * Zeitangabe des SDK in Millisekunden umrechnen. Das Feld ist je nach Version Sekunden-Epoche,
+ * Millisekunden-Epoche oder ISO-String — alle drei defensiv abdecken, statt eine Form anzunehmen.
+ * Unplausibles → undefined (die UI zeigt dann „Reset unbekannt" statt einer erfundenen Zeit).
+ */
+function toEpochMs(raw: unknown): number | undefined {
+  let ms: number | undefined;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    ms = raw > 1e11 ? raw : raw * 1000; // < 1e11 ⇒ Sekunden-Epoche
+  } else if (typeof raw === "string" && raw) {
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) ms = parsed;
+  }
+  if (ms === undefined) return undefined;
+  // Plausibilitätsfenster: zwischen jetzt-1h und jetzt+30 Tagen.
+  const now = Date.now();
+  return ms > now - 3600_000 && ms < now + 30 * 86400_000 ? ms : undefined;
+}
+
+/** Fehler mit allen diagnostisch nützlichen Feldern beschreiben (String(e) verliert sie). */
+function describeError(e: unknown): string {
+  if (!(e instanceof Error)) return JSON.stringify(e) ?? String(e);
+  const extra = e as Error & { status?: unknown; code?: unknown };
+  const bits = [`${e.name}: ${e.message}`];
+  if (extra.status !== undefined) bits.push(`status=${String(extra.status)}`);
+  if (extra.code !== undefined) bits.push(`code=${String(extra.code)}`);
+  if (e.stack) bits.push(e.stack.split("\n").slice(1, 4).join(" | "));
+  return bits.join(" ");
+}
+
 export class AgentSession {
   readonly agentId: string;
   status: AgentStatus = "starting";
@@ -216,6 +253,13 @@ export class AgentSession {
   role?: "integrator" | "sub";
   model?: string;
   effort?: string;
+  /** Claude-Konto dieses Streams (Profil-ID) — wird persistiert, damit ein Resume nach Neustart
+   *  dasselbe Konto trifft (die Session liegt im `projects/` GENAU dieses Kontos). */
+  accountId: string = DEFAULT_ACCOUNT_ID;
+  /** Config-Verzeichnis des Kontos; setzt `CLAUDE_CONFIG_DIR` und lenkt die Session-Suche. */
+  accountConfigDir: string = defaultClaudeConfigDir();
+  /** Letzte gemeldete Kontingent-Lage — entprellt wiederholte Events desselben Fensters. */
+  private lastRateLimitKey?: string;
   /** Doppel-Check: real vom SDK gelaufenes Modell (normalisiert, aus Init/Assistant-Nachrichten). */
   activeModel?: string;
   /** Fremd-Edit-Schutz: Worktree-Fingerprint zum ENDE des letzten Agent-Turns. Der Autopilot
@@ -231,7 +275,8 @@ export class AgentSession {
   autopilot: AutopilotLevel = "assisted";
   lastPr?: PullRequestInfo;
   // Aktueller Permission-Modus + Arbeitsverzeichnis — für die mads-Auto-Freigabe.
-  private permissionMode?: string;
+  /** Nicht privat: der Orchestrator übernimmt ihn beim Kontowechsel in die neue Session. */
+  permissionMode?: PermissionMode;
   private cwd?: string;
 
   private readonly inbox = new AsyncQueue<SdkUserMessage>();
@@ -326,17 +371,27 @@ export class AgentSession {
     // programmatischen Auslagern-Flow ab (outsource_main), der keinen Model-Picker durchläuft.
     this.model = msg.model || (msg.role === "sub" ? DEFAULT_SUB_MODEL : DEFAULT_MODEL);
     this.effort = msg.effort;
+    // Konto auflösen, BEVOR irgendetwas den Config-Pfad braucht (Session-Suche beim Resume).
+    this.applyAccount(msg.accountId);
     // Die automatische „Setze die Arbeit fort"-Anweisung beim Resume ist KEIN Nutzer-Auftrag: sie darf
     // den zuletzt gemerkten (ggf. via Orchestrator aus der Registry vorgeladenen) Auftrag nicht
     // überschreiben, sonst zeigt die Kachel nach dem Neustart den Nudge statt des echten Auftrags.
     if (!msg.continuation) this.lastPrompt = msg.prompt;
     this.permissionMode = msg.permissionMode;
-    this.emitUserText(msg.prompt, undefined, msg.continuation); // Start-Prompt beidseitig sichtbar machen
-    this.inbox.push(userMsg(msg.prompt));
-    this.setStatus("running", "starting up");
+    // Leerer Start-Prompt (New-Stream-Dialog ohne „Aufgabe") darf KEINEN Claude-Turn auslösen —
+    // Worktree/Session entstehen trotzdem, der Agent wartet einfach auf die erste echte Nachricht
+    // aus dem normalen Chat-Input (analog zu einem passiv wiederhergestellten, noch nicht gestarteten Stream).
+    const hasInitialInput = msg.prompt.trim().length > 0 || (msg.images?.length ?? 0) > 0;
+    this.emitUserText(msg.prompt, msg.images, msg.continuation); // Start-Prompt beidseitig sichtbar machen
+    if (hasInitialInput) {
+      this.inbox.push(userMsg(msg.prompt, msg.images));
+      this.setStatus("running", "starting up");
+    } else {
+      this.setStatus("waiting_input", "wartet auf Aufgabe");
+    }
 
     if (this.mock) {
-      void this.runMock(msg.prompt);
+      if (hasInitialInput) void this.runMock(msg.prompt);
       return;
     }
 
@@ -446,10 +501,12 @@ export class AgentSession {
 
       // Env-Scrub: dem Agenten-Tool-Prozess GH-/AWS-Tokens entziehen (siehe agentEnv.ts). `options.env`
       // ERSETZT die Env des CLI-Subprozesses (nicht mergen) → scrubbedAgentEnv spreadet process.env.
-      const agentEnv = scrubbedAgentEnv();
+      // Zusätzlich wählt CLAUDE_CONFIG_DIR das Claude-Konto dieses Streams (Mehrkonten-Betrieb).
+      const agentEnv = accountAgentEnv(this.accountConfigDir, defaultClaudeConfigDir());
       if (agentEnv.stripped.length) {
         log(`[${this.agentId}] Agenten-Env bereinigt (nicht an Tool-Prozess vererbt): ${agentEnv.stripped.join(", ")}`);
       }
+      log(`[${this.agentId}] Claude-Konto: ${this.accountId} (${this.accountConfigDir})`);
 
       this.q = sdk.query({
         prompt: this.inbox,
@@ -743,7 +800,7 @@ export class AgentSession {
     this.setStatus("paused");
   }
 
-  async setMode(mode: string): Promise<void> {
+  async setMode(mode: PermissionMode): Promise<void> {
     this.permissionMode = mode;
     // "auto" handhabt mads selbst → dem SDK "default" geben (siehe start()).
     await this.q?.setPermissionMode?.(mode === "auto" ? "default" : mode);
@@ -950,13 +1007,72 @@ export class AgentSession {
             }
             break;
           }
+          case "rate_limit_event":
+            // Maschinenlesbarer Kontingent-Stand des SDK (status/resetsAt/rateLimitType/utilization).
+            // Deshalb ist KEIN Parsen von Fließtext-Fehlermeldungen nötig — und keine Mustertabelle,
+            // die bei jeder Textänderung von Anthropic nachgezogen werden müsste.
+            this.onRateLimit(m.rate_limit_info as Record<string, unknown> | undefined);
+            break;
           default:
             break; // defensiv: unbekannte Event-Typen tolerieren
         }
       }
     } catch (e) {
+      // Roh-Detail mitloggen: `String(e)` verliert status/code/stack — genau die Felder, an denen
+      // sich ein Kontingent-Fehler von einem Transportfehler unterscheiden lässt.
+      log(`[${this.agentId}] consume-Fehler (roh): ${describeError(e)}`);
       this.fail("consume_failed", `Stream-Fehler: ${String(e)}`, false);
     }
+  }
+
+  /**
+   * Kontingent-Meldung des SDK verarbeiten. mads wechselt das Konto NICHT selbstständig — der
+   * Wechsel startet den Claude-Prozess neu und bleibt deshalb eine bewusste menschliche Aktion.
+   * Hier wird nur der Cooldown festgehalten und die Oberfläche informiert.
+   */
+  private onRateLimit(info: Record<string, unknown> | undefined): void {
+    if (!info) return;
+    const status = typeof info.status === "string" ? info.status : "";
+    if (status !== "rejected" && status !== "allowed_warning") return; // "allowed" = nichts zu melden
+
+    const rejected = status === "rejected";
+    const resetsAt = toEpochMs(info.resetsAt);
+    const window = typeof info.rateLimitType === "string" ? info.rateLimitType : undefined;
+    const utilization = typeof info.utilization === "number" ? info.utilization : undefined;
+
+    // Nicht bei jedem Event neu schreiben: sonst flutet eine Vorwarnung Registry und Timeline.
+    const key = `${status}:${window ?? ""}:${resetsAt ?? 0}`;
+    if (this.lastRateLimitKey === key) return;
+    this.lastRateLimitKey = key;
+
+    log(
+      `[${this.agentId}] Kontingent-Meldung: status=${status} fenster=${window ?? "?"} ` +
+        `reset=${resetsAt ? new Date(resetsAt).toISOString() : "?"} auslastung=${utilization ?? "?"}`,
+    );
+
+    let suggestId: string | undefined;
+    try {
+      const state = loadAccounts();
+      if (rejected && resetsAt) {
+        saveAccounts(withCooldown(state, this.accountId, { until: resetsAt, window, rejected, utilization }));
+      }
+      suggestId = pickFallback(loadAccounts(), this.accountId)?.id;
+    } catch (e) {
+      log(`[${this.agentId}] Cooldown konnte nicht gespeichert werden: ${String(e)}`);
+    }
+
+    this.emit({
+      ...envelope(),
+      type: "rate_limit_notice",
+      agentId: this.agentId,
+      accountId: this.accountId,
+      rejected,
+      resetsAt,
+      window,
+      utilization,
+      suggestId,
+    });
+    this.onChange?.(); // Registry-Änderung sichtbar machen
   }
 
   // ---------------------------- Mock-Modus ----------------------------------
@@ -1075,18 +1191,39 @@ export class AgentSession {
 
   /**
    * Existiert die Claude-Code-Session `sessionId` lokal für dieses `cwd`? Claude legt Sessions unter
-   * `~/.claude/projects/<enc(cwd)>/<sessionId>.jsonl` ab, wobei `enc` den absoluten cwd-Pfad kodiert,
+   * `<configDir>/projects/<enc(cwd)>/<sessionId>.jsonl` ab, wobei `enc` den absoluten cwd-Pfad kodiert,
    * indem `/` und `.` durch `-` ersetzt werden (z. B. `/Users/x/coding/Boba` → `-Users-x-coding-Boba`).
    * Best effort: bei jedem Fehler/Unsicherheit `false` → der Stream startet lieber frisch, statt am
    * Resume einer nicht vorhandenen Session hart zu scheitern.
+   *
+   * WICHTIG (Mehrkonten): das Verzeichnis MUSS das des aktiven Kontos sein, nicht pauschal `~/.claude`.
+   * Sonst schlüge die Prüfung nach einem Kontowechsel fehl und mads startete still eine FRISCHE
+   * Session — also genau der Kontextverlust, den der Wechsel vermeiden soll. Ob beide Konten sich
+   * `projects/` per Symlink teilen, ist dabei egal: der Pfad wird so oder so korrekt aufgelöst.
    */
   private claudeSessionExists(cwd: string, sessionId: string): boolean {
     try {
       const enc = cwd.replace(/[/.]/g, "-");
-      return existsSync(join(homedir(), ".claude", "projects", enc, `${sessionId}.jsonl`));
+      return existsSync(join(this.accountConfigDir, "projects", enc, `${sessionId}.jsonl`));
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Konto-Profil auflösen und `accountId`/`accountConfigDir` konsistent setzen.
+   * Ohne (oder mit unbekannter) ID gilt das AKTIVE Konto der Registry — nicht blind `~/.claude`:
+   * sonst liefe ein Stream im Standardverzeichnis, während die Registry längst auf ein anderes
+   * Konto zeigt, und die Session läge anschliessend im falschen `projects/`.
+   */
+  private applyAccount(accountId?: string): void {
+    const state = loadAccounts();
+    const prof = resolveProfile(state, accountId);
+    if (accountId && prof.id !== accountId) {
+      log(`[${this.agentId}] Unbekanntes Claude-Konto "${accountId}" → "${prof.id}"`);
+    }
+    this.accountId = prof.id;
+    this.accountConfigDir = prof.configDir;
   }
 
   private emitText(text: string): void {

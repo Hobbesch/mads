@@ -97,6 +97,8 @@ export type HostMessage =
   | PromptSaveMsg
   | PromptDeleteMsg
   | RequestSnapshotMsg
+  | SetAccountMsg
+  | RequestAccountsMsg
   | ShutdownMsg;
 
 /**
@@ -262,6 +264,10 @@ export interface StartAgentMsg extends BaseMsg {
   type: "start_agent";
   agentId: string;
   prompt: string;
+  /** Screenshots/Bilder zum initialen Prompt (New-Stream-Dialog) — wie SendInputMsg.images. */
+  images?: ImageInput[];
+  /** Claude-Konto für diesen Stream (Profil-ID). Fehlt = aktives Konto der Registry. */
+  accountId?: string;
   cwd?: string; // explizit; sonst wird aus repoRoot+branch ein Worktree erzeugt
   repoRoot?: string; // P3: Worktree aus diesem Repo anlegen
   branch?: string; // P3: feat/<task> für den Worktree
@@ -512,6 +518,8 @@ export type SidecarMessage =
   | SidecarErrorMsg
   | HandoffResultMsg
   | PromptsUpdateMsg
+  | AccountsUpdateMsg
+  | RateLimitNoticeMsg
   | ModelActiveMsg;
 
 /**
@@ -835,10 +843,94 @@ export interface ResumableAgent {
    *  ihn nach dem Neustart NICHT mehr (in-Session verbirgt ihn isMergedDone bereits — hier fehlt nur der
    *  pr-Kontext, den wir bewusst nicht ins passive VM heben, um die Grid-Platzierung nicht zu ändern). */
   mergedClean?: boolean;
+  /** Claude-Konto (Profil-ID aus der Account-Registry), unter dem dieser Stream läuft. Muss den
+   *  Neustart überleben: die Claude-Session liegt im `projects/`-Verzeichnis GENAU DIESES Profils —
+   *  ein Resume unter dem falschen Konto fände sie nicht und würde still frisch starten. */
+  accountId?: string;
 }
 export interface ResumableAgentsMsg extends BaseMsg {
   type: "resumable_agents";
   agents: ResumableAgent[];
+}
+
+// ---- Mehrere Claude-Konten (Failover bei erschöpftem Kontingent) ----
+/**
+ * Ein Claude-Konto, ausgewählt über `CLAUDE_CONFIG_DIR` beim Start des Agent-Prozesses.
+ * mads speichert KEINE Zugangsdaten — die liegen im macOS-Schlüsselbund, den Claude Code
+ * selbst pro Config-Verzeichnis verwaltet. Hier steht nur, WELCHES Verzeichnis gilt.
+ */
+export interface AccountProfile {
+  /** Stabile ID, wird pro Agent persistiert (`ResumableAgent.accountId`). */
+  id: string;
+  /** Anzeigename in der Oberfläche. */
+  label: string;
+  /** Absoluter Pfad des Config-Verzeichnisses (z. B. `/Users/x/.claude`). */
+  configDir: string;
+  /** Nur informativ (aus `<configDir>/.claude.json` gelesen), nie zum Anmelden benutzt. */
+  email?: string;
+}
+
+/**
+ * Kontingent-Zustand eines Kontos. Gefüttert aus dem `rate_limit_event` des Agent-SDK —
+ * also aus MASCHINENLESBAREN Feldern, nicht aus geparster Fließtext-Fehlermeldung.
+ */
+export interface AccountCooldown {
+  /** Millisekunden-Zeitstempel, ab dem das Kontingent wieder verfügbar ist. */
+  until: number;
+  /** Welches Fenster erschöpft ist — vom SDK gemeldet (z. B. "five_hour", "seven_day"). */
+  window?: string;
+  /** true = bereits abgewiesen; false = nur Vorwarnung (`allowed_warning`), läuft noch. */
+  rejected: boolean;
+  /** Auslastung 0..1, sofern gemeldet. */
+  utilization?: number;
+}
+
+export interface AccountsState {
+  profiles: AccountProfile[];
+  /** Konto für neue Streams (Vorauswahl im Dialog). */
+  activeId: string;
+  /** Cooldowns je Profil-ID; fehlender Eintrag = verfügbar. */
+  cooldowns: Record<string, AccountCooldown>;
+}
+
+/** Sidecar → Host: vollständiger Account-Zustand (Registry + Cooldowns). Ersetzt lokal alles. */
+export interface AccountsUpdateMsg extends BaseMsg {
+  type: "accounts_update";
+  accounts: AccountsState;
+}
+
+/**
+ * Sidecar → Host: Kontingent-Meldung zu einem Stream. Rein informativ — mads wechselt das Konto
+ * NICHT von selbst (bewusste Entscheidung: der Wechsel bleibt eine menschliche Aktion), sondern
+ * zeigt den Hinweis samt Reset-Zeitpunkt und bietet den Umschalter an.
+ */
+export interface RateLimitNoticeMsg extends BaseMsg {
+  type: "rate_limit_notice";
+  agentId: string;
+  accountId: string;
+  /** true = Anfrage wurde abgewiesen (Limit erreicht); false = Vorwarnung, läuft noch. */
+  rejected: boolean;
+  resetsAt?: number;
+  window?: string;
+  utilization?: number;
+  /** ID eines verfügbaren Ausweich-Kontos, falls vorhanden → die UI kann den Wechsel anbieten. */
+  suggestId?: string;
+}
+
+/**
+ * Host → Sidecar: Konto dieses Streams wechseln. Der laufende Claude-Prozess wird dafür beendet
+ * und im Ziel-Konto per `--resume` derselben Session neu gestartet (die Umgebung eines Prozesses
+ * ist nach dem Start nicht mehr änderbar). Ohne `agentId`: nur das Default-Konto für neue Streams.
+ */
+export interface SetAccountMsg extends BaseMsg {
+  type: "set_account";
+  accountId: string;
+  agentId?: string;
+}
+
+/** Host → Sidecar: Account-Zustand neu senden (beim Start / nach Reconnect). */
+export interface RequestAccountsMsg extends BaseMsg {
+  type: "request_accounts";
 }
 
 /** Ergebnis eines Handoff-Export/-Imports → treibt einen dismissbaren Hinweis-Banner im Frontend. */

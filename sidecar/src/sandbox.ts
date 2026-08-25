@@ -24,6 +24,7 @@
  */
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadAccounts } from "./accounts.js";
 
 /** Notfall-Schalter: `MADS_SANDBOX=off|0|false` deaktiviert die Sandbox global (z. B. wenn ein
  *  Toolchain-Pfad fehlt und die Arbeit sonst steht). Bewusst grob — der Normalweg ist der Parameter. */
@@ -91,8 +92,22 @@ export function sandboxDenyReadPaths(): string[] {
     join(home, ".pypirc"),
     join(home, "Library", "Keychains"),
     // Claude-eigene Zugangsdaten (der SDK-Prozess liest sie selbst — Bash hat dort nichts zu suchen).
-    join(home, ".claude", ".credentials.json"),
+    // Mehrkonten-Betrieb: JEDES Konto-Config-Verzeichnis sperren, nicht nur das Standard-`~/.claude`.
+    // Sonst wäre ausgerechnet der zweite Account der ungeschützte — er liegt in einem anderen Ordner
+    // und fiele sonst durch diese Sperre hindurch.
+    ...accountCredentialPaths(),
   ];
+}
+
+/** `<configDir>/.credentials.json` für alle bekannten Konten (inkl. Standard, dedupliziert). */
+function accountCredentialPaths(): string[] {
+  const dirs = new Set<string>([join(homedir(), ".claude")]);
+  try {
+    for (const p of loadAccounts().profiles) dirs.add(p.configDir);
+  } catch {
+    /* Registry unlesbar → wenigstens das Standard-Verzeichnis bleibt gesperrt (fail-closed). */
+  }
+  return [...dirs].map((d) => join(d, ".credentials.json"));
 }
 
 /**

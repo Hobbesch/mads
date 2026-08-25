@@ -47,3 +47,41 @@ export function scrubbedAgentEnv(base: NodeJS.ProcessEnv = process.env): {
   }
   return { env, stripped };
 }
+
+/**
+ * Auth-Variablen, die eine ANGEMELDETE Sitzung übersteuern. Sie haben in Claude Code Vorrang vor
+ * dem Schlüsselbund-Login — stünden sie noch in der Env, liefe der Agent trotz gesetztem
+ * `CLAUDE_CONFIG_DIR` weiter auf dem übersteuernden Zugang und die Kontowahl wäre wirkungslos.
+ */
+export const ACCOUNT_OVERRIDE_ENV: readonly string[] = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+];
+
+/**
+ * Env für einen Agenten-Prozess unter einem BESTIMMTEN Claude-Konto.
+ *
+ * `configDir` wählt das Konto (eigener Schlüsselbund-Eintrag, eigene `.claude.json`, eigenes
+ * `projects/`). Zusätzlich zum normalen Credential-Scrub werden die Auth-Übersteuerer entfernt —
+ * aber NUR, wenn ein anderes als das Standard-Verzeichnis gewählt ist: wer mads ohne
+ * Konto-Umschaltung nutzt und sich bewusst per `ANTHROPIC_API_KEY` anmeldet, soll genau so
+ * weiterlaufen wie bisher (sonst bräche diese Änderung eine bestehende Anmeldeart).
+ */
+export function accountAgentEnv(
+  configDir: string,
+  defaultConfigDir: string,
+  base: NodeJS.ProcessEnv = process.env,
+): { env: Record<string, string | undefined>; stripped: string[] } {
+  const { env, stripped } = scrubbedAgentEnv(base);
+  env.CLAUDE_CONFIG_DIR = configDir;
+  if (configDir !== defaultConfigDir) {
+    for (const k of ACCOUNT_OVERRIDE_ENV) {
+      if (env[k] !== undefined) {
+        delete env[k];
+        stripped.push(k);
+      }
+    }
+  }
+  return { env, stripped };
+}

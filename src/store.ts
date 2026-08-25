@@ -32,6 +32,7 @@ import type {
   ImageInput,
   TimelineAttachment,
   SavedPrompt,
+  AccountsState,
 } from "../shared/protocol";
 import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultModelForRole, defaultEffortForRole } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
@@ -134,6 +135,7 @@ export interface AgentVM {
   activeModel?: string; // REAL vom SDK gelaufenes Modell (Doppel-Check) — maßgeblich für die Anzeige
   modelMismatch?: boolean; // true = SDK lief auf einem anderen Modell als angefordert (mads zieht nach)
   effort?: EffortMode; // Reasoning-Effort dieses Streams (undefined = Modell ohne Effort, z. B. Haiku)
+  accountId?: string; // Claude-Konto dieses Streams (Profil-ID der Account-Registry)
   createdAt: number;
   lastEventAt: number;
   /** Zeitpunkt, ab dem der aktuelle aktive Lauf zählt (für die Laufzeit-Anzeige). */
@@ -350,6 +352,9 @@ export interface MadsState {
   defaultModel: string;
   /** Globaler Default für den Effort neuer Streams (persistiert). */
   defaultEffort: EffortMode;
+  /** Claude-Konten + Cooldowns. Quelle ist der Sidecar (`accounts_update`) — hier nur gespiegelt.
+   *  undefined = noch nicht geladen (dann bleibt die Konto-Auswahl schlicht unsichtbar). */
+  accounts?: AccountsState;
   /** Change-Overview-Overlay an/aus (Owner: doc 09). Der Rail-„Änderungen"-Eintrag toggelt es (§2.3). */
   changeOverviewOn: boolean;
   /** Live-Diff-Quelle: Datei-Edits je Stream×Datei (doc 09 §3.2). Key: `${agentId}::${path}`. */
@@ -389,6 +394,7 @@ export interface MadsState {
     effort?: EffortMode;
     branch?: string;
     permissionMode?: PermissionMode;
+    images?: ImageInput[];
   }) => Promise<void>;
   selectAgent: (id: string) => void;
   requestNewStream: () => void;
@@ -422,6 +428,8 @@ export interface MadsState {
   /** Modell/Effort eines bestehenden Streams LIVE umstellen (Inspector). */
   setStreamModel: (id: string, model: string) => Promise<void>;
   setStreamEffort: (id: string, effort: EffortMode) => Promise<void>;
+  /** Konto eines Streams wechseln (startet den Claude-Prozess im Zielkonto per Resume neu). */
+  setStreamAccount: (id: string, accountId: string) => Promise<void>;
   interruptAgent: (id: string) => Promise<void>;
   stopAgent: (id: string, removeWorktree: boolean) => Promise<void>;
   commitAgent: (id: string) => Promise<void>;
@@ -725,6 +733,8 @@ export const useStore = create<MadsState>((set) => {
             buildCommit: msg.buildCommit,
           },
         });
+        // Konten-Registry anfordern (Quelle ist der Sidecar; die UI hält nur ein Spiegelbild).
+        void sendHost({ ...envelope(), type: "request_accounts" });
         // Beim Start das zuletzt geöffnete Projekt automatisch wiederöffnen, damit man
         // nach App-Neustart/Release nicht jedes Mal neu suchen muss.
         const st = useStore.getState();
@@ -949,6 +959,31 @@ export const useStore = create<MadsState>((set) => {
         // Fable-Default nicht mehr unbemerkt Tokens verbrennen.
         patchAgent(msg.agentId, { activeModel: msg.active, modelMismatch: msg.mismatch });
         break;
+
+      case "accounts_update":
+        // Der Sidecar besitzt die Registry (er startet die Prozesse) — das Frontend spiegelt nur.
+        set({ accounts: msg.accounts });
+        break;
+
+      case "rate_limit_notice": {
+        // Kontingent erreicht oder Vorwarnung. mads wechselt bewusst NICHT von selbst — der Wechsel
+        // startet den Claude-Prozess neu und bleibt eine menschliche Entscheidung.
+        const state = useStore.getState();
+        const name = (id: string) => state.accounts?.profiles.find((p) => p.id === id)?.label ?? id;
+        const reset = msg.resetsAt
+          ? new Date(msg.resetsAt).toLocaleTimeString("de-CH", { hour: "2-digit", minute: "2-digit" })
+          : undefined;
+        const head = msg.rejected
+          ? `⚠ Kontingent von „${name(msg.accountId)}" erreicht`
+          : `⏳ Kontingent von „${name(msg.accountId)}" wird knapp`;
+        const tail = msg.suggestId
+          ? ` — Umschalten auf „${name(msg.suggestId)}" oben im Kopf des Streams.`
+          : reset
+            ? ` — kein freies Konto, frühestens wieder ab ${reset}.`
+            : "";
+        notice(msg.agentId, msg.rejected ? "err" : "warn", `${head}${reset ? ` (Reset ${reset})` : ""}${tail}`);
+        break;
+      }
 
       case "spawn_substreams_request": {
         // Der Integrator-Chat hat per Tool N Sub-Streams angefordert → über den
@@ -1277,7 +1312,7 @@ export const useStore = create<MadsState>((set) => {
       set((s) => ({ recentProjects: forgetProject(s.recentProjects, repoRoot) }));
     },
 
-    createAgent: async ({ label, prompt, role, mock, model, effort, branch, permissionMode }) => {
+    createAgent: async ({ label, prompt, role, mock, model, effort, branch, permissionMode, images }) => {
       const id = crypto.randomUUID();
       const mode: PermissionMode = permissionMode ?? "auto";
       const st0 = useStore.getState();
@@ -1285,6 +1320,8 @@ export const useStore = create<MadsState>((set) => {
       // den Dialog ab, sondern auch programmatisches Erzeugen ohne Modellwahl (spawnParallelStreams
       // ruft createAgent ohne model/effort auf) — vorher liefen solche Sub-Streams unbemerkt auf dem
       // globalen (meist Opus-)Default statt auf dem günstigeren Sub-Agent-Default.
+      // Konto: explizit gewählt, sonst das aktive der Registry (fehlt sie noch, entscheidet der Sidecar).
+      const finalAccount = st0.accounts?.activeId;
       const finalModel = model ?? defaultModelForRole(role, st0.defaultModel);
       const finalEffort =
         effort !== undefined
@@ -1305,6 +1342,7 @@ export const useStore = create<MadsState>((set) => {
         autopilot: "assisted",
         model: finalModel,
         effort: finalEffort,
+        accountId: finalAccount,
         createdAt: Date.now(),
         lastEventAt: Date.now(),
         workStartedAt: Date.now(),
@@ -1325,6 +1363,8 @@ export const useStore = create<MadsState>((set) => {
         type: "start_agent",
         agentId: id,
         prompt,
+        images: images?.length ? images : undefined,
+        accountId: finalAccount,
         label,
         role,
         model: finalModel,
@@ -1497,6 +1537,9 @@ export const useStore = create<MadsState>((set) => {
           // lief nach dem Fortsetzen still auf SDK-Default weiter („warum ist das so langsam?").
           model: a.model,
           effort: clampEffort(a.model, a.effort),
+          // Konto MITSENDEN: die Claude-Session liegt im `projects/` genau dieses Kontos — ohne
+          // die Angabe suchte der Resume im falschen Konto und startete still frisch.
+          accountId: a.accountId,
           mock: false,
           permissionMode: a.permissionMode,
           autopilot: a.autopilot ?? "assisted",
@@ -1548,6 +1591,13 @@ export const useStore = create<MadsState>((set) => {
       patchAgent(id, { effort: e });
       notice(id, "accent", `⚙ Effort: ${EFFORT_LABEL[e]}`);
       await sendHost({ ...envelope(), type: "set_model_effort", agentId: id, effort: e });
+    },
+
+    setStreamAccount: async (id, accountId) => {
+      const label = useStore.getState().accounts?.profiles.find((p) => p.id === accountId)?.label ?? accountId;
+      patchAgent(id, { accountId });
+      notice(id, "accent", `⇄ Konto: ${label} — Stream wird im selben Gespräch dort fortgesetzt…`);
+      await sendHost({ ...envelope(), type: "set_account", agentId: id, accountId });
     },
 
     interruptAgent: async (id) => {
@@ -1831,6 +1881,7 @@ export const useStore = create<MadsState>((set) => {
             autopilot: "assisted",
             model: r.model,
             effort: clampEffort(r.model, r.effort),
+            accountId: r.accountId,
             createdAt: Date.now(),
             lastEventAt: Date.now(),
             branch: r.branch,

@@ -63,6 +63,8 @@ export function Inspector() {
   const setAutopilot = useStore((s) => s.setAutopilot);
   const setStreamModel = useStore((s) => s.setStreamModel);
   const setStreamEffort = useStore((s) => s.setStreamEffort);
+  const setStreamAccount = useStore((s) => s.setStreamAccount);
+  const accounts = useStore((s) => s.accounts);
   const defaultModel = useStore((s) => s.defaultModel);
   // Composer-Entwürfe je Agent (im Store) — beim Umschalten bleibt jeder Entwurf erhalten.
   const draft = useStore((s) => (s.selectedId ? s.drafts[s.selectedId] ?? "" : ""));
@@ -378,6 +380,34 @@ export function Inspector() {
                 onEffort={(e) => void setStreamEffort(selectedId, e)}
                 variant="inspector"
               />
+            </div>
+          )}
+          {/* Claude-Konto dieses Streams. Nur sichtbar, wenn überhaupt mehrere Konten eingerichtet
+              sind — wer nur eines nutzt, soll keine sinnlose Auswahl sehen. Der Wechsel startet den
+              Claude-Prozess im Zielkonto neu und setzt dieselbe Session per Resume fort. */}
+          {live && !agent.mock && accounts && accounts.profiles.length > 1 && (
+            <div
+              className="insp-me"
+              title="Claude-Konto NUR für diesen Stream. Beim Wechsel wird der Prozess im anderen Konto neu gestartet und dasselbe Gespräch fortgesetzt."
+            >
+              <span className="insp-me-label">Konto</span>
+              <select
+                className="mode-select"
+                value={agent.accountId ?? accounts.activeId}
+                onChange={(e) => void setStreamAccount(selectedId, e.target.value)}
+              >
+                {accounts.profiles.map((p) => {
+                  const cd = accounts.cooldowns[p.id];
+                  const blocked = !!cd && cd.rejected && cd.until > Date.now();
+                  const until = cd ? new Date(cd.until).toLocaleTimeString("de-CH", { hour: "2-digit", minute: "2-digit" }) : "";
+                  return (
+                    <option key={p.id} value={p.id} title={p.email ?? p.configDir}>
+                      {p.label}
+                      {blocked ? ` — Limit bis ${until}` : ""}
+                    </option>
+                  );
+                })}
+              </select>
             </div>
           )}
           {/* Doppel-Check: läuft der Stream real auf einem ANDEREN Modell als angefordert (stiller

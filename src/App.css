@@ -2296,6 +2296,11 @@ button.primary:hover {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-weak);
 }
+/* Composer-Wrap (Bild-Paste/Drop im „Aufgabe"-Feld, New-Stream-Dialog) sitzt zwischen .field und der
+   Textarea — bricht sonst den flex-stretch, den .field direkt an seine Kinder vergibt (schmale Box). */
+.field .composer-wrap textarea {
+  width: 100%;
+}
 .field-row {
   display: flex;
   gap: 12px;

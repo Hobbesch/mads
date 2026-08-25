@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import type { AgentRole } from "../store";
-import type { PermissionMode, EffortMode } from "../../shared/protocol";
+import type { PermissionMode, EffortMode, ImageInput } from "../../shared/protocol";
 import { ModelEffortPicker } from "./ModelEffortPicker";
 import { clampEffort, defaultEffortForRole, defaultModelForRole } from "../modelCatalog";
 import { loadNewStreamDraft, saveNewStreamDraft, clearNewStreamDraft, draftHasContent } from "../newStreamDraft";
+import { blobToBase64, makeThumbnail } from "../blob";
 
 export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const createAgent = useStore((s) => s.createAgent);
@@ -32,6 +33,10 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const [branch, setBranch] = useState(draft?.branch ?? "");
   const [mode, setMode] = useState<PermissionMode>(draft?.mode ?? "auto");
   const [mock, setMock] = useState(!sdkAvailable || !project);
+  // Screenshots zum initialen Prompt — bewusst NICHT im (localStorage-)Entwurf persistiert (Base64
+  // würde die Quota sprengen); überlebt also nur, solange der Dialog offen bleibt.
+  const [images, setImages] = useState<ImageInput[]>([]);
+  const [dragging, setDragging] = useState(false);
   // Wurde beim Öffnen ein Entwurf mit Inhalt wiederhergestellt? → sichtbarer Hinweis + „Verwerfen".
   const [showRestored, setShowRestored] = useState(
     !!draft && draftHasContent({ label: draft.label ?? "", prompt: draft.prompt ?? "", branch: draft.branch ?? "" }),
@@ -41,6 +46,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
     setLabel("");
     setPrompt("");
     setBranch("");
+    setImages([]);
     const r = hasIntegrator ? "sub" : "integrator";
     const m = defaultModelForRole(r, defaultModel);
     setRole(r);
@@ -57,15 +63,60 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
     saveNewStreamDraft({ label, prompt, role, model, effort, branch, mode });
   }, [label, prompt, role, model, effort, branch, mode]);
 
-  const dirty = draftHasContent({ label, prompt, branch });
+  const dirty = draftHasContent({ label, prompt, branch }) || images.length > 0;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const l = label.trim() || (role === "integrator" ? "Main-Agent" : "Sub-Agent");
-    const p = prompt.trim() || "Beschreibe deine Aufgabe…";
-    void createAgent({ label: l, prompt: p, role, mock, model, effort, branch: branch.trim() || undefined, permissionMode: mode });
+    // Leere Aufgabe (kein Text, kein Bild) NICHT mehr durch einen Platzhalter ersetzen — der Stream
+    // entsteht dann still (Worktree/Session), ohne dass Claude sofort losarbeitet. Die eigentliche
+    // Aufgabe kommt in diesem Fall als erste Nachricht im normalen Chat-Input (leistungsfähiger, u.a.
+    // Bild-Paste geht dort ohnehin schon).
+    void createAgent({
+      label: l,
+      prompt: prompt.trim(),
+      role,
+      mock,
+      model,
+      effort,
+      branch: branch.trim() || undefined,
+      permissionMode: mode,
+      images: images.length ? images : undefined,
+    });
     clearNewStreamDraft(); // Entwurf verbraucht → aufräumen
     onClose();
+  };
+
+  // Bild-Dateien (Paste ODER Drag&Drop) übernehmen — dieselbe Umwandlung wie im Composer (Inspector.tsx),
+  // hier aber in lokalen State statt in den (noch nicht existierenden) Agent-Draft.
+  const attachImageFiles = async (files: File[]) => {
+    const imgs: ImageInput[] = [];
+    for (const f of files) {
+      if (!f.type.startsWith("image/")) continue;
+      const thumb = await makeThumbnail(f);
+      imgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f), ...thumb });
+    }
+    if (imgs.length) setImages((prev) => [...prev, ...imgs]);
+  };
+
+  const onPromptPaste = async (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files = Array.from(items)
+      .filter((it) => it.type.startsWith("image/"))
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => !!f);
+    if (files.length) {
+      e.preventDefault();
+      await attachImageFiles(files);
+    }
+  };
+
+  const onPromptDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    const files = e.dataTransfer?.files;
+    if (files && files.length) await attachImageFiles(Array.from(files));
   };
 
   // Escape schließt den Dialog — der Entwurf bleibt gespeichert und ist beim nächsten Öffnen wieder da.
@@ -124,12 +175,38 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
 
         <label className="field">
           <span>Aufgabe (initialer Prompt)</span>
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={3}
-            placeholder="Was soll dieser Agent tun?"
-          />
+          <div
+            className={`composer-wrap${dragging ? " dragover" : ""}`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (!dragging) setDragging(true);
+            }}
+            onDragLeave={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+            }}
+            onDrop={(e) => void onPromptDrop(e)}
+          >
+            {dragging && <div className="composer-drophint">Screenshot hier ablegen zum Anhängen</div>}
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onPaste={(e) => void onPromptPaste(e)}
+              rows={3}
+              placeholder="Was soll dieser Agent tun? Leer lassen = Stream wird angelegt, aber wartet auf deine erste Nachricht im Chat. Screenshots per Einfügen/Ziehen anhängen."
+            />
+            {images.length > 0 && (
+              <div className="composer-attachments">
+                {images.map((im, i) => (
+                  <div key={`img-${i}`} className="thumb">
+                    <img src={`data:${im.mediaType};base64,${im.dataBase64}`} alt="Anhang" />
+                    <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))}>
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </label>
 
         <label className="field">
