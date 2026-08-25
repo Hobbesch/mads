@@ -25,6 +25,9 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
   const defaultEffort = useStore((s) => s.defaultEffort);
   const setDefaultModel = useStore((s) => s.setDefaultModel);
   const setDefaultEffort = useStore((s) => s.setDefaultEffort);
+  const accounts = useStore((s) => s.accounts);
+  const accountUsage = useStore((s) => s.accountUsage);
+  const setDefaultAccount = useStore((s) => s.setDefaultAccount);
   const [projectOpen, setProjectOpen] = useState(false);
 
   // Badges/Enabled lesen denselben Store-State über memoisierte Selektoren (§3.3).
@@ -122,6 +125,37 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
             onEffort={setDefaultEffort}
             variant="rail"
           />
+        </div>
+      )}
+
+      {/* Globales Standard-Konto (gilt für NEU eröffnete Streams). Ohne diese Stelle liesse sich
+          der Default gar nicht ändern — neue Streams landeten dann immer auf dem Konto, das gerade
+          in der Registry stand, auch wenn dessen Kontingent längst erschöpft ist. */}
+      {!railCollapsed && accounts && accounts.profiles.length > 1 && (
+        <div className="rail-modeleffort">
+          <div className="rail-me-label">Konto · Default</div>
+          <select
+            className="mode-select rail-account"
+            value={accounts.activeId}
+            onChange={(e) => void setDefaultAccount(e.target.value)}
+            title="Claude-Konto für neu eröffnete Streams. Laufende Streams bleiben, wo sie sind."
+          >
+            {accounts.profiles.map((p) => {
+              const cd = accounts.cooldowns[p.id];
+              const blocked = !!cd && cd.rejected && cd.until > Date.now();
+              const use = accountUsage[p.id];
+              const vals = [use?.fiveHour?.utilization, use?.sevenDay?.utilization].filter(
+                (v): v is number => v !== undefined,
+              );
+              const worst = vals.length ? Math.round(Math.max(...vals)) : undefined;
+              return (
+                <option key={p.id} value={p.id} title={p.email ?? p.configDir}>
+                  {p.label}
+                  {blocked ? " — Limit" : worst !== undefined ? ` — ${worst}%` : ""}
+                </option>
+              );
+            })}
+          </select>
         </div>
       )}
 

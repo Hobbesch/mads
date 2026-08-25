@@ -89,6 +89,25 @@ Sichtbar wird der Wert erst, **nachdem** ein Stream mindestens einen Turn auf de
 ist — vorher hat das SDK noch nichts gemeldet. Für ein Konto, das gerade nicht benutzt wird, gibt
 es folglich keine Anzeige; es gibt keine Abfrage des Kontingents ohne laufende Sitzung.
 
+## Welches Konto ein NEUER Stream bekommt
+
+Reihenfolge: ausdrückliche Wahl im „Neuer Stream"-Dialog → `accounts.activeId` (globales
+Standard-Konto) → Entscheidung des Sidecars (falls die Registry im Frontend noch nicht geladen war).
+
+Zwei Stellen zum Einstellen:
+
+* **Linke Leiste → „Konto · Default"** — gilt für alle neu eröffneten Streams. Schreibt `activeId`
+  in die Registry (über `set_account` ohne `agentId`). Laufende Streams bleiben unberührt.
+* **„Neuer Stream"-Dialog → „Claude-Konto"** — überschreibt den Default nur für diesen einen Stream,
+  ohne die globale Einstellung zu verändern.
+
+Beide zeigen den bekannten Verbrauch (engstes Fenster) bzw. „Limit erreicht", damit die Wahl nicht
+blind auf ein erschöpftes Konto fällt.
+
+Ohne diese Bedienelemente konnte der Default gar nicht geändert werden — neue Streams landeten
+immer auf dem Konto, das zufällig in der Registry stand. Genau das war die gemeldete Situation
+„im neuen Stream wird der falsche Account aufgerufen".
+
 ## Registry: `~/.mads/accounts.json`
 
 Bewusst **benutzerweit**, nicht projektlokal wie der übrige Sidecar-State: Kontingente gelten pro

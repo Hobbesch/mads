@@ -2302,6 +2302,13 @@ button.primary:hover {
   width: 100%;
 }
 
+/* Standard-Konto in der linken Leiste — volle Breite wie die Modell-/Effort-Selects darüber. */
+.rail-account {
+  width: 100%;
+  font-size: 11px;
+  padding: 4px 6px;
+}
+
 /* ---------------- Plan-Nutzungslimits (Konto-Verbrauch im Stream-Kopf) ---------------- */
 .usage-meter {
   display: flex;

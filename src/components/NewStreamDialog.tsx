@@ -14,6 +14,8 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const hasIntegrator = useStore((s) => Object.values(s.agents).some((a) => a.role === "integrator"));
   const defaultModel = useStore((s) => s.defaultModel);
   const defaultEffort = useStore((s) => s.defaultEffort);
+  const accounts = useStore((s) => s.accounts);
+  const accountUsage = useStore((s) => s.accountUsage);
 
   // Beim Öffnen einen zuvor auto-gespeicherten Entwurf wiederherstellen (überlebt Fehlklick/Neustart).
   const draft = useRef(loadNewStreamDraft()).current;
@@ -37,6 +39,8 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   // würde die Quota sprengen); überlebt also nur, solange der Dialog offen bleibt.
   const [images, setImages] = useState<ImageInput[]>([]);
   const [dragging, setDragging] = useState(false);
+  // Konto für diesen Stream — vorbelegt mit dem globalen Default, hier überschreibbar.
+  const [account, setAccount] = useState(accounts?.activeId ?? "");
   // Wurde beim Öffnen ein Entwurf mit Inhalt wiederhergestellt? → sichtbarer Hinweis + „Verwerfen".
   const [showRestored, setShowRestored] = useState(
     !!draft && draftHasContent({ label: draft.label ?? "", prompt: draft.prompt ?? "", branch: draft.branch ?? "" }),
@@ -82,6 +86,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
       branch: branch.trim() || undefined,
       permissionMode: mode,
       images: images.length ? images : undefined,
+      accountId: account || undefined,
     });
     clearNewStreamDraft(); // Entwurf verbraucht → aufräumen
     onClose();
@@ -208,6 +213,38 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
             )}
           </div>
         </label>
+
+        {/* Konto für DIESEN Stream. Vorbelegt mit dem globalen Default (linke Leiste), hier
+            überschreibbar — so muss man den Default nicht umstellen, nur weil ein einzelner Stream
+            auf dem anderen Konto laufen soll. */}
+        {accounts && accounts.profiles.length > 1 && (
+          <label className="field">
+            <span>Claude-Konto</span>
+            {/* `account` bleibt leer, wenn die Registry beim Öffnen noch nicht geladen war —
+                dann zeigt (und sendet) der Dialog den aktuellen Default. */}
+            <select value={account || accounts.activeId} onChange={(e) => setAccount(e.target.value)}>
+              {accounts.profiles.map((p) => {
+                const cd = accounts.cooldowns[p.id];
+                const blocked = !!cd && cd.rejected && cd.until > Date.now();
+                const use = accountUsage[p.id];
+                const vals = [use?.fiveHour?.utilization, use?.sevenDay?.utilization].filter(
+                  (v): v is number => v !== undefined,
+                );
+                const worst = vals.length ? Math.round(Math.max(...vals)) : undefined;
+                return (
+                  <option key={p.id} value={p.id} title={p.email ?? p.configDir}>
+                    {p.label}
+                    {blocked
+                      ? ` — Limit erreicht${cd ? ` bis ${new Date(cd.until).toLocaleTimeString("de-CH", { hour: "2-digit", minute: "2-digit" })}` : ""}`
+                      : worst !== undefined
+                        ? ` — ${worst}% verbraucht`
+                        : ""}
+                  </option>
+                );
+              })}
+            </select>
+          </label>
+        )}
 
         <label className="field">
           <span>Rolle</span>

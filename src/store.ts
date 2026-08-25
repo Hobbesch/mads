@@ -402,6 +402,7 @@ export interface MadsState {
     branch?: string;
     permissionMode?: PermissionMode;
     images?: ImageInput[];
+    accountId?: string;
   }) => Promise<void>;
   selectAgent: (id: string) => void;
   requestNewStream: () => void;
@@ -437,6 +438,8 @@ export interface MadsState {
   setStreamEffort: (id: string, effort: EffortMode) => Promise<void>;
   /** Konto eines Streams wechseln (startet den Claude-Prozess im Zielkonto per Resume neu). */
   setStreamAccount: (id: string, accountId: string) => Promise<void>;
+  /** Standard-Konto für NEU eröffnete Streams. Laufende Streams bleiben unberührt. */
+  setDefaultAccount: (accountId: string) => Promise<void>;
   interruptAgent: (id: string) => Promise<void>;
   stopAgent: (id: string, removeWorktree: boolean) => Promise<void>;
   commitAgent: (id: string) => Promise<void>;
@@ -1354,7 +1357,7 @@ export const useStore = create<MadsState>((set) => {
       set((s) => ({ recentProjects: forgetProject(s.recentProjects, repoRoot) }));
     },
 
-    createAgent: async ({ label, prompt, role, mock, model, effort, branch, permissionMode, images }) => {
+    createAgent: async ({ label, prompt, role, mock, model, effort, branch, permissionMode, images, accountId }) => {
       const id = crypto.randomUUID();
       const mode: PermissionMode = permissionMode ?? "auto";
       const st0 = useStore.getState();
@@ -1362,8 +1365,9 @@ export const useStore = create<MadsState>((set) => {
       // den Dialog ab, sondern auch programmatisches Erzeugen ohne Modellwahl (spawnParallelStreams
       // ruft createAgent ohne model/effort auf) — vorher liefen solche Sub-Streams unbemerkt auf dem
       // globalen (meist Opus-)Default statt auf dem günstigeren Sub-Agent-Default.
-      // Konto: explizit gewählt, sonst das aktive der Registry (fehlt sie noch, entscheidet der Sidecar).
-      const finalAccount = st0.accounts?.activeId;
+      // Konto: explizit gewählt (New-Stream-Dialog), sonst das globale Default-Konto der Registry.
+      // Fehlt beides (Registry noch nicht geladen), entscheidet der Sidecar.
+      const finalAccount = accountId ?? st0.accounts?.activeId;
       const finalModel = model ?? defaultModelForRole(role, st0.defaultModel);
       const finalEffort =
         effort !== undefined
@@ -1640,6 +1644,13 @@ export const useStore = create<MadsState>((set) => {
       patchAgent(id, { accountId });
       notice(id, "accent", `⇄ Konto: ${label} — Stream wird im selben Gespräch dort fortgesetzt…`);
       await sendHost({ ...envelope(), type: "set_account", agentId: id, accountId });
+    },
+
+    setDefaultAccount: async (accountId) => {
+      // Optimistisch spiegeln, damit die Auswahl sofort steht; der Sidecar bestätigt per
+      // accounts_update (er besitzt die Registry und schreibt sie auf Platte).
+      set((s) => (s.accounts ? { accounts: { ...s.accounts, activeId: accountId } } : {}));
+      await sendHost({ ...envelope(), type: "set_account", accountId });
     },
 
     interruptAgent: async (id) => {
