@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { DEFAULT_MODEL, DEFAULT_SUB_MODEL } from "../../shared/protocol.js";
+import { DEFAULT_MODEL } from "../../shared/protocol.js";
 import type {
   StartAgentMsg,
   PermissionDecision,
@@ -367,12 +367,14 @@ export class AgentSession {
     this.label = msg.label;
     this.role = msg.role;
     // PRÄVENTION (Doppel-Check, Schicht 1): NIE undefined ans SDK — sonst wählt es sein Flaggschiff
-    // (Fable 5) und verbrennt teure Tokens „blind". Ein verlorenes Modell beim Resume (msg.model
-    // undefined) fällt hier rollenbewusst zurück: Integrator auf DEFAULT_MODEL (Opus), Sub-Agent auf
-    // DEFAULT_SUB_MODEL (opusplan — Sonnet-Kosten in der Ausführung, Opus nur beim tatsächlichen
-    // Planen) statt still auf Fable ODER unnötig teuer auf Opus zu laufen. Deckt auch den
-    // programmatischen Auslagern-Flow ab (outsource_main), der keinen Model-Picker durchläuft.
-    this.model = msg.model || (msg.role === "sub" ? DEFAULT_SUB_MODEL : DEFAULT_MODEL);
+    // (Fable 5) und verbrennt teure Tokens „blind". Ein verlorenes Modell (msg.model undefined, z. B.
+    // beim Resume) fällt hier ROLLEN-UNABHÄNGIG auf DEFAULT_MODEL zurück. Bewusst kein billigerer
+    // Sub-Fallback mehr: ein mads-Sub-Stream ist ein gleichrangiger Top-Level-Agent mit eigenem
+    // Worktree/Branch/PR, NICHT der SDK-interne „Subagent" des Agent-Tools (Unterscheidung ist
+    // load-bearing, docs/design/04-sub-agents.md §0). Ein Stream, der auf Fable 5 lief und beim
+    // Resume sein Modell verliert, darf nicht still auf ein schwächeres Modell abrutschen.
+    // Deckt auch den Auslagern-Flow ab (outsource_main), der keinen Model-Picker durchläuft.
+    this.model = msg.model || DEFAULT_MODEL;
     this.effort = msg.effort;
     // Konto auflösen, BEVOR irgendetwas den Config-Pfad braucht (Session-Suche beim Resume).
     this.applyAccount(msg.accountId);

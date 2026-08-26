@@ -346,7 +346,7 @@ export class Orchestrator {
           role: "sub",
           // Kein hartcodiertes Modell (war vorher ein veraltetes "claude-sonnet-4-6" — ignorierte
           // die Picker-Wahl komplett) — das Modell des Integrators übernehmen, dessen main-Änderungen
-          // hier ausgelagert werden. Undefined coerciert session.ts ohnehin auf DEFAULT_MODEL.
+          // hier ausgelagert werden. Fehlt es, coerciert session.ts auf DEFAULT_MODEL.
           model: integ.model,
           // Konto des Integrators übernehmen, aus dessen main-Checkout ausgelagert wird. Ohne die
           // Angabe fiele der neue Stream auf das globale Standardkonto — also womöglich auf ein
