@@ -8,7 +8,7 @@
  * „Ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung (SDK-Session-Flag `ultracode`).
  */
 import type { EffortMode } from "../shared/protocol";
-import { DEFAULT_MODEL as SHARED_DEFAULT_MODEL, DEFAULT_SUB_MODEL as SHARED_DEFAULT_SUB_MODEL } from "../shared/protocol";
+import { DEFAULT_MODEL as SHARED_DEFAULT_MODEL } from "../shared/protocol";
 
 export interface ModelOption {
   id: string;
@@ -62,9 +62,6 @@ export const DEFAULT_EFFORT: EffortMode = "high";
 /** Standard-Modell für neue Streams (Integrator-Default nach CLAUDE.md). Single Source in
  *  shared/protocol.ts — dieselbe Konstante, die der Sidecar zur undefined-Coercion nutzt. */
 export const DEFAULT_MODEL = SHARED_DEFAULT_MODEL;
-/** Standard-Modell für SUB-Agents ("opusplan" — Sonnet-Kosten in der Ausführung, Opus nur beim
- *  tatsächlichen Planen). Single Source in shared/protocol.ts, siehe defaultModelForRole(). */
-export const DEFAULT_SUB_MODEL = SHARED_DEFAULT_SUB_MODEL;
 
 export function modelLabel(id: string | undefined): string {
   if (!id) return "?";
@@ -87,28 +84,20 @@ export function clampEffort(modelId: string | undefined, effort: EffortMode | un
 }
 
 /**
- * Modell-Vorbelegung für einen NEUEN Stream, rollenbewusst statt einem einzigen globalen Default
- * für Integrator UND Sub-Agent gleichermaßen: Sub-Agents starten auf DEFAULT_SUB_MODEL
- * ("opusplan" — nie teurer als durchgehendes Sonnet, potenziell besser bei Aufgaben, die den
- * Agenten selbst planen lassen). Der Integrator behält den bisherigen globalen Default (typischerweise
- * Opus 5). Reiner Vorschlag — im Dialog direkt darunter frei überschreibbar.
+ * Modell-/Effort-Vorbelegung für einen NEUEN Stream. BEWUSST rollen-UNABHÄNGIG: was der Nutzer in
+ * der linken Navigation unter „Modell & Effort · Default" stehen hat, gilt für jeden neu eröffneten
+ * Stream — Integrator wie Sub-Agent. Vorher überschrieb eine rollenbewusste Sonderbehandlung
+ * (Sub-Agent → opusplan/low, Anthropics Subagent-Empfehlung) diese Wahl still: der Rail-Regler
+ * versprach „gilt für NEU eröffnete Streams", ein neuer Sub-Stream startete aber trotzdem auf „low".
+ * Vorhersagbarkeit schlägt hier die automatische Kostenbremse — wer Sub-Streams günstig will, stellt
+ * den Rail-Default auf opusplan/low (oder ändert Modell/Effort im Dialog-Picker direkt darunter).
+ *
+ * Effort wird nur noch auf das gewählte Modell begrenzt (clampEffort) — Haiku z. B. kennt gar keinen
+ * Effort-Regler, Sonnet 4.6 kein xhigh.
  */
-export function defaultModelForRole(role: "integrator" | "sub", fallback: string): string {
-  return role === "sub" ? DEFAULT_SUB_MODEL : fallback;
-}
-
-/**
- * Effort-Vorbelegung, analog rollenbewusst: Anthropics eigene Empfehlung ist "low" für Subagents
- * (steuert Text/Tool-Calls/Thinking zusammen, invalidiert bei Änderung aber den Prompt-Cache-Präfix
- * — deshalb hier nur die STARTBELEGUNG, keine Live-Umschaltung während der Session). Der Integrator
- * behält den bisherigen globalen Default (typischerweise "high", CLAUDE.md-Empfehlung). Bleibt in
- * beiden Fällen ein reiner Vorschlag — im Dialog direkt darunter frei überschreibbar.
- */
-export function defaultEffortForRole(
-  role: "integrator" | "sub",
+export function defaultEffortForModel(
   modelId: string | undefined,
   fallback: EffortMode | undefined,
 ): EffortMode | undefined {
-  if (role === "sub") return clampEffort(modelId, "low");
   return clampEffort(modelId, fallback);
 }

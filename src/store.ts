@@ -35,7 +35,7 @@ import type {
   AccountsState,
   UsageWindow,
 } from "../shared/protocol";
-import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultModelForRole, defaultEffortForRole } from "./modelCatalog";
+import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultEffortForModel } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
@@ -1370,18 +1370,19 @@ export const useStore = create<MadsState>((set) => {
       const id = crypto.randomUUID();
       const mode: PermissionMode = permissionMode ?? "auto";
       const st0 = useStore.getState();
-      // Modell/Effort: explizit (New-Stream-Dialog) sonst rollenbewusster Default. Deckt NICHT nur
-      // den Dialog ab, sondern auch programmatisches Erzeugen ohne Modellwahl (spawnParallelStreams
-      // ruft createAgent ohne model/effort auf) — vorher liefen solche Sub-Streams unbemerkt auf dem
-      // globalen (meist Opus-)Default statt auf dem günstigeren Sub-Agent-Default.
+      // Modell/Effort: explizit (New-Stream-Dialog) sonst der globale Default aus der linken
+      // Navigation — für JEDE Rolle derselbe. Die frühere rollenbewusste Sonderbehandlung
+      // (Sub-Agent → opusplan/low) überschrieb den Rail-Regler still; jetzt gilt sichtbar das,
+      // was dort steht. Deckt auch programmatisches Erzeugen ab (spawnParallelStreams ruft
+      // createAgent ohne model/effort auf).
       // Konto: explizit gewählt (New-Stream-Dialog), sonst das globale Default-Konto der Registry.
       // Fehlt beides (Registry noch nicht geladen), entscheidet der Sidecar.
       const finalAccount = accountId ?? st0.accounts?.activeId;
-      const finalModel = model ?? defaultModelForRole(role, st0.defaultModel);
+      const finalModel = model ?? st0.defaultModel;
       const finalEffort =
         effort !== undefined
           ? clampEffort(finalModel, effort)
-          : defaultEffortForRole(role, finalModel, st0.defaultEffort);
+          : defaultEffortForModel(finalModel, st0.defaultEffort);
       const project = st0.project;
       const agent: AgentVM = {
         id,
