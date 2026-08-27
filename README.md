@@ -84,10 +84,10 @@ Noch nicht im Prototyp (Roadmap P8+): voll-autonomes Auto-Integrate (Merge ohne 
 Update-Bereich (Claude-Code-Feature-Monitoring), LLM-`security-review`-Subagent, Merge-Queue,
 Multi-Window. Siehe [Roadmap](docs/design/01-architecture.md#10-roadmap--phasen-mvp--vollausbau).
 
-## An einem echten Projekt (z. B. PAIX) testen
+## An einem echten Projekt testen
 
 1. `npm run tauri dev` aus dem Terminal starten (damit `node`/`gh` im PATH sind).
-2. Links **„Projekt öffnen"** → das PAIX-Repo wählen (mads liest owner/repo/default-branch aus `origin`).
+2. Links **„Projekt öffnen"** → das Repo wählen (mads liest owner/repo/default-branch aus `origin`).
 3. **„+ Neuer Stream"** → Rolle **Sub-Agent**, Mock-Haken **aus**, Aufgabe beschreiben →
    mads legt einen Worktree+Branch an und startet einen echten Claude-Agenten darin.
 4. Mehrere Sub-Agenten parallel anlegen — jeder arbeitet isoliert auf eigener Branch.
