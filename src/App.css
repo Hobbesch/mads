@@ -254,6 +254,25 @@ button {
   right: -3px;
 }
 
+/* „Don't Panic" — der einzige rote Rail-Eintrag. Er hält ALLE Streams an, das darf man ihm
+   ansehen. Farbe ist aber nicht der alleinige Träger (doc 10 §8): das Warndreieck-Icon und der
+   Text sagen dasselbe, die Färbung verstärkt nur. Ohne Konflikt bleibt der Eintrag ruhig
+   (normale Textfarbe) — sonst stumpft das Rot ab und warnt nicht mehr, wenn es zählt. */
+.rail-item-wrap.panic .rail-item:not(:disabled) .rail-icon {
+  color: var(--s-red);
+}
+.rail-item-wrap.panic .rail-item:not(:disabled):hover {
+  background: color-mix(in srgb, var(--s-red) 12%, transparent);
+}
+.rail-item-wrap.panic .rail-item:focus-visible {
+  outline-color: var(--s-red);
+}
+/* Sobald tatsächlich ein Konflikt gemeldet ist (Badge vorhanden), auch den Text einfärben. */
+.rail-item-wrap.panic .rail-item:not(:disabled):has(.rail-badge) {
+  color: var(--s-red);
+  font-weight: 600;
+}
+
 .rail-collapse {
   display: flex;
   align-items: center;

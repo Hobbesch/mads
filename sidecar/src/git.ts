@@ -1179,7 +1179,7 @@ export async function syncBranch(
           `Versionierung nehmen (git rm --cached <pfad>) und in .gitignore aufnehmen.${stuckNote}`,
       };
     }
-    // Echter Rebase-Konflikt: die betroffenen Dateien nennen + auf „Konflikt lösen" verweisen
+    // Echter Rebase-Konflikt: die betroffenen Dateien nennen + auf den Rail-Knopf verweisen
     // (statt git-Rohtext). mads rebaset/pusht nach der Auflösung selbst.
     if (conflictFiles.length > 0) {
       const shown = conflictFiles.slice(0, 8).join(", ");
@@ -1189,7 +1189,7 @@ export async function syncBranch(
         kind: "merge_conflict",
         error:
           `Rebase-Konflikt mit origin/${defaultBranch} in ${conflictFiles.length} Datei(en): ${shown}${more}. ` +
-          `Über „Konflikt lösen" im Worktree beheben — mads rebaset/pusht danach.${stuckNote}`,
+          `Über „Konflikt lösen“ in der Seitenleiste auflösen — mads rebaset/pusht danach.${stuckNote}`,
       };
     }
     return { ok: false, kind: "merge_conflict", error: errText + stuckNote };

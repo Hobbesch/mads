@@ -30,6 +30,12 @@ await build({
   target: "node20",
   packages: "external",
   outfile: "dist/index.js",
+  // Playbooks (playbooks/*.md) werden als Text INS BUNDLE gezogen, nicht zur Laufzeit vom
+  // Dateisystem gelesen: dist/index.js läuft je nach Installation aus dem Repo oder aus dem
+  // App-Bundle, ein relativer Pfad wäre dort unterschiedlich (und im Fehlerfall stumm leer).
+  // So ist das Playbook garantiert vorhanden und bleibt trotzdem eine echte .md-Datei, die man
+  // ohne Escaping-Aufwand erweitern kann.
+  loader: { ".md": "text" },
   banner: { js: "import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);" },
   define: {
     __SIDECAR_GIT_COMMIT__: JSON.stringify(commit),

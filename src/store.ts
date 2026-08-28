@@ -321,6 +321,12 @@ export interface MadsState {
   /** Ergebnis des letzten Handoff-Export/-Imports — treibt einen dismissbaren Banner. */
   handoff?: HandoffResultMsg;
   collisions: Collision[];
+  /**
+   * „Don't Panic"-Zustand: solange `active`, sind die genannten Sub-Streams angehalten und ihr
+   * Autopilot steht auf `manual`. Die Rail zeigt dann die Freigabe statt des Panic-Knopfs.
+   * Spiegel des Sidecars (`panic_state`) — nie lokal gesetzt, sonst driften UI und Wahrheit.
+   */
+  panic: { active: boolean; stoppedAgentIds: string[]; resolverAgentId?: string };
   /** Kuratierte, wiederverwendbare Prompts des Projekts (reiner Spiegel — Persistenz macht
    *  der Sidecar in `<repoRoot>/.mads/prompts.json`, gemeldet via prompts_update). */
   prompts: SavedPrompt[];
@@ -445,8 +451,14 @@ export interface MadsState {
   commitAgent: (id: string) => Promise<void>;
   createPr: (id: string) => Promise<void>;
   syncBranch: (id: string) => Promise<void>;
-  /** Geführte Konfliktlösung: beauftragt den Agenten, den Rebase-Konflikt im Worktree zu lösen. */
-  resolveConflict: (id: string) => Promise<void>;
+  /**
+   * „Don't Panic": hält alle Sub-Streams an und übergibt die Konfliktlösung an den Integrator.
+   * Ersetzt den früheren per-Stream-Knopf, der nur einen Prompt in einen gesandboxten Sub-Stream
+   * schickte — der kann die Lage über mehrere Worktrees hinweg gar nicht beurteilen.
+   */
+  panicResolve: () => Promise<void>;
+  /** Gegenstück: angehaltene Streams freigeben, gemerkte Autopilot-Level wiederherstellen. */
+  panicRelease: () => Promise<void>;
   /** Uncommittete Änderungen des Main-Checkouts in einen neuen Sub-Stream auslagern. */
   outsourceMain: (integratorId: string) => Promise<void>;
   /** Den aktuellen (Deploy-)Stand des Main-Checkouts als Release-Commit festhalten (chore(release): …). */
@@ -780,6 +792,7 @@ export const useStore = create<MadsState>((set) => {
                   escalations: [],
                   authReloginNeeded: false,
                   collisions: [],
+                  panic: { active: false, stoppedAgentIds: [] },
                   editsByFile: {},
                   selectedId: undefined,
                   parallelPicker: undefined,
@@ -960,6 +973,16 @@ export const useStore = create<MadsState>((set) => {
 
       case "collision_warning":
         set({ collisions: msg.collisions });
+        break;
+
+      case "panic_state":
+        set({
+          panic: {
+            active: msg.active,
+            stoppedAgentIds: msg.stoppedAgentIds,
+            resolverAgentId: msg.resolverAgentId,
+          },
+        });
         break;
 
       case "prompts_update":
@@ -1257,6 +1280,7 @@ export const useStore = create<MadsState>((set) => {
     incomingPrs: [],
     reconcileSummary: undefined,
     collisions: [],
+    panic: { active: false, stoppedAgentIds: [] },
     prompts: [],
     whisper: { installed: false, checked: false, downloading: false, progress: 0 },
     dictation: { recording: false, transcribing: false },
@@ -1759,27 +1783,16 @@ export const useStore = create<MadsState>((set) => {
       await sendHost({ ...envelope(), type: "commit_main_release", agentId: integratorId });
     },
 
-    resolveConflict: async (id) => {
-      // Geführte Konfliktlösung (3.4): den Agenten den Rebase IN SEINEM Worktree lösen lassen
-      // (reine git-Arbeit; kein Push/PR/Merge — das macht mads). Das syncBlocked-Flag löscht der
-      // Sidecar automatisch, sobald der Branch wieder aufgeholt hat (behind=0).
-      const db = useStore.getState().project?.defaultBranch ?? "main";
-      notice(id, "accent", "▶ Konflikt lösen (Agent rebaset im Worktree)");
-      await useStore.getState().sendInput(
-        id,
-        `Dein Branch hat einen Rebase-Konflikt mit origin/${db}. Löse ihn IN DIESEM Worktree:\n` +
-          `1. \`git rebase origin/${db}\` ausführen.\n` +
-          `2. Konfliktmarkierungen beheben. Ergänzen BEIDE Seiten unabhängig etwas (neue Routes, ` +
-          `Nav-Links, Dependencies, i18n-Keys), dann BEIDE behalten (nicht eine Seite verwerfen).\n` +
-          `3. GENERIERTE Sperrdateien NICHT von Hand mergen — neu erzeugen, nachdem die Quelldatei ` +
-          `konfliktfrei ist: \`uv.lock\` → \`uv lock\`; \`package-lock.json\` → \`npm install\`. ` +
-          `(Handgemergte Lockfiles sind kaputt und lassen das Gate „Lockfile up-to-date" scheitern.)\n` +
-          `4. \`git add -A && git rebase --continue\` (ggf. mehrfach, bis der Rebase durch ist).\n` +
-          `5. Verifizieren: die Projekt-Checks lokal grün laufen lassen (z. B. \`uv run ruff check .\`, ` +
-          `\`uv run mypy\`, \`uv run pytest -q\` bzw. \`npm run lint/typecheck/test\`).\n` +
-          `NICHT pushen, keinen PR, keinen Merge — Push/PR/Integration übernimmt mads. ` +
-          `Fasse am Ende kurz zusammen, welche Dateien du angepasst hast.`,
-      );
+    panicResolve: async () => {
+      // Der Sidecar hält die Sub-Streams an, friert ihren Autopilot ein und beauftragt den
+      // Integrator mit Playbook + Lagebericht. Hier bewusst KEINE Optimistik: der Panic-Zustand
+      // kommt ausschliesslich über `panic_state` zurück, damit UI und Sidecar nicht auseinander-
+      // laufen, wenn das Anhalten scheitert (z. B. weil kein Integrator läuft).
+      await sendHost({ ...envelope(), type: "panic_resolve" });
+    },
+
+    panicRelease: async () => {
+      await sendHost({ ...envelope(), type: "panic_release" });
     },
 
     integratePr: async (id, keep = false) => {

@@ -35,7 +35,8 @@ const SHARED_LANDFIRST_GLOBS = [
   "**/pnpm-lock.yaml",
   "**/go.sum",
 ];
-import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, ResumableAgent, SavedPrompt, OpenReviewStreamMsg, StartAgentMsg } from "../../shared/protocol.js";
+import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, AutopilotLevel, ResumableAgent, SavedPrompt, OpenReviewStreamMsg, StartAgentMsg } from "../../shared/protocol.js";
+import conflictPlaybook from "../playbooks/conflict-resolution.md";
 import { loadAccounts, pruneCooldowns, saveAccounts } from "./accounts.js";
 
 /**
@@ -115,6 +116,12 @@ export class Orchestrator {
   // in agents.json persistiert (persistReviewEntry) und beim Start wiederhergestellt (hydrateReviewStreams).
   // Beim Merge/Verwerfen wird Worktree + Registry-Eintrag abgeräumt.
   private reviewStreams = new Map<string, { prNumber: number; branch: string; worktreePath: string; url: string; label: string; author: string }>();
+  // „Don't Panic": Sub-Streams, die für eine übergreifende Konfliktlösung angehalten wurden, mit
+  // ihrem VORHERIGEN Autopilot-Level. Der gemerkte Wert ist der Grund für die Map (statt eines
+  // Sets): bei der Freigabe soll jeder Stream seinen eigenen Level zurückbekommen, nicht pauschal
+  // den Default — sonst würde ein bewusst manuell geführter Stream plötzlich autonom weiterlaufen.
+  private panicStopped = new Map<string, AutopilotLevel>();
+  private panicResolverId?: string;
 
   async dispatch(msg: HostMessage): Promise<void> {
     switch (msg.type) {
@@ -231,6 +238,14 @@ export class Orchestrator {
 
       case "interrupt_agent":
         await this.pool.get(msg.agentId)?.interrupt();
+        break;
+
+      case "panic_resolve":
+        await this.handlePanicResolve();
+        break;
+
+      case "panic_release":
+        this.handlePanicRelease();
         break;
 
       case "set_permission_mode":
@@ -363,7 +378,7 @@ export class Orchestrator {
           this.emitError(
             msg.agentId,
             "merge_conflict",
-            "Die ausgelagerten Änderungen kollidieren mit dem aktuellen main — bitte im Worktree auflösen (Knopf „Konflikt lösen“).",
+            "Die ausgelagerten Änderungen kollidieren mit dem aktuellen main — über „Konflikt lösen“ in der Seitenleiste auflösen.",
           );
         }
         this.emit({
@@ -667,6 +682,11 @@ export class Orchestrator {
   private emitSnapshot(): void {
     if (this.project) this.emit({ ...envelope(), type: "project_resolved", project: this.project });
     this.emitPrompts(); // gespeicherte Prompts — sonst fehlt einem neu verbundenen Client die Liste
+    // Panic-Zustand mitschicken: sonst zeigt ein neu geladener Client wieder „Konflikt lösen"
+    // an, obwohl die Streams längst angehalten sind — die Freigabe wäre dann unerreichbar.
+    // (Die gemerkten Autopilot-Level überlebt ein zweiter Klick unbeschadet, dafür sorgt der
+    // has()-Guard in handlePanicResolve.)
+    this.emitPanicState();
     for (const s of this.pool.values()) {
       this.emit({ ...envelope(), type: "status_update", agentId: s.agentId, status: s.status, label: s.label, role: s.role });
       this.emit({
@@ -1654,7 +1674,7 @@ export class Orchestrator {
         this.emitError(
           agentId,
           "merge_conflict",
-          "Nach dem Merge kollidiert die noch offene Arbeit dieses Streams mit dem neuen main — bitte „Konflikt lösen“. " +
+          "Nach dem Merge kollidiert die noch offene Arbeit dieses Streams mit dem neuen main — über „Konflikt lösen“ in der Seitenleiste auflösen. " +
             "Es wurde NICHTS zurückgesetzt, die Arbeit ist unangetastet.",
         );
         return false;
@@ -1874,6 +1894,120 @@ export class Orchestrator {
       if (regions.length) agentsRegions.push({ agentId: s.agentId, label: s.label ?? s.agentId, regions });
     }
     this.emit({ ...envelope(), type: "collision_warning", collisions: detectCollisions(agentsRegions) });
+  }
+
+  /** Panic-Zustand ans Frontend spiegeln (steuert Panic- vs. Freigabe-Knopf in der Rail). */
+  private emitPanicState(): void {
+    this.emit({
+      ...envelope(),
+      type: "panic_state",
+      active: this.panicStopped.size > 0,
+      stoppedAgentIds: [...this.panicStopped.keys()],
+      resolverAgentId: this.panicResolverId,
+    });
+  }
+
+  /**
+   * „Don't Panic": alle Sub-Streams anhalten und den Integrator mit der Auflösung beauftragen.
+   *
+   * Die Reihenfolge ist wesentlich: ERST anhalten und den Autopilot einfrieren, DANN den
+   * Lagebericht erheben. Andersherum misst man einen Stand, den ein weiterlaufender Stream
+   * gerade wieder verschiebt — genau die Situation, die den per-Stream-Knopf nutzlos machte.
+   */
+  private async handlePanicResolve(): Promise<void> {
+    if (!this.project) return;
+    const integrator = [...this.pool.values()].find((s) => s.role === "integrator");
+    if (!integrator) {
+      // Ohne Integrator gibt es keinen Stream mit Sicht über alle Worktrees — dann lieber laut
+      // scheitern als die Sub-Streams anzuhalten und niemanden mit der Auflösung zu beauftragen.
+      this.emit({
+        ...envelope(),
+        type: "error",
+        scope: "sidecar",
+        code: "spawn_failed",
+        message: "Konfliktlösung braucht einen laufenden Integrator — bitte den Main-Agenten starten.",
+        recoverable: true,
+      });
+      return;
+    }
+
+    const subs = [...this.pool.values()].filter((s) => s.role === "sub");
+    for (const s of subs) {
+      if (!this.panicStopped.has(s.agentId)) this.panicStopped.set(s.agentId, s.autopilot);
+      // Interrupt allein genügt nicht: der Autopilot würde direkt die nächste Aktion nachschieben
+      // (commit/push/PR) und damit während der Auflösung weiter am Stand rühren.
+      s.autopilot = "manual";
+      try {
+        await s.interrupt();
+      } catch (e) {
+        log(`[panic] interrupt ${s.agentId} fehlgeschlagen: ${String(e)}`);
+      }
+    }
+    this.panicResolverId = integrator.agentId;
+    this.persist();
+    this.emitPanicState();
+    log(`[panic] ${subs.length} Sub-Stream(s) angehalten, Resolver = ${integrator.agentId}`);
+
+    const report = await this.panicSituationReport();
+    integrator.sendInput(`${conflictPlaybook}\n\n---\n\n${report}`);
+  }
+
+  /** Lagebericht über alle Sub-Streams — der Einstieg, den der Integrator selbst nachmessen soll. */
+  private async panicSituationReport(): Promise<string> {
+    const db = this.project?.defaultBranch ?? "main";
+    const lines: string[] = [
+      "# Lage",
+      "",
+      `Default-Branch: \`origin/${db}\` · Haupt-Checkout: \`${this.project?.repoRoot ?? "?"}\``,
+      "",
+      "Die folgenden Sub-Streams sind angehalten; ihr Autopilot steht auf `manual`. Die Zahlen sind",
+      "eine Momentaufnahme aus mads' Sicht — **miss selbst nach**, bevor du daraus Schlüsse ziehst.",
+      "",
+    ];
+    for (const s of this.pool.values()) {
+      if (s.role !== "sub" || !s.worktreePath || !s.branch || !s.repoRoot) continue;
+      let git: GitStatusResult | undefined;
+      try {
+        git = await gitStatus(s.repoRoot, s.worktreePath, s.branch, db, true);
+      } catch {
+        /* Status ist Beiwerk — der Bericht bleibt auch ohne ihn brauchbar. */
+      }
+      const pr = s.lastPr ? `PR #${s.lastPr.number} (${s.lastPr.state}, ${s.lastPr.mergeStateStatus ?? "?"})` : "kein PR";
+      const flags = [
+        git?.dirty ? "ungesicherte Arbeit" : undefined,
+        this.autoSyncConflicted.has(s.agentId) ? "Sync blockiert" : undefined,
+        git?.unreliable ? "git-Status unzuverlässig" : undefined,
+      ].filter(Boolean);
+      lines.push(
+        `## ${s.label ?? s.agentId}`,
+        `- Branch: \`${s.branch}\``,
+        `- Worktree: \`${s.worktreePath}\``,
+        `- gegen \`origin/${db}\`: ${git?.behind ?? "?"} behind, ${git?.ahead ?? "?"} ahead`,
+        `- ${pr}`,
+        ...(flags.length ? [`- Auffällig: ${flags.join(", ")}`] : []),
+        "",
+      );
+    }
+    lines.push(
+      "---",
+      "",
+      "Arbeite das Playbook oben ab. Kein Merge nach `" + db + "` ohne ausdrückliche Freigabe über",
+      "`AskUserQuestion`. Die Streams startet der Mensch selbst wieder — starte sie NICHT.",
+    );
+    return lines.join("\n");
+  }
+
+  /** Freigabe: gemerkte Autopilot-Level zurücksetzen, Panic-Zustand beenden. */
+  private handlePanicRelease(): void {
+    for (const [agentId, level] of this.panicStopped) {
+      const s = this.pool.get(agentId);
+      if (s) s.autopilot = level; // jeder Stream bekommt SEINEN vorherigen Level zurück
+    }
+    log(`[panic] Freigabe für ${this.panicStopped.size} Stream(s)`);
+    this.panicStopped.clear();
+    this.panicResolverId = undefined;
+    this.persist();
+    this.emitPanicState();
   }
 
   /**

@@ -35,7 +35,6 @@ export function Inspector() {
   const commitAgent = useStore((s) => s.commitAgent);
   const createPr = useStore((s) => s.createPr);
   const syncBranch = useStore((s) => s.syncBranch);
-  const resolveConflict = useStore((s) => s.resolveConflict);
   const outsourceMain = useStore((s) => s.outsourceMain);
   const commitMainRelease = useStore((s) => s.commitMainRelease);
   const updateMain = useStore((s) => s.updateMain);
@@ -684,18 +683,13 @@ export function Inspector() {
               {agent.devServer.url.replace(/^https?:\/\//, "")} ↗
             </button>
           )}
-          {/* Sub: rebase onto origin/<default> + force-with-lease. NIE für den Integrator —
+          {/* Kein per-Stream-„Konflikt lösen" mehr: ein Sub-Stream sieht aus seiner Sandbox nur den
+              eigenen Worktree und kann eine Lage ZWISCHEN Streams nicht beurteilen (er rebaset
+              blind, während die anderen weiterarbeiten). Das übernimmt jetzt der übergreifende
+              Knopf in der Activity-Rail, der alle Streams anhält und den Integrator beauftragt.
+              Sub: rebase onto origin/<default> + force-with-lease. NIE für den Integrator —
               dessen „behind" betrifft den main-Checkout, der per fast-forward (nicht rebase!)
               nachgezogen wird. */}
-          {live && agent.role === "sub" && agent.syncBlocked && (
-            <button
-              className="step-primary"
-              title="Den Agenten den Rebase-Konflikt in seinem Worktree lösen lassen (git rebase + Konflikte beheben, kein Push/PR)."
-              onClick={() => void resolveConflict(selectedId)}
-            >
-              ⚠ Konflikt lösen
-            </button>
-          )}
           {live && agent.role === "sub" && (agent.behind > 0 || agent.syncBlocked) && (
             <button
               disabled={!!syncDisabledReason(agent)}
@@ -703,7 +697,7 @@ export function Inspector() {
               title={
                 syncDisabledReason(agent) ??
                 (agent.syncBlocked
-                  ? "Auto-Sync ist wegen eines Konflikts pausiert. Konflikt im Worktree lösen, dann erneut Sync."
+                  ? "Auto-Sync ist wegen eines Konflikts pausiert. Über „Konflikt lösen“ in der Seitenleiste auflösen, dann erneut Sync."
                   : "Manuell auf origin/main rebasen (läuft sonst automatisch)")
               }
             >

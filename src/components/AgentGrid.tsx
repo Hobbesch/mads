@@ -88,7 +88,7 @@ function AgentCard({ agent }: { agent: AgentVM }) {
       </div>
       {needsInput && <div className="card-flag yellow">● braucht Input{pending ? ` (${pending})` : ""}</div>}
       {unsaved && <div className="card-flag red" title="Uncommittete/untrackte Arbeit oder Commits ohne PR — geht beim Aufräumen verloren">● Arbeit nicht gesichert</div>}
-      {agent.syncBlocked && <div className="card-flag red" title="Auto-Sync wegen Rebase-Konflikt pausiert — Konflikt lösen, dann Sync">⚠︎ Sync blockiert (Konflikt)</div>}
+      {agent.syncBlocked && <div className="card-flag red" title="Auto-Sync wegen Rebase-Konflikt pausiert — über „Konflikt lösen“ in der Seitenleiste auflösen, dann Sync">⚠︎ Sync blockiert (Konflikt)</div>}
       {showPrompt && (
         <div className="card-prompt">
           <div className="card-prompt-label">Auftrag</div>

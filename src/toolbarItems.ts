@@ -11,7 +11,7 @@
  * auswerten müssen).
  */
 import type { LucideIcon } from "lucide-react";
-import { FolderOpen, Plus, Boxes, Files, GitCompare, Settings, Info } from "lucide-react";
+import { FolderOpen, Plus, Boxes, Files, GitCompare, TriangleAlert, Settings, Info } from "lucide-react";
 import type { ViewId } from "./uiPrefs";
 import type { MadsState } from "./store";
 
@@ -25,6 +25,12 @@ export interface ToolbarItem {
   group?: "top" | "bottom"; // "bottom" = unten angedockt (Settings/About)
   separatorBefore?: boolean; // optischer Trenner über dem Eintrag
   shortcut?: string; // Anzeige-Hinweis, z.B. "⌘1"
+  /**
+   * Erklärender Tooltip, der IMMER greift — auch ausgeklappt, wo das Label sichtbar ist.
+   * Nur für Einträge, deren Label das Verhalten nicht schon vollständig erklärt (bei „Dateien"
+   * oder „Einstellungen" wäre er Rauschen). Mehrzeilig via \n.
+   */
+  tooltip?: string;
   enabled?: (s: MadsState) => boolean; // z.B. (s) => !!s.project → disabled ohne Projekt
   badge?: (s: MadsState) => number | "dot" | undefined; // z.B. Eskalations-Count
 }
@@ -68,6 +74,33 @@ export const TOOLBAR_ITEMS: ToolbarItem[] = [
     shortcut: "⇧⌘D",
     enabled: (s) => !!s.project,
     badge: (s) => s.collisions.length || undefined,
+  },
+  // „Don't Panic": die einzige ÜBERGREIFENDE Aktion der Rail. Bewusst hier und nicht am einzelnen
+  // Stream — ein Sub-Stream sitzt in seiner Sandbox und sieht die anderen Worktrees nicht, kann
+  // eine Konfliktlage zwischen Streams also gar nicht beurteilen (siehe sidecar/src/sandbox.ts).
+  // Der Knopf hält alle Sub-Streams an und übergibt an den Integrator.
+  {
+    id: "panic",
+    // „Don't Panic" bleibt englisch: der Begriff stammt aus „Per Anhalter durch die Galaxis"
+    // (Douglas Adams) und verliert übersetzt seine Bedeutung. Was er tut, sagt der Tooltip.
+    icon: TriangleAlert,
+    label: "Don't Panic",
+    order: 5,
+    kind: "action",
+    group: "top",
+    separatorBefore: true,
+    enabled: (s) => !!s.project,
+    tooltip:
+      "Konflikte zwischen mehreren Streams auflösen.\n\n" +
+      "Hält alle Sub-Streams an — angefangene Arbeit bleibt erhalten, nichts wird verworfen — " +
+      "und übergibt an den Main-Agenten. Nur er sieht alle Worktrees und kann die Branches " +
+      "gegeneinander prüfen; ein Sub-Stream sitzt in seiner Sandbox und würde blind rebasen.\n\n" +
+      "Er misst zuerst, sichert jeden Branch (Push + Backup-Tag) und löst dann auf. " +
+      "Nach main gemergt wird nur mit deiner Freigabe. Die Streams startest du danach selbst wieder.\n\n" +
+      "Drücken bei: „Sync blockiert“, Merge-Konflikt, Überschneidungs-Warnung — immer dann, " +
+      "wenn Streams sich gegenseitig blockieren und du nicht mehr weißt, wo du anfangen sollst.\n\n" +
+      "(Der Name steht in großen freundlichen Buchstaben auf dem Umschlag des Anhalters — " +
+      "Douglas Adams.)",
   },
   {
     id: "settings",

@@ -74,6 +74,8 @@ export type HostMessage =
   | InterruptAgentMsg
   | SetPermissionModeMsg
   | StopAgentMsg
+  | PanicResolveMsg
+  | PanicReleaseMsg
   | CreatePrMsg
   | SyncBranchMsg
   | GateTaskMsg
@@ -435,6 +437,34 @@ export interface StopAgentMsg extends BaseMsg {
 }
 
 /**
+ * „Don't Panic": übergreifende Konfliktlösung. Die erste bewusst GLOBALE Aktion (kein `agentId`) —
+ * genau das ist der Punkt.
+ *
+ * WARUM global: Der frühere per-Stream-Knopf („Konflikt lösen") schickte nur einen Prompt in den
+ * betroffenen Sub-Stream. Der läuft aber laut sandbox.ts eingesperrt in seinem eigenen Worktree —
+ * `git merge-tree` zwischen zwei Branches, ein Hunk-Vergleich oder die Frage „welcher Branch
+ * sollte zuerst gemergt werden" sind ihm damit prinzipiell unmöglich. Er rebaset blind, während
+ * die anderen Streams weiterarbeiten und die Lage erneut verschieben.
+ *
+ * Stattdessen: alle Sub-Streams anhalten (nichts verändert sich mehr), Autopilot einfrieren, und
+ * den INTEGRATOR beauftragen — der einzige Stream ohne Sandbox, mit Sicht auf alle Worktrees, und
+ * per Invariante 1 ohnehin der Einzige, der mergen darf. Er bekommt das Playbook
+ * (sidecar/playbooks/conflict-resolution.md) plus einen Lagebericht über alle Streams.
+ */
+export interface PanicResolveMsg extends BaseMsg {
+  type: "panic_resolve";
+}
+
+/**
+ * Gegenstück zu `panic_resolve`: gibt die angehaltenen Sub-Streams wieder frei und stellt ihren
+ * gemerkten Autopilot-Level wieder her. Bewusst ein eigener, menschlicher Schritt — nach einer
+ * Konfliktlösung hat sich die Basis geändert, und kein Stream soll unbemerkt darauf weiterlaufen.
+ */
+export interface PanicReleaseMsg extends BaseMsg {
+  type: "panic_release";
+}
+
+/**
  * Verwalteten Zustand bereinigen: Worktree + lokalen Branch eines erledigten
  * (gemergten) Streams entfernen und aus der Resume-Registry nehmen. Wird vom
  * Frontend für „gemergt, aber lokale Reste"-Streams nach Nutzer-Bestätigung
@@ -498,6 +528,7 @@ export type SidecarMessage =
   | ResumableAgentsMsg
   | ReconcileSummaryMsg
   | CollisionWarningMsg
+  | PanicStateMsg
   | SpawnSubstreamsRequestMsg
   | DevServerStatusMsg
   | DevServerConfigMsg
@@ -1009,6 +1040,26 @@ export interface ReconcileSummaryMsg extends BaseMsg {
 export interface CollisionWarningMsg extends BaseMsg {
   type: "collision_warning";
   collisions: Collision[];
+}
+
+/**
+ * Panic-Zustand (Gegenstück zu `panic_resolve`/`panic_release`). Solange `active`, sind die
+ * genannten Sub-Streams angehalten und ihr Autopilot steht auf `manual`; das Frontend zeigt
+ * dann statt des Panic-Knopfs die Freigabe.
+ *
+ * GRENZE: nur Laufzeit-Zustand des Sidecars — ein Neustart verliert ihn. Die Streams bleiben dann
+ * korrekt auf `manual` (das ist in agents.json persistiert, es geht also nichts verloren und
+ * niemand läuft unbemerkt los), aber die Sammel-Freigabe fehlt; die Level werden dann einzeln im
+ * Inspector zurückgestellt. Bewusst so belassen, statt ein zweites Persistenz-Schema einzuführen —
+ * der Panic-Lauf dauert Minuten, ein Sidecar-Neustart genau darin ist der seltene Fall.
+ */
+export interface PanicStateMsg extends BaseMsg {
+  type: "panic_state";
+  active: boolean;
+  /** Sub-Streams, die durch den Panic angehalten wurden (leer, wenn nicht aktiv). */
+  stoppedAgentIds: string[];
+  /** agentId des Integrators, der die Auflösung übernommen hat. */
+  resolverAgentId?: string;
 }
 
 /** Agent-Tool (Integrator) bittet das Frontend, N Sub-Streams zu starten. */
