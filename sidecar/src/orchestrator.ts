@@ -16,6 +16,7 @@ import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
 import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
+import { attributesArgs } from "./gitAttributes.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
 import { acquireProjectLock, ensureMadsDir, loadPrompts, loadRegistry, mergeRegistry, releaseProjectLock, savePrompts, saveRegistry, type RegistryEntry } from "./persistence.js";
@@ -1841,9 +1842,20 @@ export class Orchestrator {
   private async streamRegions(s: AgentSession): Promise<ChangedRegion[]> {
     if (!this.project || s.role !== "sub" || !s.worktreePath) return [];
     try {
+      // attributesArgs() weist Gits eingebaute Diff-Driver zu, damit der Hunk-Kontext den
+      // METHODENKOPF nennt statt (bei C#/Java) durchgehend die namespace/package-Zeile — ohne das
+      // bekam jeder Hunk dasselbe Pseudo-Symbol und zwei Streams kollidierten zwangsläufig.
       const diff = await run(
         "git",
-        ["-C", s.worktreePath, "diff", "--merge-base", `origin/${this.project.defaultBranch}`, "--unified=0"],
+        [
+          ...attributesArgs(),
+          "-C",
+          s.worktreePath,
+          "diff",
+          "--merge-base",
+          `origin/${this.project.defaultBranch}`,
+          "--unified=0",
+        ],
         s.worktreePath,
       );
       return parseDiffRegions(diff.stdout);

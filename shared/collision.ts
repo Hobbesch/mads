@@ -29,12 +29,34 @@ export function parseDiffRegions(diff: string): ChangedRegion[] {
   return [...byFile.entries()].map(([path, syms]) => ({ path, symbols: [...syms] }));
 }
 
+/**
+ * Kontexte, die KEINE Symbol-Granularität tragen, weil sie die ganze Datei umspannen.
+ *
+ * WARUM diese Liste existiert (Vorfall 2026-08-28, Boba): `git diff --unified=0` liefert als
+ * Hunk-Kontext die letzte Zeile, die seine Heuristik für einen Funktionskopf hält. Ohne
+ * konfigurierten Diff-Driver ist das bei C# durchgehend `namespace X` — bei JEDEM Hunk JEDER
+ * Datei dieses Namespace. Der `slice(0, 40)`-Fallback machte daraus ein Pseudo-Symbol, das
+ * zwischen zwei Streams zwangsläufig identisch war: die Schnittmenge war nie leer, also meldete
+ * `detectCollisions` `severity: "region"` (harte Kollision) für Hunks, die in Wahrheit hunderte
+ * Zeilen auseinanderlagen. Drei Streams wurden so mit `ownership_trespass` blockiert, obwohl git
+ * exakt zwei triviale Konflikte hatte.
+ *
+ * Solche Kontexte liefern daher `undefined` → `detectCollisions` fällt auf `severity: "file"`
+ * zurück (konservative Warnung „gleiche Datei, Symbole unklar") statt eine Kollision zu behaupten,
+ * die es nicht gibt. Die eigentliche Abhilfe sind die Diff-Driver (siehe `sidecar/src/gitAttributes.ts`);
+ * dieser Filter ist die zweite Verteidigungslinie für Sprachen ohne Driver.
+ */
+const CONTAINER_CONTEXT = /^\s*(?:namespace|using|import|package|from|module|#include|#import)\b/;
+
 function extractSymbol(ctx: string): string | undefined {
   if (!ctx) return undefined;
   const m =
     ctx.match(/(?:def|fn|function|class|interface|struct|impl|const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)/) ??
     ctx.match(/([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
-  return m ? m[1] : ctx.slice(0, 40);
+  if (m) return m[1];
+  // Kein erkanntes Symbol: der Roh-Kontext ist nur dann ein brauchbarer Anker, wenn er nicht
+  // ohnehin die ganze Datei umspannt.
+  return CONTAINER_CONTEXT.test(ctx) ? undefined : ctx.slice(0, 40);
 }
 
 export interface AgentRegions {
