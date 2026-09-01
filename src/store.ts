@@ -417,6 +417,8 @@ export interface MadsState {
     permissionMode?: PermissionMode;
     images?: ImageInput[];
     accountId?: string;
+    /** Sandbox-Betriebsart schon beim Start (New-Stream-Dialog) — nur echte Sub-Streams. */
+    sandboxMode?: SandboxMode;
   }) => Promise<void>;
   selectAgent: (id: string) => void;
   requestNewStream: () => void;
@@ -1412,7 +1414,7 @@ export const useStore = create<MadsState>((set) => {
       set((s) => ({ recentProjects: forgetProject(s.recentProjects, repoRoot) }));
     },
 
-    createAgent: async ({ label, prompt, role, mock, model, effort, branch, permissionMode, images, accountId }) => {
+    createAgent: async ({ label, prompt, role, mock, model, effort, branch, permissionMode, images, accountId, sandboxMode }) => {
       const id = crypto.randomUUID();
       const mode: PermissionMode = permissionMode ?? "auto";
       const st0 = useStore.getState();
@@ -1474,6 +1476,10 @@ export const useStore = create<MadsState>((set) => {
         mock,
         permissionMode: mode,
         autopilot: "assisted",
+        // Sandbox-Betriebsart aus dem New-Stream-Dialog: der Sidecar spawnt den Prozess direkt
+        // damit — kein Umschalt-Neustart nach dem ersten Prompt mehr nötig. Nur echte Sub-Streams
+        // (der Integrator läuft ohnehin ohne Sandbox) und nur abweichend vom Default "on".
+        ...(role === "sub" && !mock && sandboxMode && sandboxMode !== "on" ? { sandboxMode } : {}),
         ...(useWorktree && project
           ? { repoRoot: project.repoRoot, branch: finalBranch, baseRef: `origin/${project.defaultBranch}` }
           : project && !mock

@@ -245,7 +245,10 @@ export interface InvestigationTarget {
   prod?: boolean;
 }
 
-/** Sandbox-Betriebsart eines laufenden Sub-Streams umschalten (nur menschliche UI-Aktion). */
+/** Sandbox-Betriebsart eines Sub-Streams umschalten (nur menschliche UI-Aktion). Mit Session:
+ *  Neustart+Resume im selben Gespräch; ganz neuer Stream ohne Session: frischer Neustart
+ *  (kein Verlauf zu verlieren). Beim ERSTELLEN wählt man die Betriebsart direkt im
+ *  New-Stream-Dialog (StartAgentMsg.sandboxMode) — dann ist gar kein Umschalten nötig. */
 export interface SetSandboxModeMsg extends BaseMsg {
   type: "set_sandbox_mode";
   agentId: string;

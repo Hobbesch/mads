@@ -216,7 +216,11 @@ export class Orchestrator {
         // Untersuchungsziele (Sandbox-Stufe A): die Egress-Hosts kommen IMMER von der Platte
         // (.mads/targets.json, Single Source of Truth) — Client-Angaben werden überschrieben,
         // damit kein (Remote-)Client per start_agent beliebige Domains freischalten kann.
-        startMsg = { ...startMsg, investigationDomains: startMsg.sandboxMode === "targets" ? this.targetHosts() : undefined };
+        // Ohne definierte Ziele wäre "targets" nur ein irreführendes Badge (leere Allowlist =
+        // faktisch "on") → dann sauber voll sandboxed starten.
+        const hosts = startMsg.sandboxMode === "targets" ? this.targetHosts() : [];
+        if (startMsg.sandboxMode === "targets" && hosts.length === 0) startMsg = { ...startMsg, sandboxMode: "on" };
+        startMsg = { ...startMsg, investigationDomains: startMsg.sandboxMode === "targets" ? hosts : undefined };
         await session.start(startMsg);
         this.persist();
         void this.pollAgent(session); // initialer Status
@@ -802,7 +806,8 @@ export class Orchestrator {
    * Sandbox-Betriebsart eines Sub-Streams umschalten (Untersuchungs-Freigabe, Stufe A/B —
    * Begründung und Geländer: shared/protocol.ts → SandboxMode). Die Sandbox wird beim
    * Prozess-Spawn festgelegt → Umschalten ist ein Neustart mit Resume im selben Gespräch
-   * (Muster wie setAccount). `trigger:"auto"` = Drift-Schutz aus freigangResetPass.
+   * (Muster wie setAccount); ein ganz neuer Stream ohne Session startet einfach frisch neu.
+   * `trigger:"auto"` = Drift-Schutz aus freigangResetPass.
    */
   private async applySandboxMode(agentId: string, mode: SandboxMode, trigger: "user" | "auto"): Promise<void> {
     const sysNote = (subtype: string) =>
@@ -818,9 +823,12 @@ export class Orchestrator {
       return;
     }
     if (s.sandboxMode === mode) return;
-    // Ohne Session-ID gäbe es nichts fortzusetzen → der Neustart würde den Verlauf verlieren.
-    if (!s.sessionId) {
-      sysNote("⚠ Sandbox-Modus nicht geändert: dieser Stream hat noch keine fortsetzbare Session.");
+    // Ohne Session-ID gibt es auch keinen Verlauf zu verlieren: ein ganz neuer Stream (wartet noch
+    // auf seine erste Aufgabe) wird einfach FRISCH mit der gewünschten Betriebsart neu gestartet.
+    // Nur wenn gerade ein Turn anläuft (die Session-ID trifft in Sekunden ein), kurz abwehren,
+    // statt die laufende Arbeit wegzuwerfen.
+    if (!s.sessionId && (s.status === "running" || s.status === "starting" || s.hasPending())) {
+      sysNote("⚠ Sandbox-Modus noch nicht geändert: der Stream initialisiert sich gerade — gleich noch einmal versuchen.");
       return;
     }
     const hosts = this.targetHosts();
@@ -829,7 +837,7 @@ export class Orchestrator {
       return;
     }
 
-    log(`[orchestrator] Stream ${agentId}: Sandbox ${s.sandboxMode} → ${mode} (${trigger}, Resume ${s.sessionId})`);
+    log(`[orchestrator] Stream ${agentId}: Sandbox ${s.sandboxMode} → ${mode} (${trigger}, ${s.sessionId ? `Resume ${s.sessionId}` : "frisch — noch keine Session"})`);
     const prev = s;
     await this.stopDevServerIf(agentId); // Dev-Server hängt am alten Prozess
     await s.stop(false); // Worktree BEHALTEN — nur der Prozess wird neu gestartet
