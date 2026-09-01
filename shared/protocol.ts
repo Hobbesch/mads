@@ -101,6 +101,8 @@ export type HostMessage =
   | RequestSnapshotMsg
   | SetAccountMsg
   | RequestAccountsMsg
+  | SetSandboxModeMsg
+  | TargetsSaveMsg
   | ShutdownMsg;
 
 /**
@@ -214,6 +216,54 @@ export interface SavedPrompt {
   updatedAt: number;
 }
 
+// ---- Sandbox-Betriebsart & Untersuchungsziele (Stufe A/B der Untersuchungs-Freigabe) ----
+/**
+ * Sandbox-Betriebsart eines SUB-Streams. Der Bedarf: ein Sub muss gelegentlich auf Test-/Prod-
+ * Servern UNTERSUCHEN, die Sandbox sperrt aber Egress + Secrets. Statt eines binären Aus-Schalters
+ * zwei abgestufte Freigaben (der Integrator läuft ohnehin ohne Sandbox — für ihn irrelevant):
+ *
+ *  - `"on"` (Default): volle Sandbox — Schreiben nur im Worktree, Egress nur Paketquellen.
+ *  - `"targets"` (Stufe A): Sandbox BLEIBT AN (Dateisystem + Secrets geschützt), zusätzlich sind
+ *    die projektweiten Untersuchungsziele (`.mads/targets.json`) im Egress erlaubt. Deckt
+ *    HTTPS-Untersuchungen (APIs, Health, Logs) ohne echten Schutzverlust ab.
+ *  - `"off"` (Stufe B, „Freigang"): Sandbox aus — für SSH/psql-Untersuchungen. Geländer:
+ *    nur der MENSCH schaltet (UI; Agenten können keine Protokoll-Nachrichten senden), der Zustand
+ *    ist sichtbar (Badge), wird NIE persistiert (Resume startet sandboxed), der Autopilot pusht/
+ *    PRt währenddessen nicht automatisch, und nach 15 Min. Inaktivität schaltet der Sidecar
+ *    selbst zurück auf "on" (Drift-Schutz: „temporär aus" darf nicht „vergessen aus" werden).
+ *
+ * Umschalten = Prozess-Neustart mit `resumeSessionId` (Muster wie Kontowechsel) — Kontext bleibt.
+ */
+export type SandboxMode = "on" | "targets" | "off";
+
+/** Externes Untersuchungsziel des Projekts (Host für die Egress-Allowlist bei `"targets"`). */
+export interface InvestigationTarget {
+  /** Domain/Host, Wildcards wie im SDK-Schema (z. B. "api.test.example.ch", "*.example.ch"). */
+  host: string;
+  label?: string;
+  /** Prod-Ziel → deutlichere Bestätigung im UI beim Freischalten. */
+  prod?: boolean;
+}
+
+/** Sandbox-Betriebsart eines laufenden Sub-Streams umschalten (nur menschliche UI-Aktion). */
+export interface SetSandboxModeMsg extends BaseMsg {
+  type: "set_sandbox_mode";
+  agentId: string;
+  mode: SandboxMode;
+}
+
+/** Untersuchungsziele des Projekts komplett ersetzen (Editor in den Einstellungen). */
+export interface TargetsSaveMsg extends BaseMsg {
+  type: "targets_save";
+  targets: InvestigationTarget[];
+}
+
+/** Vollständige Ziel-Liste des Projekts (bei open_project und nach jeder Änderung). */
+export interface TargetsUpdateMsg extends BaseMsg {
+  type: "targets_update";
+  targets: InvestigationTarget[];
+}
+
 /** Prompt anlegen/ändern (Upsert per id). */
 export interface PromptSaveMsg extends BaseMsg {
   type: "prompt_save";
@@ -284,6 +334,13 @@ export interface StartAgentMsg extends BaseMsg {
    *  `false` schaltet sie für diesen Stream ab — Notfall/Debug, wenn eine Toolchain am Sandkasten
    *  scheitert. Global geht das auch per Env `MADS_SANDBOX=off`. Siehe sidecar/src/sandbox.ts. */
   sandbox?: boolean;
+  /** Sandbox-Betriebsart (Untersuchungs-Freigabe, siehe SandboxMode). Präziser als `sandbox` und
+   *  gewinnt gegen es. Wird NIE persistiert — ein Resume startet immer wieder mit "on". */
+  sandboxMode?: SandboxMode;
+  /** Nur für `sandboxMode: "targets"`: zusätzliche Egress-Hosts. Wird vom ORCHESTRATOR aus
+   *  `.mads/targets.json` gesetzt (Single Source of Truth auf Platte) — Client-Angaben hier
+   *  werden überschrieben, damit kein (Remote-)Client beliebige Domains freischalten kann. */
+  investigationDomains?: string[];
   /** true = automatische „Setze die Arbeit fort"-Anweisung beim Resume (kein echter Nutzer-Auftrag).
    *  Der Sidecar überschreibt damit NICHT den zuletzt gemerkten Auftrag (`lastPrompt`) — die Kachel
    *  zeigt weiter den echten Auftrag, den der Mensch abgesetzt hat. */
@@ -542,7 +599,8 @@ export type SidecarMessage =
   | AccountsUpdateMsg
   | AccountUsageMsg
   | RateLimitNoticeMsg
-  | ModelActiveMsg;
+  | ModelActiveMsg
+  | TargetsUpdateMsg;
 
 /**
  * Öffnen abgelehnt: dieses Projekt ist bereits in einer ANDEREN, laufenden mads-Instanz offen
@@ -741,6 +799,9 @@ export interface StatusUpdateMsg extends BaseMsg {
    * (`CLAUDE_CONFIG_DIR` steht nach dem Spawn fest), ohne dass es je auffiel.
    */
   accountId?: string;
+  /** Sandbox-Betriebsart, in der dieser Stream WIRKLICH läuft (der Sidecar hat den Prozess mit
+   *  genau diesen Sandbox-Optionen gestartet — die Oberfläche spiegelt nur). */
+  sandboxMode?: SandboxMode;
 }
 
 export interface CostUpdateMsg extends BaseMsg {

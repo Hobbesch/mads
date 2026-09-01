@@ -19,7 +19,7 @@ import { runGate } from "./gate.js";
 import { attributesArgs } from "./gitAttributes.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
-import { acquireProjectLock, ensureMadsDir, loadPrompts, loadRegistry, mergeRegistry, releaseProjectLock, savePrompts, saveRegistry, type RegistryEntry } from "./persistence.js";
+import { acquireProjectLock, ensureMadsDir, loadPrompts, loadRegistry, loadTargets, mergeRegistry, releaseProjectLock, savePrompts, saveRegistry, saveTargets, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
 import { parseDiffRegions, detectCollisions, type AgentRegions } from "../../shared/collision.js";
 import { detectTrespass, pathMatches, type TrespassFinding } from "../../shared/ownership.js";
@@ -35,7 +35,7 @@ const SHARED_LANDFIRST_GLOBS = [
   "**/pnpm-lock.yaml",
   "**/go.sum",
 ];
-import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, AutopilotLevel, ResumableAgent, SavedPrompt, OpenReviewStreamMsg, StartAgentMsg } from "../../shared/protocol.js";
+import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, AutopilotLevel, ResumableAgent, SavedPrompt, OpenReviewStreamMsg, StartAgentMsg, SandboxMode, InvestigationTarget } from "../../shared/protocol.js";
 import conflictPlaybook from "../playbooks/conflict-resolution.md";
 import { loadAccounts, pruneCooldowns, saveAccounts } from "./accounts.js";
 
@@ -47,6 +47,8 @@ import { loadAccounts, pruneCooldowns, saveAccounts } from "./accounts.js";
  * Stream seinen Status wechselt (z. B. fertig wird).
  */
 const POLL_INTERVAL_MS = 10_000;
+/** Freigang (Sandbox aus) fällt nach dieser Inaktivität automatisch auf "on" zurück (Drift-Schutz). */
+const FREIGANG_IDLE_RESET_MS = 15 * 60_000;
 /** Debounce für den ereignisgetriebenen Poll — bündelt die Statuswechsel eines Turn-Endes. */
 const POLL_SOON_MS = 1_200;
 
@@ -99,6 +101,11 @@ export class Orchestrator {
   // Explizit entfernte Agenten (gestoppt/aufgeräumt/gemergt) — mergeRegistry darf sie NICHT
   // aus der Registry wiederbeleben (sonst hebt merge-persist ein bewusstes Entfernen auf).
   private readonly removed = new Set<string>();
+  /** Freigang-Drift-Schutz (Sandbox "off"): seit wann der Stream RUHIG ist. Nach
+   *  FREIGANG_IDLE_RESET_MS Inaktivität schaltet der Poll selbst zurück auf "on". */
+  private readonly freigangQuietSince = new Map<string, number>();
+  /** Freigang-Geländer: je Freigang-Episode einmal erklärt, dass der Autopilot push/PR pausiert. */
+  private readonly freigangAutopilotNotified = new Set<string>();
   // 3.2: Integrationen serialisieren (kein Merge-Race zweier fast gleichzeitiger Merges).
   private integrateLock: Promise<void> = Promise.resolve();
   // Streams, die gerade doIntegrate() durchlaufen (Merge + Cleanup) — autopilotPass() muss sie
@@ -129,6 +136,7 @@ export class Orchestrator {
         this.project = msg.project;
         this.reloadApprovedKinds();
         this.emitPrompts(); // gespeicherte Prompts des Projekts an die Clients
+        this.emitTargets(); // Untersuchungsziele (Sandbox-Stufe A) an die Clients
         log(`[orchestrator] project set: ${msg.project.owner}/${msg.project.repo} @ ${msg.project.repoRoot}`);
         this.startPolling();
         break;
@@ -179,6 +187,7 @@ export class Orchestrator {
         this.project = { projectId: msg.projectId, repoRoot: msg.repoRoot, ...info };
         this.reloadApprovedKinds();
         this.emitPrompts(); // gespeicherte Prompts des Projekts an die Clients
+        this.emitTargets(); // Untersuchungsziele (Sandbox-Stufe A) an die Clients
         this.emit({ ...envelope(), type: "project_resolved", project: this.project });
         log(`[orchestrator] project resolved: ${info.owner}/${info.repo} (default ${info.defaultBranch})`);
         void this.offerResumable(msg.repoRoot);
@@ -204,6 +213,10 @@ export class Orchestrator {
           // Resume nach Neustart im falschen Konto nach der Session suchen.
           if (!startMsg.accountId && known?.accountId) startMsg = { ...startMsg, accountId: known.accountId };
         }
+        // Untersuchungsziele (Sandbox-Stufe A): die Egress-Hosts kommen IMMER von der Platte
+        // (.mads/targets.json, Single Source of Truth) — Client-Angaben werden überschrieben,
+        // damit kein (Remote-)Client per start_agent beliebige Domains freischalten kann.
+        startMsg = { ...startMsg, investigationDomains: startMsg.sandboxMode === "targets" ? this.targetHosts() : undefined };
         await session.start(startMsg);
         this.persist();
         void this.pollAgent(session); // initialer Status
@@ -264,6 +277,35 @@ export class Orchestrator {
       case "request_accounts":
         this.emitAccounts();
         break;
+
+      case "set_sandbox_mode":
+        // Untersuchungs-Freigabe (Stufe A/B). Kommt IMMER von einem menschlichen Client (Agenten
+        // können keine Protokoll-Nachrichten senden) — „nur der Mensch schaltet" gilt strukturell.
+        await this.applySandboxMode(msg.agentId, msg.mode, "user");
+        break;
+
+      case "targets_save": {
+        // Untersuchungsziele: komplette Liste ersetzen. Validierung HIER (nicht nur in der UI),
+        // damit auch Remote-Clients weder kaputte noch überlange Einträge persistieren — und weil
+        // diese Hosts direkt in der Sandbox-Egress-Allowlist landen (nur Host/Domain-Form, keine
+        // Schemata/Pfade/Ports; Wildcards wie im SDK-Schema).
+        if (!this.project) break;
+        const raw = Array.isArray(msg.targets) ? msg.targets : [];
+        const seen = new Set<string>();
+        const targets: InvestigationTarget[] = [];
+        for (const t of raw) {
+          const host = (typeof t?.host === "string" ? t.host : "").trim().toLowerCase();
+          if (!host || host.length > 253 || !/^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(host)) continue;
+          if (seen.has(host)) continue;
+          seen.add(host);
+          const label = typeof t.label === "string" && t.label.trim() ? t.label.trim().slice(0, 100) : undefined;
+          targets.push({ host, ...(label ? { label } : {}), ...(t.prod ? { prod: true } : {}) });
+          if (targets.length >= 50) break;
+        }
+        saveTargets(this.project.repoRoot, targets);
+        this.emitTargets();
+        break;
+      }
 
       case "stop_agent": {
         const s = this.pool.get(msg.agentId);
@@ -706,6 +748,7 @@ export class Orchestrator {
   private emitSnapshot(): void {
     if (this.project) this.emit({ ...envelope(), type: "project_resolved", project: this.project });
     this.emitPrompts(); // gespeicherte Prompts — sonst fehlt einem neu verbundenen Client die Liste
+    this.emitTargets(); // dito Untersuchungsziele
     // Panic-Zustand mitschicken: sonst zeigt ein neu geladener Client wieder „Konflikt lösen"
     // an, obwohl die Streams längst angehalten sind — die Freigabe wäre dann unerreichbar.
     // (Die gemerkten Autopilot-Level überlebt ein zweiter Klick unbeschadet, dafür sorgt der
@@ -741,6 +784,124 @@ export class Orchestrator {
   private emitPrompts(): void {
     if (!this.project) return;
     this.emit({ ...envelope(), type: "prompts_update", prompts: loadPrompts(this.project.repoRoot) });
+  }
+
+  /** Untersuchungsziele des Projekts emitten (nach Projekt-Öffnen und jeder Änderung). */
+  private emitTargets(): void {
+    if (!this.project) return;
+    this.emit({ ...envelope(), type: "targets_update", targets: loadTargets(this.project.repoRoot) });
+  }
+
+  /** Ziel-Hosts für die Sandbox-Egress-Allowlist (Modus "targets") — immer frisch von der Platte. */
+  private targetHosts(): string[] {
+    if (!this.project) return [];
+    return loadTargets(this.project.repoRoot).map((t) => t.host);
+  }
+
+  /**
+   * Sandbox-Betriebsart eines Sub-Streams umschalten (Untersuchungs-Freigabe, Stufe A/B —
+   * Begründung und Geländer: shared/protocol.ts → SandboxMode). Die Sandbox wird beim
+   * Prozess-Spawn festgelegt → Umschalten ist ein Neustart mit Resume im selben Gespräch
+   * (Muster wie setAccount). `trigger:"auto"` = Drift-Schutz aus freigangResetPass.
+   */
+  private async applySandboxMode(agentId: string, mode: SandboxMode, trigger: "user" | "auto"): Promise<void> {
+    const sysNote = (subtype: string) =>
+      this.emit({ ...envelope(), type: "agent_event", agentId, event: { kind: "system", subtype } });
+    if (mode !== "on" && mode !== "targets" && mode !== "off") return; // (Remote-)Client-Schrott ignorieren
+    const s = this.pool.get(agentId);
+    if (!s) {
+      if (trigger === "user") sysNote("⚠ Sandbox-Modus nicht geändert: Stream läuft gerade nicht — erst fortsetzen.");
+      return;
+    }
+    if (s.role !== "sub") {
+      sysNote("⚠ Der Sandbox-Modus gilt nur für Sub-Streams — der Integrator läuft ohnehin ohne Sandbox.");
+      return;
+    }
+    if (s.sandboxMode === mode) return;
+    // Ohne Session-ID gäbe es nichts fortzusetzen → der Neustart würde den Verlauf verlieren.
+    if (!s.sessionId) {
+      sysNote("⚠ Sandbox-Modus nicht geändert: dieser Stream hat noch keine fortsetzbare Session.");
+      return;
+    }
+    const hosts = this.targetHosts();
+    if (mode === "targets" && hosts.length === 0) {
+      sysNote("⚠ Keine Untersuchungsziele definiert — zuerst in den Einstellungen Hosts hinterlegen.");
+      return;
+    }
+
+    log(`[orchestrator] Stream ${agentId}: Sandbox ${s.sandboxMode} → ${mode} (${trigger}, Resume ${s.sessionId})`);
+    const prev = s;
+    await this.stopDevServerIf(agentId); // Dev-Server hängt am alten Prozess
+    await s.stop(false); // Worktree BEHALTEN — nur der Prozess wird neu gestartet
+    this.pool.delete(agentId);
+
+    const session = new AgentSession(agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(agentId));
+    session.lastPrompt = prev.lastPrompt;
+    this.pool.set(agentId, session);
+    await session.start({
+      ...envelope(),
+      type: "start_agent",
+      agentId,
+      prompt: "", // kein neuer Auftrag — nur Sandbox-Wechsel, die Session lebt weiter
+      continuation: true,
+      accountId: prev.accountId,
+      label: prev.label,
+      role: prev.role,
+      model: prev.model,
+      effort: prev.effort as StartAgentMsg["effort"],
+      mock: false,
+      permissionMode: prev.permissionMode,
+      autopilot: prev.autopilot,
+      resumeSessionId: prev.sessionId,
+      resumeWorktreePath: prev.worktreePath,
+      repoRoot: this.project?.repoRoot,
+      cwd: prev.worktreePath ?? this.project?.repoRoot,
+      branch: prev.branch,
+      sandboxMode: mode, // NIE persistiert — agents.json kennt das Feld bewusst nicht
+      investigationDomains: mode === "targets" ? hosts : undefined,
+    });
+    this.persist();
+    this.freigangQuietSince.delete(agentId);
+    if (mode !== "off") this.freigangAutopilotNotified.delete(agentId); // neue Episode → wieder scharf
+    if (mode === "off") {
+      sysNote(
+        "🔓 Sandbox AUS (Freigang) — der Stream darf frei auf externe Systeme zugreifen (auch SSH). " +
+          "Geländer: der Autopilot pusht/erstellt währenddessen KEINE PRs; nach 15 Min. Inaktivität " +
+          "schaltet mads selbst zurück; ein Resume startet immer wieder sandboxed.",
+      );
+    } else if (mode === "targets") {
+      sysNote(`🔎 Untersuchungs-Modus — Sandbox bleibt aktiv, zusätzlich erreichbar: ${hosts.join(", ")}.`);
+    } else {
+      sysNote(trigger === "auto" ? "🔒 Sandbox automatisch wieder aktiv (15 Min. inaktiv — Freigang beendet)." : "🔒 Sandbox wieder aktiv.");
+    }
+    void this.pollAgent(session);
+  }
+
+  /**
+   * Drift-Schutz Stufe B: „temporär aus" darf nicht „vergessen aus" werden. Ein Stream im
+   * Freigang (Sandbox off), der ≥ 15 Min. ruhig ist (kein laufender Turn, keine offene
+   * Rückfrage), wird automatisch zurück auf "on" geschaltet — Neustart mit Resume, verlustfrei.
+   */
+  private async freigangResetPass(): Promise<void> {
+    const now = Date.now();
+    for (const s of [...this.pool.values()]) {
+      if (s.role !== "sub" || s.sandboxMode !== "off") {
+        this.freigangQuietSince.delete(s.agentId);
+        continue;
+      }
+      const busy = s.status === "running" || s.status === "starting" || s.hasPending();
+      if (busy) {
+        this.freigangQuietSince.delete(s.agentId);
+        continue;
+      }
+      const since = this.freigangQuietSince.get(s.agentId);
+      if (since === undefined) {
+        this.freigangQuietSince.set(s.agentId, now);
+      } else if (now - since >= FREIGANG_IDLE_RESET_MS) {
+        this.freigangQuietSince.delete(s.agentId);
+        await this.applySandboxMode(s.agentId, "on", "auto");
+      }
+    }
   }
 
   /**
@@ -1492,6 +1653,7 @@ export class Orchestrator {
       await this.pollPassiveIntegrator(); // C: auch der NICHT fortgesetzte Integrator braucht git-Status
       await this.pollIncomingPrs(); // eingehende fremde PRs → Review-Angebot
       if (this.autonomy.autoSync) await this.autoSyncPass();
+      await this.freigangResetPass(); // VOR dem Autopilot: erst Sandbox-Drift heilen, dann handeln
       await this.autopilotPass();
       if (this.autonomy.collisionScan) await this.collisionPass();
     } finally {
@@ -1560,6 +1722,25 @@ export class Orchestrator {
         secretBlocked: false, // der echte Secret-Gate sitzt in autoCommit (re-scannt jeden Zyklus)
       });
       if (action === "none") continue;
+      // Freigang-Geländer (Sandbox-Stufe B): mit Sandbox AUS liest der Agent gerade potenziell
+      // fremde, nicht vertrauenswürdige Inhalte (Test-/Prod-Server) — Außenwirksames (push/PR)
+      // läuft dann NICHT automatisch. Nur Commit bleibt (lokal, sichert Arbeit); push/PR sind
+      // manuelle Klicks, bis die Sandbox wieder aktiv ist.
+      if (s.sandboxMode === "off" && action !== "commit") {
+        if (!this.freigangAutopilotNotified.has(s.agentId)) {
+          this.freigangAutopilotNotified.add(s.agentId);
+          this.emit({
+            ...envelope(),
+            type: "agent_event",
+            agentId: s.agentId,
+            event: {
+              kind: "assistant_text",
+              text: "⏸ Autopilot (push/PR) pausiert, solange die Sandbox aus ist (Freigang). Committen läuft weiter; pushe/erstelle den PR manuell oder schalte die Sandbox wieder ein.",
+            },
+          });
+        }
+        continue;
+      }
       try {
         if (action === "commit") {
           // FREMD-EDIT-SCHUTZ: hat sich der Worktree seit dem Turn-Ende des Agenten geändert, kam

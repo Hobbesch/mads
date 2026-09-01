@@ -48,6 +48,13 @@ function AgentCard({ agent }: { agent: AgentVM }) {
         ) : (
           <span className={`role-badge ${agent.role}`}>{agent.role === "integrator" ? "Integrator" : "Sub"}</span>
         )}
+        {/* Gelockerte Sandbox UNÜBERSEHBAR machen — „temporär offen" darf nie unbemerkt bleiben. */}
+        {agent.role === "sub" && agent.sandboxMode === "off" && (
+          <span className="sandbox-badge off" title="Sandbox AUS (Freigang) — freier Zugriff auf externe Systeme; fällt nach 15 Min. Inaktivität automatisch zurück.">🔓 Sandbox aus</span>
+        )}
+        {agent.role === "sub" && agent.sandboxMode === "targets" && (
+          <span className="sandbox-badge targets" title="Untersuchungs-Modus — Sandbox aktiv, Projekt-Untersuchungsziele im Egress erlaubt.">🔎 Untersuchung</span>
+        )}
       </div>
       {agent.branch && <div className="card-branch">⎇ {agent.branch}</div>}
       <div className="card-step">{agent.currentStep ?? STATUS_META[agent.status].label}</div>

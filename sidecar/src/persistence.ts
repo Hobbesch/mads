@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, renameSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import type { ResumableAgent, SavedPrompt } from "../../shared/protocol.js";
+import type { InvestigationTarget, ResumableAgent, SavedPrompt } from "../../shared/protocol.js";
 
 export interface RegistryEntry extends ResumableAgent {
   updatedAt: number;
@@ -164,6 +164,32 @@ export function savePrompts(repoRoot: string, prompts: SavedPrompt[]): void {
   ensureMadsDir(repoRoot); // legt .mads/ an + .gitignore (selbst-ignorierend)
   const tmp = `${p}.tmp`;
   writeFileSync(tmp, JSON.stringify({ v: 1, prompts }, null, 2), "utf8");
+  renameSync(tmp, p); // atomar (write-temp + rename)
+}
+
+// ─── Untersuchungsziele (Sandbox-Stufe A) ───────────────────────────────────
+// Projektweite externe Hosts, die ein Sub-Stream im Modus `"targets"` zusätzlich zur normalen
+// Egress-Allowlist erreichen darf (shared/protocol.ts → InvestigationTarget). Gleiche Mechanik
+// wie prompts.json: <repoRoot>/.mads/targets.json, atomar geschrieben, defensiv gelesen.
+
+function targetsPath(repoRoot: string): string {
+  return join(repoRoot, ".mads", "targets.json");
+}
+
+export function loadTargets(repoRoot: string): InvestigationTarget[] {
+  try {
+    const j = JSON.parse(readFileSync(targetsPath(repoRoot), "utf8"));
+    return Array.isArray(j?.targets) ? (j.targets as InvestigationTarget[]) : [];
+  } catch {
+    return []; // fehlend/kaputt → leere Liste (nie werfen)
+  }
+}
+
+export function saveTargets(repoRoot: string, targets: InvestigationTarget[]): void {
+  const p = targetsPath(repoRoot);
+  ensureMadsDir(repoRoot);
+  const tmp = `${p}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ v: 1, targets }, null, 2), "utf8");
   renameSync(tmp, p); // atomar (write-temp + rename)
 }
 

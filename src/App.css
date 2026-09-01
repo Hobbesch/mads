@@ -1046,6 +1046,32 @@ button.primary:hover {
   color: var(--accent);
 }
 
+/* Sandbox-Betriebsart (Untersuchungs-Freigabe): eine gelockerte Sandbox muss UNÜBERSEHBAR sein —
+   amber für den Untersuchungs-Modus (Sandbox an, Ziele frei), rot für Freigang (Sandbox aus). */
+.sandbox-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.sandbox-badge.targets {
+  background: rgba(255, 159, 10, 0.18);
+  color: #c76e00;
+}
+.sandbox-badge.off {
+  background: rgba(255, 59, 48, 0.16);
+  color: #d0342c;
+}
+.sandbox-select.targets {
+  color: #c76e00;
+}
+.sandbox-select.off {
+  color: #d0342c;
+  font-weight: 600;
+}
+
 /* ── Eingehende PRs (Review-Angebot) ──────────────────────────────────────── */
 .incoming-prs {
   margin: 0 0 12px;

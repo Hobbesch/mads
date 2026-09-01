@@ -18,7 +18,7 @@ import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
 import { blobToBase64, makeThumbnail } from "../blob";
 import { loadUiPrefs, saveUiPrefs } from "../uiPrefs";
-import type { PermissionMode, ImageInput, AutopilotLevel } from "../../shared/protocol";
+import type { PermissionMode, ImageInput, AutopilotLevel, SandboxMode } from "../../shared/protocol";
 
 // Stabile Leer-Referenz: ein zustand-Selektor darf NICHT bei jedem Render ein neues []
 // zurückgeben (sonst Endlos-Render-Schleife → App-Crash / graues Fenster).
@@ -64,6 +64,8 @@ export function Inspector() {
   const setStreamModel = useStore((s) => s.setStreamModel);
   const setStreamEffort = useStore((s) => s.setStreamEffort);
   const setStreamAccount = useStore((s) => s.setStreamAccount);
+  const setSandboxMode = useStore((s) => s.setSandboxMode);
+  const investigationTargets = useStore((s) => s.investigationTargets);
   const accounts = useStore((s) => s.accounts);
   const accountUsage = useStore((s) => s.accountUsage);
   const defaultModel = useStore((s) => s.defaultModel);
@@ -251,6 +253,86 @@ export function Inspector() {
     });
   };
 
+  // Sandbox-Betriebsart (Untersuchungs-Freigabe, Stufe A/B): Zurück auf "on" geht ohne Rückfrage
+  // (härten braucht keine Bestätigung); jede LOCKERUNG bestätigt der Mensch bewusst im Dialog.
+  const askSandboxMode = (mode: SandboxMode) => {
+    if (mode === (agent.sandboxMode ?? "on")) return;
+    if (mode === "on") {
+      void setSandboxMode(selectedId, "on");
+      return;
+    }
+    if (mode === "targets") {
+      if (investigationTargets.length === 0) {
+        setConfirm({
+          title: "Keine Untersuchungsziele definiert",
+          body: (
+            <p>
+              Für den Untersuchungs-Modus braucht das Projekt eine Liste externer Hosts (Test-/Prod-APIs). Lege sie
+              in den <strong>Einstellungen → Untersuchungsziele</strong> an — die Sandbox bleibt dabei aktiv, nur
+              diese Hosts werden zusätzlich erreichbar.
+            </p>
+          ),
+          confirmLabel: "OK",
+          onConfirm: () => {},
+        });
+        return;
+      }
+      const prodTargets = investigationTargets.filter((t) => t.prod);
+      setConfirm({
+        title: "Untersuchungs-Modus einschalten?",
+        danger: prodTargets.length > 0,
+        body: (
+          <>
+            <p>
+              Die Sandbox <strong>bleibt aktiv</strong> (Dateisystem + Secrets geschützt) — zusätzlich erreichbar
+              werden die Untersuchungsziele des Projekts:
+            </p>
+            <p>
+              {investigationTargets.map((t) => (
+                <span key={t.host}>
+                  <code>{t.host}</code>
+                  {t.label ? ` (${t.label})` : ""}
+                  {t.prod ? " — PROD" : ""}
+                  <br />
+                </span>
+              ))}
+            </p>
+            {prodTargets.length > 0 && (
+              <p>
+                <strong>Achtung:</strong> Die Liste enthält {prodTargets.length} Produktions-Ziel(e). Der Stream
+                kann dort selbstständig Anfragen stellen.
+              </p>
+            )}
+          </>
+        ),
+        confirmLabel: "Ziele freischalten",
+        onConfirm: () => void setSandboxMode(selectedId, "targets"),
+      });
+      return;
+    }
+    // mode === "off" — Freigang: die eingriffstiefste Stufe, entsprechend deutlich warnen.
+    setConfirm({
+      title: "Sandbox ausschalten (Freigang)?",
+      danger: true,
+      body: (
+        <>
+          <p>
+            Der Stream darf dann <strong>frei auf externe Systeme zugreifen</strong> (auch SSH) — dafür fallen alle
+            Sandbox-Schutzschichten: Egress unbeschränkt, Secret-Ablagen (<code>~/.ssh</code>, <code>~/.aws</code>,
+            gh-Token) lesbar, Schreiben außerhalb des Worktrees möglich.
+          </p>
+          <p>
+            Geländer: Der Autopilot <strong>pusht/erstellt keine PRs</strong>, solange Freigang aktiv ist; nach{" "}
+            <strong>15 Min. Inaktivität</strong> schaltet mads selbst zurück; ein Neustart/Resume startet immer
+            wieder sandboxed. Für reine HTTPS-Untersuchungen ist der Untersuchungs-Modus (🔎) die sicherere Wahl.
+          </p>
+        </>
+      ),
+      confirmLabel: "Sandbox ausschalten",
+      onConfirm: () => void setSandboxMode(selectedId, "off"),
+    });
+  };
+
   // Main-Edits in einen neuen Sub-Stream auslagern (main bleibt sauber; direkter Commit auf main
   // ist bewusst nicht vorgesehen).
   const askOutsource = () =>
@@ -316,6 +398,13 @@ export function Inspector() {
         <StatusDot status={agent.status} />
         <div className="inspector-title">
           <span className="inspector-label">{agent.label}</span>
+          {/* Gelockerte Sandbox auch hier unübersehbar (Gegenstück zum Kachel-Badge). */}
+          {agent.role === "sub" && agent.sandboxMode === "off" && (
+            <span className="sandbox-badge off" title="Sandbox AUS (Freigang) — fällt nach 15 Min. Inaktivität automatisch zurück.">🔓 Sandbox aus</span>
+          )}
+          {agent.role === "sub" && agent.sandboxMode === "targets" && (
+            <span className="sandbox-badge targets" title="Untersuchungs-Modus — Sandbox aktiv, Untersuchungsziele im Egress erlaubt.">🔎 Untersuchung</span>
+          )}
           <span className="inspector-sub">
             {STATUS_META[agent.status].label}
             {agent.currentStep ? ` · ${agent.currentStep}` : ""}
@@ -363,6 +452,21 @@ export function Inspector() {
               <option value="manual">🤖 Manuell</option>
               <option value="assisted">🤖 Assisted — auto commit/push/PR</option>
               <option value="autopilot">🤖 Autopilot</option>
+            </select>
+          )}
+          {/* Sandbox-Betriebsart (Untersuchungs-Freigabe): nur Sub-Streams — der Integrator läuft
+              ohnehin ohne Sandbox. Nicht optimistisch: das Select zeigt den vom Sidecar bestätigten
+              Zustand; ein Wechsel startet den Prozess mit Resume neu (Kontext bleibt). */}
+          {agent.role === "sub" && live && !agent.mock && (
+            <select
+              className={`mode-select sandbox-select ${agent.sandboxMode ?? "on"}`}
+              value={agent.sandboxMode ?? "on"}
+              onChange={(e) => askSandboxMode(e.target.value as SandboxMode)}
+              title="Sandbox dieses Streams: an (Standard) · Untersuchungs-Modus (Projekt-Ziele im Egress erlaubt, Sandbox bleibt an) · Freigang (Sandbox aus — nur für Untersuchungen auf Test-/Prod-Servern; fällt nach 15 Min. Inaktivität automatisch zurück)."
+            >
+              <option value="on">🔒 Sandbox an</option>
+              <option value="targets">🔎 Untersuchung — Ziele frei</option>
+              <option value="off">🔓 Sandbox aus (Freigang)</option>
             </select>
           )}
           {/* Modell + Effort DIESES Streams live umstellen (Modell via setModel, Effort/Ultracode

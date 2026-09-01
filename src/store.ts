@@ -34,6 +34,8 @@ import type {
   SavedPrompt,
   AccountsState,
   UsageWindow,
+  SandboxMode,
+  InvestigationTarget,
 } from "../shared/protocol";
 import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultEffortForModel } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
@@ -137,6 +139,9 @@ export interface AgentVM {
   modelMismatch?: boolean; // true = SDK lief auf einem anderen Modell als angefordert (mads zieht nach)
   effort?: EffortMode; // Reasoning-Effort dieses Streams (undefined = Modell ohne Effort, z. B. Haiku)
   accountId?: string; // Claude-Konto dieses Streams (Profil-ID der Account-Registry)
+  /** Sandbox-Betriebsart (Untersuchungs-Freigabe) — der Sidecar meldet den REALEN Zustand des
+   *  laufenden Prozesses via status_update; die UI spiegelt nur (nie optimistisch setzen). */
+  sandboxMode?: SandboxMode;
   createdAt: number;
   lastEventAt: number;
   /** Zeitpunkt, ab dem der aktuelle aktive Lauf zählt (für die Laufzeit-Anzeige). */
@@ -330,6 +335,9 @@ export interface MadsState {
   /** Kuratierte, wiederverwendbare Prompts des Projekts (reiner Spiegel — Persistenz macht
    *  der Sidecar in `<repoRoot>/.mads/prompts.json`, gemeldet via prompts_update). */
   prompts: SavedPrompt[];
+  /** Untersuchungsziele des Projekts (Sandbox-Stufe A) — Spiegel von `.mads/targets.json`,
+   *  gemeldet via targets_update; Persistenz macht der Sidecar. */
+  investigationTargets: InvestigationTarget[];
   // ── Spracheingabe (lokales Whisper) ──
   whisper: WhisperVM;
   dictation: DictationVM;
@@ -433,6 +441,11 @@ export interface MadsState {
   savePrompt: (prompt: SavedPrompt) => Promise<void>;
   /** Prompt löschen (die Bestätigung macht die UI vorher). */
   deletePrompt: (id: string) => Promise<void>;
+  /** Sandbox-Betriebsart eines Sub-Streams umschalten (Untersuchungs-Freigabe). Nicht optimistisch —
+   *  der Sidecar startet den Prozess neu und bestätigt den realen Modus via status_update. */
+  setSandboxMode: (id: string, mode: SandboxMode) => Promise<void>;
+  /** Untersuchungsziele des Projekts ersetzen — der Sidecar validiert, persistiert und spiegelt. */
+  saveInvestigationTargets: (targets: InvestigationTarget[]) => Promise<void>;
   sendInput: (id: string, text: string, images?: ImageInput[]) => Promise<void>;
   setPermissionMode: (id: string, mode: PermissionMode) => Promise<void>;
   setAutopilot: (id: string, level: AutopilotLevel) => Promise<void>;
@@ -827,10 +840,13 @@ export const useStore = create<MadsState>((set) => {
           // immer gegen den lokalen Stand. Eine optimistisch gesetzte Auswahl, die im Sidecar gar
           // nicht angekommen ist, wird hier also wieder eingefangen statt still weiterzuleben.
           const accountId = msg.accountId ?? a.accountId;
+          // Sandbox-Modus: wie das Konto meldet der Sidecar den REALEN Zustand des Prozesses —
+          // er gewinnt immer gegen den lokalen Stand (die UI setzt ihn nie optimistisch).
+          const sandboxMode = msg.sandboxMode ?? a.sandboxMode;
           return {
             agents: {
               ...s.agents,
-              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now(), subAgents, accountId },
+              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now(), subAgents, accountId, sandboxMode },
             },
           };
         });
@@ -988,6 +1004,11 @@ export const useStore = create<MadsState>((set) => {
       case "prompts_update":
         // Vollständige Prompt-Liste des Projekts (bei open_project + nach jeder Änderung) — Spiegel.
         set({ prompts: msg.prompts });
+        break;
+
+      case "targets_update":
+        // Untersuchungsziele (Sandbox-Stufe A) — Spiegel von .mads/targets.json.
+        set({ investigationTargets: msg.targets });
         break;
 
       case "model_active":
@@ -1282,6 +1303,7 @@ export const useStore = create<MadsState>((set) => {
     collisions: [],
     panic: { active: false, stoppedAgentIds: [] },
     prompts: [],
+    investigationTargets: [],
     whisper: { installed: false, checked: false, downloading: false, progress: 0 },
     dictation: { recording: false, transcribing: false },
     autonomy: { autoSync: true, collisionScan: true },
@@ -1594,6 +1616,20 @@ export const useStore = create<MadsState>((set) => {
     },
     deletePrompt: async (id) => {
       await sendHost({ ...envelope(), type: "prompt_delete", id });
+    },
+
+    // ── Sandbox-Betriebsart (Untersuchungs-Freigabe): BEWUSST nicht optimistisch — der Wechsel
+    // ist ein Prozess-Neustart mit Resume und kann im Sidecar ausfallen (Stream nicht aktiv,
+    // keine Session, keine Ziele definiert). Der Sidecar bestätigt den realen Modus laufend
+    // per status_update; bis dahin bleibt die Anzeige beim alten Zustand (gleiche Philosophie
+    // wie beim Kontowechsel).
+    setSandboxMode: async (id, mode) => {
+      const label = mode === "off" ? "🔓 Sandbox aus (Freigang)" : mode === "targets" ? "🔎 Untersuchungs-Modus" : "🔒 Sandbox an";
+      notice(id, "accent", `${label} angefordert — Stream wird im selben Gespräch neu gestartet…`);
+      await sendHost({ ...envelope(), type: "set_sandbox_mode", agentId: id, mode });
+    },
+    saveInvestigationTargets: async (targets) => {
+      await sendHost({ ...envelope(), type: "targets_save", targets });
     },
 
     sendInput: async (id, text, images) => {

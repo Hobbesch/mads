@@ -30,6 +30,7 @@ import type {
   ImageInput,
   TimelineAttachment,
   AutopilotLevel,
+  SandboxMode,
   PermissionMode,
   PullRequestInfo,
 } from "../../shared/protocol.js";
@@ -277,6 +278,9 @@ export class AgentSession {
   // „assisted". `lastPr` spiegelt den zuletzt gepollten PR-Zustand für die Autopilot-Logik.
   autopilot: AutopilotLevel = "assisted";
   lastPr?: PullRequestInfo;
+  /** Sandbox-Betriebsart, mit der DIESER Prozess gestartet wurde (Untersuchungs-Freigabe).
+   *  Umschalten geht nur über einen Neustart mit Resume (Orchestrator, set_sandbox_mode). */
+  sandboxMode: SandboxMode = "on";
   // Aktueller Permission-Modus + Arbeitsverzeichnis — für die mads-Auto-Freigabe.
   /** Nicht privat: der Orchestrator übernimmt ihn beim Kontowechsel in die neue Session. */
   permissionMode?: PermissionMode;
@@ -366,6 +370,10 @@ export class AgentSession {
     this.branch = msg.branch;
     this.label = msg.label;
     this.role = msg.role;
+    // Sandbox-Betriebsart (Untersuchungs-Freigabe). Explizit nur über msg.sandboxMode — das legacy
+    // `sandbox:false` bildet weiter den Debug-Aus-Fall ab. NIE persistiert: ein Resume ohne
+    // explizite Angabe startet also immer wieder voll sandboxed ("on").
+    this.sandboxMode = this.role === "integrator" ? "off" : (msg.sandboxMode ?? (msg.sandbox === false ? "off" : "on"));
     // PRÄVENTION (Doppel-Check, Schicht 1): NIE undefined ans SDK — sonst wählt es sein Flaggschiff
     // (Fable 5) und verbrennt teure Tokens „blind". Ein verlorenes Modell (msg.model undefined, z. B.
     // beim Resume) fällt hier ROLLEN-UNABHÄNGIG auf DEFAULT_MODEL zurück. Bewusst kein billigerer
@@ -525,7 +533,16 @@ export class AgentSession {
           // OS-Sandbox für Agenten-Bash (siehe sandbox.ts): Schreiben nur in Worktree/.git/Caches,
           // Netz-Egress nur zu Paketquellen, Secret-Ablagen (~/.ssh, ~/.aws …) kernel-seitig dicht.
           // Begrenzt den Schadensradius VORAB, statt jede Zeile per Regex vorher zu bewerten.
-          ...sandboxOptions({ cwd, repoRoot: this.repoRoot, enabled: msg.sandbox, role: this.role }),
+          ...sandboxOptions({
+            cwd,
+            repoRoot: this.repoRoot,
+            enabled: msg.sandbox,
+            role: this.role,
+            // Untersuchungs-Freigabe (Stufe A/B): Modus + projektweite Ziel-Hosts. Die Domains
+            // setzt der Orchestrator aus .mads/targets.json — Client-Angaben überschreibt er.
+            mode: msg.sandboxMode,
+            extraDomains: msg.investigationDomains,
+          }),
           mcpServers,
           // SICHERHEIT (INJ-1): NUR die globalen Nutzer-Settings laden (~/.claude/settings.json).
           // NICHT "project"/"local" — die läsen die `.claude/settings.json` des (ggf. untrusted)
@@ -1330,7 +1347,7 @@ export class AgentSession {
     // `accountId` mitschicken: der Sidecar hat den Prozess gestartet und kennt das reale Konto,
     // die Oberfläche kann es nur raten. Damit heilt jede Abweichung von selbst, statt bis zum
     // nächsten Kontingent-Anschlag unbemerkt zu bleiben.
-    this.emit({ ...envelope(), type: "status_update", agentId: this.agentId, status, currentStep, label: this.label, role: this.role, accountId: this.accountId });
+    this.emit({ ...envelope(), type: "status_update", agentId: this.agentId, status, currentStep, label: this.label, role: this.role, accountId: this.accountId, sandboxMode: this.sandboxMode });
     this.onChange?.();
   }
   private fail(code: string, message: string, recoverable: boolean): void {
