@@ -764,7 +764,11 @@ export function Inspector() {
                 PR #{agent.reviewPr} ↗
               </button>
             )
-          ) : (
+          ) : agent.role === "integrator" ? null : (
+            // KEIN Stop für den Integrator (Main-Stream): er ist die Leitstelle und nicht löschbar —
+            // ein einziger Klick entfernte ihn sonst samt Session-Kontext (der Main-Checkout ist meist
+            // sauber → askStop fragte nicht einmal nach). Not-Aus bleibt „Unterbrechen" im Composer;
+            // der Sidecar lehnt stop_agent für Integratoren zusätzlich ab (Defense in depth).
             <button
               className="danger"
               onClick={askStop}

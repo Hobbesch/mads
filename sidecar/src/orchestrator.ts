@@ -267,6 +267,24 @@ export class Orchestrator {
 
       case "stop_agent": {
         const s = this.pool.get(msg.agentId);
+        // Invariante: der INTEGRATOR (Main-Stream) ist nicht löschbar. Dieser Pfad entfernte ihn sonst
+        // mit EINEM Klick endgültig aus Pool UND Registry (`removed`-Set) — der gesamte Session-Kontext
+        // der Leitstelle war weg (Vorfall 2026-09-01). Ablehnen, solange es eine fortsetzbare Session
+        // gibt; nur ein Integrator ohne Session (nie hochgekommen) darf entfernt werden.
+        const regEntry = this.project ? loadRegistry(this.project.repoRoot).find((e) => e.agentId === msg.agentId) : undefined;
+        if ((s?.role ?? regEntry?.role) === "integrator" && (s?.sessionId || regEntry?.sessionId)) {
+          log(`[orchestrator] stop_agent für Integrator ${msg.agentId} abgelehnt — der Main-Stream ist nicht löschbar`);
+          this.emit({
+            ...envelope(),
+            type: "agent_event",
+            agentId: msg.agentId,
+            event: {
+              kind: "system",
+              subtype: `🛡 Der Main-Stream (Integrator) kann nicht gelöscht werden — Session und Registry-Eintrag bleiben erhalten. Zum Anhalten „Unterbrechen" nutzen; nach einem App-Neustart steht er wieder als „Fortsetzen" bereit.`,
+            },
+          });
+          break;
+        }
         const wt = s?.worktreePath;
         await this.stopDevServerIf(msg.agentId); // laufenden Dev-Server dieses Streams zuerst beenden
         await s?.stop(msg.removeWorktree ?? false);
@@ -443,6 +461,12 @@ export class Orchestrator {
       case "cleanup_worktree": {
         if (!this.project) break;
         const root = this.project.repoRoot;
+        // Der Integrator hat keinen Worktree — ein fehlgeleiteter Aufruf darf trotzdem NICHT
+        // seinen Registry-Eintrag (unten: removed + saveRegistry-Filter) mitlöschen.
+        if (loadRegistry(root).find((e) => e.agentId === msg.agentId)?.role === "integrator") {
+          log(`[orchestrator] cleanup_worktree für Integrator ${msg.agentId} abgelehnt — der Main-Stream ist nicht löschbar`);
+          break;
+        }
         const path = msg.worktreePath ?? worktreePathFor(root, msg.agentId);
         try {
           // Schutz (G4): einen Worktree mit lokalen Resten (ungespeichert/ungepusht)

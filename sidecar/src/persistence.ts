@@ -193,7 +193,11 @@ export function mergeRegistry(
 ): RegistryEntry[] {
   const byId = new Map<string, RegistryEntry>();
   for (const e of existing) {
-    if (removed.has(e.agentId)) continue; // gestoppt/aufgeräumt → nicht wiederbeleben
+    // Invariante: der INTEGRATOR mit fortsetzbarer Session überlebt selbst ein explizites `removed` —
+    // ein einziger (Fehl-)Klick auf „Stop" löschte sonst den Main-Stream samt Session-Kontext endgültig
+    // aus der Registry (Vorfall 2026-09-01). Löschbar bleibt nur ein Integrator OHNE Session (nie
+    // hochgekommen — da gibt es nichts zu verlieren). Subs bleiben wie gehabt entfernbar.
+    if (removed.has(e.agentId) && !(e.role === "integrator" && e.sessionId)) continue; // gestoppt/aufgeräumt → nicht wiederbeleben
     if (e.worktreePath && !worktreeExists(e.worktreePath)) {
       onDrop?.(e); // verwaister Sub → raus, aber NICHT mehr still: Aufrufer surfaced/loggt es
       continue;
