@@ -1,24 +1,41 @@
 # Dependabot: Supply-Chain-SCA für mads (Security-Pass). Liefert Vulnerability-Alerts +
 # automatische Update-PRs für alle vier Abhängigkeits-Achsen — inkl. der SHA-gepinnten
 # GitHub-Actions in .github/workflows (sonst würden die Pins „einfrieren").
+#
+# Gruppierung (Signal-Hygiene): ohne `groups` erzeugt jede Achse bis zu 5 Einzel-PRs, in
+# Summe bis zu 20 gleichzeitig offene — dann geht der eine PR unter, der wirklich eine
+# Lücke schliesst. Patch/Minor laufen deshalb je Achse in EINEM Sammel-PR; Major-Bumps
+# bleiben bewusst einzeln, weil sie Breaking Changes tragen und Review brauchen.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: "/"
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      npm-root-patch-minor:
+        update-types: [minor, patch]
 
   - package-ecosystem: npm
     directory: "/sidecar"
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      npm-sidecar-patch-minor:
+        update-types: [minor, patch]
 
   - package-ecosystem: cargo
     directory: "/src-tauri"
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      cargo-patch-minor:
+        update-types: [minor, patch]
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      actions-patch-minor:
+        update-types: [minor, patch]
