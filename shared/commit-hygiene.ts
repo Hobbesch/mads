@@ -12,6 +12,11 @@
 
 /** Verzeichnis-/Eintrags-Namen, die nie auto-committet werden (an jeder Pfad-Tiefe). */
 export const NEVER_COMMIT_NAMES: ReadonlySet<string> = new Set([
+  // mads' eigenes Arbeitsverzeichnis (Anhänge, Freigaben, Bridge-Keys) gehört NIE ins Projekt-Repo.
+  // Schutz-in-der-Tiefe: normalerweise deckt `.mads/.gitignore` (= `*`) das ab — der fehlte aber in
+  // WORKTREES, wodurch der Autopilot per `git add -A` echte Nutzer-Anhänge (xlsx) bis nach main
+  // committet hat. Dieser Filter greift auch in Worktrees, die vor dem Fix angelegt wurden.
+  ".mads",
   ".venv",
   "venv",
   "node_modules",

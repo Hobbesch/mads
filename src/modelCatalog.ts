@@ -8,6 +8,7 @@
  * „Ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung (SDK-Session-Flag `ultracode`).
  */
 import type { EffortMode } from "../shared/protocol";
+import { DEFAULT_MODEL as SHARED_DEFAULT_MODEL } from "../shared/protocol";
 
 export interface ModelOption {
   id: string;
@@ -22,11 +23,22 @@ const FULL: EffortMode[] = ["low", "medium", "high", "xhigh", "ultracode"];
 
 // Aktuelle Modell-Riege. Reihenfolge = Anzeige im Dropdown.
 export const MODELS: ModelOption[] = [
-  { id: "claude-fable-5", label: "Fable 5", hint: "Anthropics fähigstes Modell — anspruchsvollste, lang laufende Agenten-Arbeit", effort: FULL },
-  { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Sehr fähig, autonom — Standard für den Integrator", effort: FULL },
-  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Nahe Opus bei Coding/Agentik, günstiger", effort: FULL },
+  { id: "claude-fable-5", label: "Fable 5", hint: "Anthropics fähigstes Modell — anspruchsvollste, lang laufende Agenten-Arbeit (teuerste Stufe: $10/$50 pro Mio.)", effort: FULL },
+  { id: "claude-opus-5", label: "Opus 5", hint: "Stärkster fürs agentische Coding — Standard/Empfehlung für den Integrator; halb so teuer wie Fable 5 ($5/$25)", effort: FULL },
+  {
+    id: "opusplan",
+    label: "Opus+Plan",
+    hint:
+      "Offizieller Claude-Code-Alias: Opus fürs Planen, automatischer Wechsel zu Sonnet für die Ausführung — " +
+      "kostet wie Opus 5 waehrend des Planens, wie Sonnet 5 waehrend des Umsetzens. Der Opus-Anteil greift nur, " +
+      "wenn die Session tatsächlich in Plan Mode läuft (Permission-Modus „Plan\" oder wenn der Agent selbst " +
+      "planend vorgeht) — bei durchgehend direkter Ausführung entspricht es schlicht Sonnet 5.",
+    effort: FULL,
+  },
+  { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Vorgänger-Opus (gleicher Preis wie Opus 5)", effort: FULL },
+  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Nahe Opus bei Coding/Agentik, ~40 % günstiger ($3/$15) — bestes Preis/Leistung für Sub-Agents", effort: FULL },
   { id: "claude-sonnet-4-6", label: "Sonnet 4.6", hint: "Vorgänger-Sonnet (kein xhigh/Ultracode)", effort: ["low", "medium", "high"] },
-  { id: "claude-haiku-4-5", label: "Haiku 4.5", hint: "Schnell & günstig — kein Effort-Regler", effort: [] },
+  { id: "claude-haiku-4-5", label: "Haiku 4.5", hint: "Schnell & günstig ($1/$5) — kein Effort-Regler; für Explore/Hilfsarbeit", effort: [] },
 ];
 
 export const EFFORT_LABEL: Record<EffortMode, string> = {
@@ -47,8 +59,9 @@ export const EFFORT_HINT: Record<EffortMode, string> = {
 
 /** Standard-Effort für neue Streams. */
 export const DEFAULT_EFFORT: EffortMode = "high";
-/** Standard-Modell für neue Streams (Integrator-Default nach CLAUDE.md). */
-export const DEFAULT_MODEL = "claude-opus-4-8";
+/** Standard-Modell für neue Streams (Integrator-Default nach CLAUDE.md). Single Source in
+ *  shared/protocol.ts — dieselbe Konstante, die der Sidecar zur undefined-Coercion nutzt. */
+export const DEFAULT_MODEL = SHARED_DEFAULT_MODEL;
 
 export function modelLabel(id: string | undefined): string {
   if (!id) return "?";
@@ -68,4 +81,23 @@ export function clampEffort(modelId: string | undefined, effort: EffortMode | un
   if (effort && levels.includes(effort)) return effort;
   if (effort && DEFAULT_EFFORT && levels.includes(DEFAULT_EFFORT)) return DEFAULT_EFFORT;
   return levels[levels.length - 1];
+}
+
+/**
+ * Modell-/Effort-Vorbelegung für einen NEUEN Stream. BEWUSST rollen-UNABHÄNGIG: was der Nutzer in
+ * der linken Navigation unter „Modell & Effort · Default" stehen hat, gilt für jeden neu eröffneten
+ * Stream — Integrator wie Sub-Agent. Vorher überschrieb eine rollenbewusste Sonderbehandlung
+ * (Sub-Agent → opusplan/low, Anthropics Subagent-Empfehlung) diese Wahl still: der Rail-Regler
+ * versprach „gilt für NEU eröffnete Streams", ein neuer Sub-Stream startete aber trotzdem auf „low".
+ * Vorhersagbarkeit schlägt hier die automatische Kostenbremse — wer Sub-Streams günstig will, stellt
+ * den Rail-Default auf opusplan/low (oder ändert Modell/Effort im Dialog-Picker direkt darunter).
+ *
+ * Effort wird nur noch auf das gewählte Modell begrenzt (clampEffort) — Haiku z. B. kennt gar keinen
+ * Effort-Regler, Sonnet 4.6 kein xhigh.
+ */
+export function defaultEffortForModel(
+  modelId: string | undefined,
+  fallback: EffortMode | undefined,
+): EffortMode | undefined {
+  return clampEffort(modelId, fallback);
 }

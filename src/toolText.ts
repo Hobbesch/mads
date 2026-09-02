@@ -49,7 +49,11 @@ export function toolDescription(toolName: string, input: Record<string, unknown>
       return str("url") ? `Webseite abrufen: ${str("url")}` : "Webseite abrufen";
     case "WebSearch":
       return str("query") ? `Web-Suche: ${str("query")}` : "Web-Suche";
+    // Der SDK benennt „Task" intern in „Agent" um (Alias-Map) — real kommt „Agent" an. Ohne den
+    // zweiten Fall landeten alle Subagenten im default-Zweig („Agent ausführen") und waren in der
+    // Timeline praktisch unsichtbar.
     case "Task":
+    case "Agent":
       return str("description") ? `Subagent starten: ${str("description")}` : "Subagent starten";
     case "TodoWrite":
       return "To-do-Liste aktualisieren";

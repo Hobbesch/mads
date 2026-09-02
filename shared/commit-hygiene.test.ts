@@ -12,6 +12,13 @@ function check(name: string, cond: boolean): void {
 }
 
 // die Regression: .venv (auch als Symlink/Datei, an jeder Tiefe)
+// mads' eigenes Arbeitsverzeichnis darf NIE ins Projekt-Repo. Regression: in WORKTREES fehlte das
+// `.mads/.gitignore`, wodurch der Autopilot per `git add -A` echte Nutzer-Anhänge (xlsx) bis nach main
+// committet hat. Dieser Filter greift auch in Worktrees, die vor dem Fix entstanden sind.
+check(".mads (root) ist Artefakt", isArtifactPath(".mads"));
+check(".mads/attachments/datei.xlsx ist Artefakt", isArtifactPath(".mads/attachments/Ardexa-Masterliste.xlsx"));
+check(".mads/permissions.json ist Artefakt", isArtifactPath(".mads/permissions.json"));
+check("mads.txt ist KEIN Artefakt (kein Fehl-Treffer)", !isArtifactPath("docs/mads.txt"));
 check(".venv (root) ist Artefakt", isArtifactPath(".venv"));
 check(".venv tiefer im Baum ist Artefakt", isArtifactPath("sub/pkg/.venv"));
 check(".venv/-Inhalt ist Artefakt", isArtifactPath(".venv/bin/python"));

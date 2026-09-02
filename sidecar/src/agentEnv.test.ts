@@ -1,4 +1,4 @@
-import { scrubbedAgentEnv } from "./agentEnv.js";
+import { accountAgentEnv, scrubbedAgentEnv } from "./agentEnv.js";
 
 let passed = 0;
 let failed = 0;
@@ -47,6 +47,40 @@ check(
 check("stripped listet exakt die 7 entfernten", stripped.length === 7 && stripped.includes("GH_TOKEN") && stripped.includes("AWS_SECRET_ACCESS_KEY"));
 check("Original-base wird NICHT mutiert", base.GH_TOKEN === "ghp_secret");
 check("fehlende Keys → leere stripped-Liste", scrubbedAgentEnv({ PATH: "/x" }).stripped.length === 0);
+
+// ---- Mehrkonten: CLAUDE_CONFIG_DIR wählt das Konto ------------------------------------------
+const DEF = "/Users/x/.claude";
+const ALT = "/Users/x/.claude-zweit";
+
+const std = accountAgentEnv(DEF, DEF, base);
+// Regressionsschutz: `CLAUDE_CONFIG_DIR=~/.claude` zu SETZEN bricht die Anmeldung des
+// Standardkontos ("Not logged in") — Claude Code sucht dann einen abgeleiteten
+// Schlüsselbund-Eintrag, den es dafür nicht gibt. Die Variable muss FEHLEN.
+check("Standard-Konto: CLAUDE_CONFIG_DIR ist NICHT gesetzt", !("CLAUDE_CONFIG_DIR" in std.env));
+check(
+  "Standard-Konto: geerbtes CLAUDE_CONFIG_DIR wird entfernt (deterministisch)",
+  !("CLAUDE_CONFIG_DIR" in accountAgentEnv(DEF, DEF, { ...base, CLAUDE_CONFIG_DIR: ALT }).env),
+);
+check(
+  "Standard-Konto: Auth-Übersteuerer BLEIBEN (bestehende API-Key-Anmeldung darf nicht brechen)",
+  std.env.ANTHROPIC_API_KEY === "sk-ant-keep" && std.env.CLAUDE_CODE_OAUTH_TOKEN === "oauth-keep",
+);
+check("Standard-Konto: weiterhin genau 7 gestrippt", std.stripped.length === 7);
+
+const alt = accountAgentEnv(ALT, DEF, base);
+check("Zweitkonto: CLAUDE_CONFIG_DIR zeigt dorthin", alt.env.CLAUDE_CONFIG_DIR === ALT);
+check(
+  "Zweitkonto: Auth-Übersteuerer ENTFERNT (sonst wäre die Kontowahl wirkungslos)",
+  !("ANTHROPIC_API_KEY" in alt.env) && !("CLAUDE_CODE_OAUTH_TOKEN" in alt.env),
+);
+check("Zweitkonto: GitHub-/AWS-Scrub gilt weiterhin", !("GH_TOKEN" in alt.env) && !("AWS_SESSION_TOKEN" in alt.env));
+check("Zweitkonto: harmlose Env bleibt", alt.env.PATH === "/usr/bin" && alt.env.MY_APP_VAR === "v");
+check("Zweitkonto: stripped meldet die Übersteuerer mit", alt.stripped.includes("ANTHROPIC_API_KEY"));
+check("Original-base bleibt auch hier unberührt", base.ANTHROPIC_API_KEY === "sk-ant-keep");
+check(
+  "ANTHROPIC_AUTH_TOKEN wird ebenfalls entfernt",
+  !("ANTHROPIC_AUTH_TOKEN" in accountAgentEnv(ALT, DEF, { ...base, ANTHROPIC_AUTH_TOKEN: "t" }).env),
+);
 
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) throw new Error(`${failed} agentEnv test(s) failed`);

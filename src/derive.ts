@@ -35,8 +35,36 @@ export function agentBadges(a: AgentVM): Badge[] {
 }
 
 export function hasGitEscalation(a: AgentVM): boolean {
+  if (a.reviewPr) return false; // Review-Stream (fremder PR, read-only): behind/CI ist KEINE Eskalation
   if (isMergedDone(a)) return false; // wirklich fertig → keine Eskalation; merged-und-weitergelaufen aber schon
   return a.behind > 0 || a.pr?.checksState === "FAILURE" || a.pr?.mergeable === "CONFLICTING";
+}
+
+/**
+ * Eskalations-Codes, die eine ÜBERGREIFENDE Konfliktlösung rechtfertigen — also solche, die ein
+ * einzelner Stream aus seiner Sandbox heraus gar nicht beurteilen kann, weil sie das Verhältnis
+ * zu ANDEREN Streams oder zu main betreffen. Bewusst nicht dabei: `ci_red`, `secret_detected`,
+ * `auth_broken` — die löst man im betroffenen Stream, nicht durch Anhalten aller anderen.
+ */
+const CONFLICT_CODES = new Set(["merge_conflict", "stale_base", "ownership_trespass", "push_rejected"]);
+
+/**
+ * Wie viele Streams stecken in einer Konfliktlage? Speist das Badge des „Konflikt lösen“-Eintrags
+ * in der Activity-Rail. Zählt STREAMS, nicht Meldungen: derselbe Stream, der drei Eskalationen und
+ * ein `syncBlocked` hat, ist EIN Problem — sonst stünde eine zweistellige Zahl an der Rail, wo
+ * zwei Streams betroffen sind (genau das passierte im Boba-Fall, dort feuerte ein einziger
+ * Trespass-Alarm dutzendfach).
+ */
+export function conflictCount(agents: AgentVM[], escalations: { agentId?: string; code: string }[]): number {
+  const ids = new Set<string>();
+  for (const a of agents) {
+    if (a.role !== "sub" || a.live === false || isMergedDone(a)) continue;
+    if (a.syncBlocked || a.pr?.mergeable === "CONFLICTING") ids.add(a.id);
+  }
+  for (const e of escalations) {
+    if (e.agentId && CONFLICT_CODES.has(e.code)) ids.add(e.agentId);
+  }
+  return ids.size;
 }
 
 /**
@@ -44,6 +72,7 @@ export function hasGitEscalation(a: AgentVM): boolean {
  * geht beim Stop/Aufräumen verloren → auf der Kachel laut markieren und vor Stop bestätigen.
  */
 export function unsavedWork(a: AgentVM): boolean {
+  if (a.reviewPr) return false; // Review-Stream: die Commits sind der FREMDE PR, keine ungesicherte eigene Arbeit
   if (a.role === "integrator") return a.dirty; // dirty Main-Checkout → in Sub-Stream auslagern
   if (a.role !== "sub") return false;
   // Ungesichert = uncommittet/untracked ODER neue Commits über main, die (noch) KEIN offener PR
@@ -67,7 +96,7 @@ export function mergeReadiness(a: AgentVM): MergeGate {
   return preMergeGate(a.pr, a.behind);
 }
 
-export type NextStepKind = "commit" | "pr" | "integrate" | "cleanup" | "outsource" | "none";
+export type NextStepKind = "commit" | "pr" | "integrate" | "cleanup" | "outsource" | "commit_release" | "none";
 export interface NextStep {
   kind: NextStepKind;
   label: string;
@@ -104,7 +133,18 @@ export function isMergedDone(a: AgentVM): boolean {
 
 export function nextStep(a: AgentVM): NextStep {
   const none: NextStep = { kind: "none", label: "", disabled: true, hint: "" };
+  if (a.reviewPr) return none; // Review-Stream: kein Commit/PR-Workflow — Aktionen sind „PR mergen"/„Verwerfen"
   if (a.role === "integrator") {
+    // Deploy-Fall (main_deploy_dirty): das main-Dirt ist ein Deploy-Artefakt (Versions-Bump) —
+    // Primäraktion ist dann „Als Release committen", NICHT auslagern (der frühere Default hob
+    // fälschlich „In Sub-Stream auslagern" hervor). Auslagern bleibt als sekundäre Aktion.
+    if (a.dirty && a.deployDirty)
+      return {
+        kind: "commit_release",
+        label: "Als Release committen",
+        disabled: false,
+        hint: "Versions-Bump als chore(release) direkt auf main committen (Deploy-Artefakt — läuft nicht über einen PR)",
+      };
     // Direkte Edits in main sind nicht vorgesehen (main nur via grünen PR-Merge). Hat der
     // Main-Checkout doch uncommittete Änderungen → in einen neuen Sub-Stream auslagern.
     if (a.dirty)
@@ -173,7 +213,7 @@ export function integrationPlan(agents: AgentVM[], collisions: Collision[]): Int
     if (a.status === "running" || a.status === "starting") {
       waiting.push({ ...base, state: "working", detail: "arbeitet gerade" });
     } else if (a.syncBlocked) {
-      waiting.push({ ...base, state: "conflicting", detail: "Sync-Konflikt → Konflikt lösen" });
+      waiting.push({ ...base, state: "conflicting", detail: "Sync-Konflikt → „Konflikt lösen“ in der Seitenleiste" });
     } else if (a.dirty) {
       waiting.push({ ...base, state: "unsaved", detail: "ungesicherte Arbeit → committen" });
     } else if (a.pr && a.pr.state === "OPEN") {

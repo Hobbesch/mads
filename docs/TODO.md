@@ -52,3 +52,56 @@ gemergt ist. `ahead === 0` ist daher KEIN verlässliches „fertig"-Signal. Bess
 **Orte:** `src/components/Sidebar.tsx` (Aufteilung `subs`/`doneSubs`), `src/components/AgentGrid.tsx`
 (Filter), `src/derive.ts` (`nextStep` für den neuen Zustand). Ggf. ein gepolltes Feld
 (z. B. `commitsSinceMerge`) vom Sidecar (`gitStatus`/`prStatus` in `sidecar/src/git.ts`).
+
+## 3. Typecheck-Strenge zwischen den Schichten angleichen
+
+Erhoben 2026-09-02. `strict: true` ist bereits in **beiden** echten Schichten gesetzt
+(`tsconfig.json` für Frontend + `shared`, `sidecar/tsconfig.json`) — hier geht es nur noch um
+die Lücken *darüber hinaus*. Alle Zahlen unten sind gemessen, nicht geschätzt
+(`npx tsc --noEmit -p <config> --<flag>`).
+
+**3a. Dem Sidecar fehlen drei Flags, die die Root-Config hat.** `noUnusedLocals`,
+`noUnusedParameters`, `noFallthroughCasesInSwitch` stehen nur in `tsconfig.json`. Damit ist der
+Sidecar — die Schicht, die Child-Prozesse und Secrets besitzt — *lockerer* geprüft als das UI.
+Kosten des Angleichens: **2 Fehler**, beide toter Import:
+
+```
+sidecar/src/accounts.ts(18,10)      'existsSync' ungenutzt
+sidecar/src/orchestrator.ts(20,60)  'runManifestPath' ungenutzt
+```
+
+Das ist der klare erste Schritt: zwei Zeilen entfernen, drei Flags in `sidecar/tsconfig.json`
+nachziehen, und beide Schichten sind gleich streng.
+
+**3b. Test-Dateien laufen ohne Typecheck.** `tsconfig.json` schliesst sie per `exclude` aus
+(`shared/**/*.test.ts`, `src/**/*.test.ts`, dito `.tsx`). Der Sidecar prüft seine Tests dagegen mit
+(`include: src/**/*.ts`). Das `exclude` einfach zu streichen genügt **nicht** — es entstehen
+3 Fehler, alle derselbe Grund: die Tests laufen unter Node, die Root-Config kennt aber nur
+DOM-Typen.
+
+```
+shared/adr.test.ts(68,3)            Cannot find name 'process'
+shared/commit-hygiene.test.ts(44,3) Cannot find name 'process'
+src/cmLivePreview.test.ts(90,3)     Cannot find name 'process'
+```
+
+Sauber ist eine eigene `tsconfig.test.json`, die die Test-Dateien einschliesst und
+`"types": ["node"]` setzt, plus ein `typecheck:test`-Script. Eigener, kleiner Schritt.
+
+**3c. `tsconfig.node.json` hat kein `strict`.** Betrifft nur `vite.config.ts` — kosmetisch,
+aber ohne Grund inkonsistent.
+
+**3d. Strenger als `strict` — bewusst als eigenes Vorhaben, nicht nebenbei.** Gemessener Umfang:
+
+| Flag | Frontend/shared | Sidecar |
+|---|---|---|
+| `noImplicitOverride` | 3 | 0 |
+| `exactOptionalPropertyTypes` | 66 | 57 |
+| `noUncheckedIndexedAccess` | 95 | 92 |
+
+`noImplicitOverride` ist praktisch geschenkt und kann mit 3a mitlaufen. Die anderen beiden sind
+je ~120–190 Fundstellen und gehören schichtweise angegangen. Von beiden ist
+`noUncheckedIndexedAccess` der einzige, der real Bugs findet (jeder Array-Index wird
+`T | undefined`) — und passt zum Muster, das im Code ohnehin schon üblich ist
+(`const [sha = "", name = ""] = out.split("\t")`). `exactOptionalPropertyTypes` ist dagegen
+überwiegend Umschreibarbeit an `?:`-Feldern; Nutzen/Aufwand deutlich schlechter.

@@ -12,18 +12,26 @@
  */
 import { AsyncQueue } from "./async-queue.js";
 import { send, log, envelope, randomUUID } from "./io.js";
-import { createWorktree, removeWorktree } from "./git.js";
-import { classifyToolCall, isDeployCommand, isGitCommit, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
-import { scrubbedAgentEnv } from "./agentEnv.js";
-import { readFileSync } from "node:fs";
+import { createWorktree, removeWorktree, worktreeFingerprint } from "./git.js";
+import { ensureMadsDir } from "./persistence.js";
+import { classifyToolCall, isDeployCommand, isGitCommit, isRememberableKind, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
+import { accountAgentEnv } from "./agentEnv.js";
+import { DEFAULT_ACCOUNT_ID, loadAccounts, pickFallback, resolveProfile, saveAccounts, withCooldown } from "./accounts.js";
+import { sandboxOptions } from "./sandbox.js";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { DEFAULT_MODEL } from "../../shared/protocol.js";
 import type {
   StartAgentMsg,
   PermissionDecision,
   AgentStatus,
   ImageInput,
+  TimelineAttachment,
   AutopilotLevel,
+  SandboxMode,
+  PermissionMode,
   PullRequestInfo,
 } from "../../shared/protocol.js";
 
@@ -78,6 +86,9 @@ interface QueryHandle extends AsyncIterable<unknown> {
   // (Effort/Ultracode) mitten in der Session mergen — ohne die query neu zu starten.
   setModel?: (model?: string) => Promise<void>;
   applyFlagSettings?: (settings: Record<string, unknown>) => Promise<void>;
+  /** Plan-Nutzungslimits (5h/Woche/…) auf Abruf. Als EXPERIMENTAL markiert → immer optional
+   *  behandeln und Fehler schlucken; die Anzeige darf nie einen Stream gefährden. */
+  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: () => Promise<unknown>;
   close?: () => void;
 }
 
@@ -87,6 +98,25 @@ function effortOptions(effort?: string): Record<string, unknown> {
   if (!effort) return {};
   if (effort === "ultracode") return { effort: "xhigh", settings: { ultracode: true } };
   return { effort };
+}
+/**
+ * Modell-IDs fürs Gegenprüfen kanonisieren: Region-Präfix (`us.`/`eu.`/`anthropic.`) und
+ * Datums-Suffix (`-20260722`) strippen. Sonst gälte ein vom SDK echotes
+ * `us.anthropic.claude-opus-4-8-20260722` fälschlich als Mismatch zum kurzen `claude-opus-4-8`
+ * → dauerndes Falsch-Warn-Badge („cries wolf"). Der eigentliche Fall (Fable ≠ Opus) bleibt erkannt.
+ */
+export function normalizeModelId(id: string): string {
+  // `+` strippt auch zusammengesetzte Präfixe wie `us.anthropic.` (mehrere Segmente).
+  return id.replace(/^(?:(?:us|eu|apac|anthropic)\.)+/, "").replace(/-\d{8}$/, "");
+}
+/**
+ * Gehört diese SDK-Stream-Nachricht dem HAUPTLOOP (nicht einem Sub-Agenten)? Der Agent-SDK setzt
+ * bei Nachrichten aus einem Task/Explore-Sub-Agenten `parent_tool_use_id` auf dessen tool_use_id;
+ * beim Hauptloop ist es `null`/fehlt. Wichtig fürs Modell-Gegenprüfen: Sub-Agenten laufen bewusst
+ * auf dem schnellen Modell (Haiku) — ihr Modell darf das Stream-Modell nicht als „Haiku" fehlmelden.
+ */
+function isMainLoop(m: Record<string, unknown>): boolean {
+  return m.parent_tool_use_id == null; // deckt null UND undefined (fehlt) ab
 }
 /** Live-Variante fürs applyFlagSettings (Flag-Layer). */
 function effortFlagSettings(effort: string): Record<string, unknown> {
@@ -133,6 +163,24 @@ function apiErrorInfo(err: string): { message: string; recoverable: boolean } {
   }
 }
 
+/** Obergrenze für ein Inline-Thumbnail (base64-Länge). Ein 320px-JPEG liegt typisch bei 10–30 KB;
+ *  256 KB ist grosszügig und deckelt zugleich Ringpuffer/Snapshot-Replay/Bridge gegen Missbrauch. */
+const MAX_THUMB_B64 = 256 * 1024;
+
+/** Obergrenze fürs VOLLBILD (base64-Länge, ~27 MB ≈ 20 MB Datei — spiegelt den Frontend-Anhang-Cap).
+ *  Greift vor allem gegen ein gekoppeltes REMOTE, das sonst ungedeckelt auf die Platte schreiben könnte. */
+const MAX_IMAGE_B64 = 27 * 1024 * 1024;
+
+/** Datei-Endung für abgelegte Bild-Anhänge (nur Anzeige/Debug — der mediaType bleibt im Event). */
+const IMG_EXT: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/svg+xml": "svg",
+  "image/bmp": "bmp",
+};
+
 function userMsg(text: string, images?: ImageInput[]): SdkUserMessage {
   if (images && images.length > 0) {
     const content: unknown[] = [{ type: "text", text }];
@@ -149,6 +197,45 @@ function userMsg(text: string, images?: ImageInput[]): SdkUserMessage {
 export interface PermissionHooks {
   isKindApproved: (kind: CommandKind) => boolean;
   approveKind: (kind: CommandKind) => void;
+  /** Freigabe pro TOOL-NAME (nicht pauschal für alle Tools) — für Nicht-Bash-Tools wie MCP-Server.
+   *  Ohne diesen Pfad war „Immer erlauben" dort wirkungslos und dieselbe Rückfrage kam endlos wieder. */
+  isToolApproved: (toolName: string) => boolean;
+  approveTool: (toolName: string) => void;
+}
+
+/** Claude Codes eigenes Standard-Config-Verzeichnis (= Verhalten ohne gesetztes CLAUDE_CONFIG_DIR). */
+function defaultClaudeConfigDir(): string {
+  return join(homedir(), ".claude");
+}
+
+/**
+ * Zeitangabe des SDK in Millisekunden umrechnen. Das Feld ist je nach Version Sekunden-Epoche,
+ * Millisekunden-Epoche oder ISO-String — alle drei defensiv abdecken, statt eine Form anzunehmen.
+ * Unplausibles → undefined (die UI zeigt dann „Reset unbekannt" statt einer erfundenen Zeit).
+ */
+function toEpochMs(raw: unknown): number | undefined {
+  let ms: number | undefined;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    ms = raw > 1e11 ? raw : raw * 1000; // < 1e11 ⇒ Sekunden-Epoche
+  } else if (typeof raw === "string" && raw) {
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) ms = parsed;
+  }
+  if (ms === undefined) return undefined;
+  // Plausibilitätsfenster: zwischen jetzt-1h und jetzt+30 Tagen.
+  const now = Date.now();
+  return ms > now - 3600_000 && ms < now + 30 * 86400_000 ? ms : undefined;
+}
+
+/** Fehler mit allen diagnostisch nützlichen Feldern beschreiben (String(e) verliert sie). */
+function describeError(e: unknown): string {
+  if (!(e instanceof Error)) return JSON.stringify(e) ?? String(e);
+  const extra = e as Error & { status?: unknown; code?: unknown };
+  const bits = [`${e.name}: ${e.message}`];
+  if (extra.status !== undefined) bits.push(`status=${String(extra.status)}`);
+  if (extra.code !== undefined) bits.push(`code=${String(extra.code)}`);
+  if (e.stack) bits.push(e.stack.split("\n").slice(1, 4).join(" | "));
+  return bits.join(" ");
 }
 
 export class AgentSession {
@@ -170,14 +257,33 @@ export class AgentSession {
   role?: "integrator" | "sub";
   model?: string;
   effort?: string;
+  /** Claude-Konto dieses Streams (Profil-ID) — wird persistiert, damit ein Resume nach Neustart
+   *  dasselbe Konto trifft (die Session liegt im `projects/` GENAU dieses Kontos). */
+  accountId: string = DEFAULT_ACCOUNT_ID;
+  /** Config-Verzeichnis des Kontos; setzt `CLAUDE_CONFIG_DIR` und lenkt die Session-Suche. */
+  accountConfigDir: string = defaultClaudeConfigDir();
+  /** Letzte gemeldete Kontingent-Lage — entprellt wiederholte Events desselben Fensters. */
+  private lastRateLimitKey?: string;
+  /** Doppel-Check: real vom SDK gelaufenes Modell (normalisiert, aus Init/Assistant-Nachrichten). */
+  activeModel?: string;
+  /** Fremd-Edit-Schutz: Worktree-Fingerprint zum ENDE des letzten Agent-Turns. Der Autopilot
+   *  committet nur, wenn der Worktree danach unverändert ist — sonst ist etwas fremdes reingekommen. */
+  turnFingerprint?: string;
+  /** Für welches konkrete Fehl-Modell schon gewarnt+nachgezogen wurde (verhindert Spam, erlaubt
+   *  aber eine neue Warnung, falls der SDK auf ein ANDERES falsches Modell driftet). */
+  private mismatchCorrectedFor?: string;
   lastPrompt?: string;
   mock = false;
   // Autopilot (Phase 2): vom Orchestrator gesetzt/gelesen (treibt autopilotPass). Default
   // „assisted". `lastPr` spiegelt den zuletzt gepollten PR-Zustand für die Autopilot-Logik.
   autopilot: AutopilotLevel = "assisted";
   lastPr?: PullRequestInfo;
+  /** Sandbox-Betriebsart, mit der DIESER Prozess gestartet wurde (Untersuchungs-Freigabe).
+   *  Umschalten geht nur über einen Neustart mit Resume (Orchestrator, set_sandbox_mode). */
+  sandboxMode: SandboxMode = "on";
   // Aktueller Permission-Modus + Arbeitsverzeichnis — für die mads-Auto-Freigabe.
-  private permissionMode?: string;
+  /** Nicht privat: der Orchestrator übernimmt ihn beim Kontowechsel in die neue Session. */
+  permissionMode?: PermissionMode;
   private cwd?: string;
 
   private readonly inbox = new AsyncQueue<SdkUserMessage>();
@@ -196,11 +302,15 @@ export class AgentSession {
   private readonly perms?: PermissionHooks;
   private q?: QueryHandle;
   private readonly onChange?: () => void;
+  /** Liefert (LIVE, beim Start abgefragt) die Zusammenfassung der AKTIVEN Streams — damit der Agent
+   *  weiß, welche Streams existieren, und Arbeit nicht an einen geschlossenen „Phantom-Stream" routet. */
+  private readonly streamsContext?: () => string;
 
-  constructor(agentId: string, onChange?: () => void, perms?: PermissionHooks) {
+  constructor(agentId: string, onChange?: () => void, perms?: PermissionHooks, streamsContext?: () => string) {
     this.agentId = agentId;
     this.onChange = onChange;
     this.perms = perms;
+    this.streamsContext = streamsContext;
   }
 
   /** Wartet eine Permission-Rückfrage? (Autopilot agiert nur, wenn der Stream ruhig ist.) */
@@ -260,16 +370,41 @@ export class AgentSession {
     this.branch = msg.branch;
     this.label = msg.label;
     this.role = msg.role;
-    this.model = msg.model;
+    // Sandbox-Betriebsart (Untersuchungs-Freigabe). Explizit nur über msg.sandboxMode — das legacy
+    // `sandbox:false` bildet weiter den Debug-Aus-Fall ab. NIE persistiert: ein Resume ohne
+    // explizite Angabe startet also immer wieder voll sandboxed ("on").
+    this.sandboxMode = this.role === "integrator" ? "off" : (msg.sandboxMode ?? (msg.sandbox === false ? "off" : "on"));
+    // PRÄVENTION (Doppel-Check, Schicht 1): NIE undefined ans SDK — sonst wählt es sein Flaggschiff
+    // (Fable 5) und verbrennt teure Tokens „blind". Ein verlorenes Modell (msg.model undefined, z. B.
+    // beim Resume) fällt hier ROLLEN-UNABHÄNGIG auf DEFAULT_MODEL zurück. Bewusst kein billigerer
+    // Sub-Fallback mehr: ein mads-Sub-Stream ist ein gleichrangiger Top-Level-Agent mit eigenem
+    // Worktree/Branch/PR, NICHT der SDK-interne „Subagent" des Agent-Tools (Unterscheidung ist
+    // load-bearing, docs/design/04-sub-agents.md §0). Ein Stream, der auf Fable 5 lief und beim
+    // Resume sein Modell verliert, darf nicht still auf ein schwächeres Modell abrutschen.
+    // Deckt auch den Auslagern-Flow ab (outsource_main), der keinen Model-Picker durchläuft.
+    this.model = msg.model || DEFAULT_MODEL;
     this.effort = msg.effort;
-    this.lastPrompt = msg.prompt;
+    // Konto auflösen, BEVOR irgendetwas den Config-Pfad braucht (Session-Suche beim Resume).
+    this.applyAccount(msg.accountId);
+    // Die automatische „Setze die Arbeit fort"-Anweisung beim Resume ist KEIN Nutzer-Auftrag: sie darf
+    // den zuletzt gemerkten (ggf. via Orchestrator aus der Registry vorgeladenen) Auftrag nicht
+    // überschreiben, sonst zeigt die Kachel nach dem Neustart den Nudge statt des echten Auftrags.
+    if (!msg.continuation) this.lastPrompt = msg.prompt;
     this.permissionMode = msg.permissionMode;
-    this.emitUserText(msg.prompt); // Start-Prompt beidseitig sichtbar machen
-    this.inbox.push(userMsg(msg.prompt));
-    this.setStatus("running", "starting up");
+    // Leerer Start-Prompt (New-Stream-Dialog ohne „Aufgabe") darf KEINEN Claude-Turn auslösen —
+    // Worktree/Session entstehen trotzdem, der Agent wartet einfach auf die erste echte Nachricht
+    // aus dem normalen Chat-Input (analog zu einem passiv wiederhergestellten, noch nicht gestarteten Stream).
+    const hasInitialInput = msg.prompt.trim().length > 0 || (msg.images?.length ?? 0) > 0;
+    this.emitUserText(msg.prompt, msg.images, msg.continuation); // Start-Prompt beidseitig sichtbar machen
+    if (hasInitialInput) {
+      this.inbox.push(userMsg(msg.prompt, msg.images));
+      this.setStatus("running", "starting up");
+    } else {
+      this.setStatus("waiting_input", "wartet auf Aufgabe");
+    }
 
     if (this.mock) {
-      void this.runMock(msg.prompt);
+      if (hasInitialInput) void this.runMock(msg.prompt);
       return;
     }
 
@@ -291,6 +426,25 @@ export class AgentSession {
     }
 
     this.cwd = cwd;
+
+    // Cross-Machine-Härtung (Session-Schicht): Eine fortzusetzende Claude-Session liegt lokal unter
+    // ~/.claude/projects/<enc(cwd)>/<sessionId>.jsonl — PRO RECHNER, NICHT im Repo. Kopiert man ein
+    // mads-Repo auf einen anderen Mac, fehlt sie dort → der SDK-Resume scheitert hart mit „No conversation
+    // found with session ID" (consume_failed) und der Stream ist unbrauchbar. Ist die Session lokal nicht
+    // vorhanden, setzen wir stattdessen mit einer FRISCHEN Session im selben Worktree/Branch fort (die
+    // Anzeige-Historie kommt weiterhin aus .mads/transcripts). Best effort — die On-disk-Ablage ist
+    // Claude-intern; schlägt der Check fehl, bleibt der harte consume-Fehler als Backstop.
+    let resume = msg.resumeSessionId;
+    if (resume && !this.claudeSessionExists(cwd, resume)) {
+      log(`[${this.agentId}] Resume-Session ${resume} lokal nicht gefunden (Repo von anderem Rechner kopiert?) → frische Session im selben Worktree`);
+      this.emitText(
+        "ℹ Die frühere Konversation dieses Streams ist auf diesem Rechner nicht vorhanden " +
+          "(vermutlich von einem anderen Mac kopiert — Claude-Sessions liegen pro Rechner in ~/.claude, " +
+          "nicht im Repo). Ich setze im selben Worktree/Branch mit einer neuen Session fort; die bisherige " +
+          "Verlaufsanzeige bleibt erhalten.",
+      );
+      resume = undefined;
+    }
 
     try {
       const sdk = (await import("@anthropic-ai/claude-agent-sdk")) as unknown as {
@@ -360,20 +514,35 @@ export class AgentSession {
 
       // Env-Scrub: dem Agenten-Tool-Prozess GH-/AWS-Tokens entziehen (siehe agentEnv.ts). `options.env`
       // ERSETZT die Env des CLI-Subprozesses (nicht mergen) → scrubbedAgentEnv spreadet process.env.
-      const agentEnv = scrubbedAgentEnv();
+      // Zusätzlich wählt CLAUDE_CONFIG_DIR das Claude-Konto dieses Streams (Mehrkonten-Betrieb).
+      const agentEnv = accountAgentEnv(this.accountConfigDir, defaultClaudeConfigDir());
       if (agentEnv.stripped.length) {
         log(`[${this.agentId}] Agenten-Env bereinigt (nicht an Tool-Prozess vererbt): ${agentEnv.stripped.join(", ")}`);
       }
+      log(`[${this.agentId}] Claude-Konto: ${this.accountId} (${this.accountConfigDir})`);
 
       this.q = sdk.query({
         prompt: this.inbox,
         options: {
           cwd,
           env: agentEnv.env,
-          model: msg.model,
+          model: this.model, // coerciert (nie undefined) — siehe DEFAULT_MODEL-Zuweisung in start()
           // Effort/Ultracode (SDK-nativ): low/medium/high/xhigh → options.effort;
           // ultracode → effort xhigh + settings.ultracode. Ohne Effort → SDK-Default (high).
           ...effortOptions(msg.effort),
+          // OS-Sandbox für Agenten-Bash (siehe sandbox.ts): Schreiben nur in Worktree/.git/Caches,
+          // Netz-Egress nur zu Paketquellen, Secret-Ablagen (~/.ssh, ~/.aws …) kernel-seitig dicht.
+          // Begrenzt den Schadensradius VORAB, statt jede Zeile per Regex vorher zu bewerten.
+          ...sandboxOptions({
+            cwd,
+            repoRoot: this.repoRoot,
+            enabled: msg.sandbox,
+            role: this.role,
+            // Untersuchungs-Freigabe (Stufe A/B): Modus + projektweite Ziel-Hosts. Die Domains
+            // setzt der Orchestrator aus .mads/targets.json — Client-Angaben überschreibt er.
+            mode: msg.sandboxMode,
+            extraDomains: msg.investigationDomains,
+          }),
           mcpServers,
           // SICHERHEIT (INJ-1): NUR die globalen Nutzer-Settings laden (~/.claude/settings.json).
           // NICHT "project"/"local" — die läsen die `.claude/settings.json` des (ggf. untrusted)
@@ -395,20 +564,49 @@ export class AgentSession {
               "aus — kein git push, kein rebase auf origin/main, kein `gh pr`/`gh merge`. Diese " +
               "Schritte (Sync, PR erstellen, Integrieren/Merge, Branch-Cleanup) übernimmt mads über " +
               "die UI-Buttons; manuelle Pushes/Rebases würden den Branch divergieren lassen." +
+              // Parallelität AKTIV ermutigen (rollenneutral). Vorher stand hier nur ein Verbot für den
+              // Integrator und für Sub-Streams gar nichts — messbar: der Integrator nutzte das
+              // Agent-Tool in 0 von 190 Tool-Calls. Das Absolutverbot („NIEMALS") sollte nur die
+              // Verwechslung mit spawn_substreams verhindern, wirkte aber als generelle Delegations-Sperre.
+              "\nArbeitstempo — nutze Parallelität aktiv:\n" +
+              "• Unabhängige Tool-Aufrufe (Read/Grep/Glob/Bash) in EINEM Zug absetzen statt nacheinander.\n" +
+              "• Für breite Recherche, Code-Suche über viele Dateien, Analysen und Reviews gerne MEHRERE " +
+              "`Agent`-Subagenten parallel starten (z. B. `subagent_type: Explore`) — das ist erwünscht und " +
+              "macht dich deutlich schneller.\n" +
+              "• Lange Builds/Tests mit `run_in_background` starten und später das Ergebnis abholen, statt " +
+              "blockierend zu warten.\n" +
+              "• Startest du einen TEMPORÄREN Prozess (Repro-Server, Watcher, Headless-Browser), dann " +
+              "IMMER mit `run_in_background` — und beende ihn danach mit dem Stop-Tool für diesen Task. " +
+              "Nutze dafür NICHT `pkill`/`kill`: das braucht eine Rückfrage, und bleibt sie aus, läuft dein " +
+              "Prozess verwaist weiter und belegt Ports.\n" +
               (this.role === "integrator"
-                ? "\nParallele Arbeit — ZWEI Mechanismen, NICHT verwechseln:\n" +
-                  "• spawn_substreams (mads-Tool): erzeugt ECHTE, im Dashboard sichtbare und steuerbare " +
-                  "mads-Sub-Streams mit eigenem Worktree/Branch. NUTZE IMMER DIESES, wenn der Mensch dich " +
-                  "bittet, Aufgaben/Punkte in Sub-Agenten/Sub-Streams aufzuteilen und parallel zu starten " +
+                ? "\nZwei Delegations-Mechanismen — unterschiedlicher Zweck, beide erwünscht:\n" +
+                  "• spawn_substreams (mads-Tool): für ECHTE, eigenständige Arbeitsströme mit eigenem " +
+                  "Worktree/Branch, im Dashboard sichtbar und vom Menschen steuerbar. NUTZE DIESES, wenn der " +
+                  "Mensch Aufgaben in Sub-Agenten/Sub-Streams aufteilen und parallel starten will " +
                   "(„starte Sub-Agenten“, „parallel aufteilen“, „eröffne Streams“). Ein Eintrag pro Stream; " +
-                  "sie laufen danach eigenständig weiter, der Mensch sieht und steuert sie. Erkläre kurz die " +
-                  "Aufteilung und führe sie dann WIRKLICH über spawn_substreams aus — nicht still seriell selbst.\n" +
-                  "• Das `Agent`/Task-Tool (SDK-Helfer-Subagent): NUR für kurze, interne Lese-/Analyse-Hilfen " +
-                  "innerhalb deiner eigenen Antwort (z. B. einen Diff security-reviewen). Es erscheint NICHT im " +
-                  "Dashboard, ist nicht steuerbar und ist KEIN Ersatz für spawn_substreams — nutze es NIEMALS, " +
-                  "um die vom Menschen gewünschte parallele Sub-Agenten-Arbeit zu erledigen.\n" +
+                  "erkläre kurz die Aufteilung und führe sie dann WIRKLICH aus — nicht still seriell selbst.\n" +
+                  "• Das `Agent`/Task-Tool: für Arbeit INNERHALB deiner eigenen Antwort (recherchieren, " +
+                  "analysieren, reviewen). Nutze es dafür ruhig oft und mehrfach parallel. Es erscheint nicht " +
+                  "im Dashboard und ersetzt spawn_substreams nicht, wenn eigenständige Streams gewünscht sind — " +
+                  "aber es ist dein Standardwerkzeug, um selbst schnell zu sein.\n" +
                   "Außen-git (push/pr/merge) macht weiterhin nur mads über die UI; mergen tust nur du."
                 : "") +
+              // Stream-Zuständigkeit ist TRANSIENT (endet beim Merge) — verhindert das Routen an
+              // Phantom-Streams: der Agent lehnte Arbeit ab „gehört zu Stream X", obwohl X längst
+              // geschlossen+gemergt war (dessen Dateien liegen dann in main und gehören NIEMANDEM).
+              "\nStream-Zuständigkeit & Ownership (WICHTIG, verhindert Fehl-Routing):\n" +
+              "• Die Zuordnung Feature-X-gehört-zu-Stream-Y gilt NUR, solange Stream Y AKTIV ist. " +
+              "Ist Y gemergt und geschlossen, liegen seine Dateien in main und gehören KEINEM Stream " +
+              "mehr — du darfst sie in deinem Stream bearbeiten.\n" +
+              "• mads' `ownership_trespass`-Gate greift AUSSCHLIESSLICH zwischen AKTIVEN Parallel-Streams. " +
+              "Für einen geschlossenen Stream kann es NICHT auslösen — sage nie einen Trespass voraus, " +
+              "ohne dass der besitzende Stream in der Liste unten steht.\n" +
+              "• Bevor du Arbeit an einen anderen Stream zurückgibst oder mit Ownership ablehnst: " +
+              "PRÜFE, ob dieser Stream noch lebt — in der Liste unten oder via " +
+              "git branch -a --list 'mads/<name>'. Fehlt der Branch und liegt die Datei schon in " +
+              "main, ist der Stream zu → mach die Arbeit hier.\n" +
+              (this.streamsContext?.() ?? "") +
               loadProjectGuide(cwd),
           },
           // "auto" wird mads-seitig behandelt (Auto-Freigabe im canUseTool); dem SDK
@@ -417,7 +615,7 @@ export class AgentSession {
           includePartialMessages: false,
           allowedTools: msg.allowedTools,
           disallowedTools: msg.disallowedTools,
-          resume: msg.resumeSessionId,
+          resume, // vorvalidiert: fehlt die Session lokal (Cross-Machine), ist dies undefined → frischer Start
           forkSession: msg.forkSession,
           stderr: (d: string) => log(`[claude ${this.agentId}]`, d),
           canUseTool: (toolName: string, input: Record<string, unknown>, opts: Record<string, unknown>) =>
@@ -488,6 +686,7 @@ export class AgentSession {
         cwd: this.cwd,
         isFetchHostApproved: (h) => this.approvedFetchHosts.has(registrableDomain(h)),
         isKindApproved: (k) => this.perms?.isKindApproved(k) ?? false,
+        isToolApproved: (t) => this.perms?.isToolApproved(t) ?? false,
       });
       if (verdict.decision === "allow") {
         // updatedInput ist im CLI-Schema PFLICHT (Record) — sonst ZodError. Ursprünglichen
@@ -569,9 +768,16 @@ export class AgentSession {
       // „Immer erlauben" bei Bash → die KATEGORIE projektweit merken (persistent, via Orchestrator).
       // `danger` ist nie merkbar (classifyToolCall reicht es gar nicht als merkbar durch, und der
       // Orchestrator/Store filtert es zusätzlich) → destruktive Befehle fragen weiterhin.
-      if (decision.remember && toolName === "Bash" && commandKind && commandKind !== "danger") {
+      if (decision.remember && toolName === "Bash" && commandKind && isRememberableKind(commandKind) && commandKind !== "tool") {
         this.perms?.approveKind(commandKind);
         log(`[${this.agentId}] Befehls-Kategorie projektweit gemerkt: ${commandKind}`);
+      }
+      // „Immer erlauben" bei einem NICHT-Bash-Tool (MCP-Server o. Ä.) → genau DIESES Tool merken,
+      // nicht die ganze Klasse. Vorher gab es diesen Pfad nicht: der Knopf war wirkungslos und
+      // dieselbe Rückfrage kam nach jedem Aufruf und jedem Neustart wieder.
+      if (decision.remember && toolName && toolName !== "Bash" && commandKind === "tool") {
+        this.perms?.approveTool(toolName);
+        log(`[${this.agentId}] Tool projektweit gemerkt: ${toolName}`);
       }
       resolve({
         behavior: "allow",
@@ -603,6 +809,7 @@ export class AgentSession {
   }
 
   sendInput(text: string, images?: ImageInput[]): void {
+    if (text.trim()) this.lastPrompt = text; // Folge-Auftrag merken (Kachel-Übersicht, Resume-fest)
     this.emitUserText(text, images); // Folge-Anweisung beidseitig sichtbar machen
     this.inbox.push(userMsg(text, images));
     this.setStatus("running");
@@ -615,7 +822,7 @@ export class AgentSession {
     this.setStatus("paused");
   }
 
-  async setMode(mode: string): Promise<void> {
+  async setMode(mode: PermissionMode): Promise<void> {
     this.permissionMode = mode;
     // "auto" handhabt mads selbst → dem SDK "default" geben (siehe start()).
     await this.q?.setPermissionMode?.(mode === "auto" ? "default" : mode);
@@ -626,11 +833,59 @@ export class AgentSession {
   async setModelEffort(model?: string, effort?: string): Promise<void> {
     if (model !== undefined && model !== "") {
       this.model = model;
+      this.mismatchCorrectedFor = undefined; // frische Absicht → ein neuer Mismatch darf wieder warnen
       await this.q?.setModel?.(model);
     }
     if (effort !== undefined && effort !== "") {
       this.effort = effort;
       await this.q?.applyFlagSettings?.(effortFlagSettings(effort));
+    }
+  }
+
+  /**
+   * DETEKTION (Doppel-Check, Schicht 2): das REAL vom SDK gelaufene Modell (aus Init-/Assistant-
+   * Nachrichten) gegen das angeforderte prüfen. Weicht es ab (z. B. Fable statt Opus), aktiv
+   * `setModel(angefordert)` nachziehen und den Menschen EINMAL warnen — so verbrennt kein stiller
+   * Modellwechsel unbemerkt Tokens. Meldet den Ist-Stand ans UI (Picker zeigt Ist, nicht Wunsch).
+   */
+  private reconcileActiveModel(actual: string | undefined): void {
+    if (!actual) return;
+    // Platzhalter-„Modelle" ignorieren: der SDK taggt synthetische Nachrichten (Kompaktierung,
+    // Fehler-/System-Einschübe) mit `<synthetic>` o. Ä. — das ist KEIN reales Modell und darf das
+    // Stream-Modell nicht als „<synthetic>" fehlmelden (Fehlalarm-Badge). Reale IDs sind `claude-…`.
+    if (actual.startsWith("<") || !/^[a-z]/i.test(actual)) return;
+    const norm = normalizeModelId(actual);
+    if (norm === this.activeModel) return; // nur bei echter Änderung — drosselt den Emit
+    this.activeModel = norm;
+    // "opusplan" (Claude-Code-eigener Alias) lässt die Session ABSICHTLICH zwischen Opus (Plan
+    // Mode) und Sonnet (Ausführung) wechseln — reale ID gleicht nie dem angeforderten String
+    // "opusplan" selbst. Das ist kein Mismatch, sondern die Funktion des Alias; nur eine Abweichung
+    // AUSSERHALB dieser beiden Familien (z. B. stiller Fallback auf Haiku) zählt hier als echter.
+    const mismatch =
+      !!this.model &&
+      (this.model === "opusplan" ? !/opus|sonnet/.test(norm) : norm !== normalizeModelId(this.model));
+    this.emit({ ...envelope(), type: "model_active", agentId: this.agentId, active: norm, requested: this.model, mismatch });
+    if (mismatch) {
+      // Je konkretem Fehl-Modell EINMAL warnen+nachziehen; driftet der SDK auf ein ANDERES falsches
+      // Modell, darf erneut gewarnt werden (mismatchCorrectedFor trackt das zuletzt behandelte).
+      if (this.mismatchCorrectedFor !== norm) {
+        this.mismatchCorrectedFor = norm;
+        log(`[${this.agentId}] MODELL-MISMATCH: SDK lief auf ${norm}, angefordert ${this.model} → versuche nachzuziehen`);
+        this.emit({
+          ...envelope(),
+          type: "agent_event",
+          agentId: this.agentId,
+          event: {
+            kind: "assistant_text",
+            // Bewusst „versucht": setModel ist fire-and-forget; ist das Wunschmodell nicht verfügbar,
+            // bleibt der SDK beim Fallback. Das Badge zeigt dann weiter die Wahrheit (reales Modell).
+            text: `⚠ Modell-Abweichung: Dieser Stream läuft real auf **${norm}**, angefordert war **${this.model}**. mads versucht, auf ${this.model} nachzuziehen.`,
+          },
+        });
+        void this.q?.setModel?.(this.model);
+      }
+    } else {
+      this.mismatchCorrectedFor = undefined; // wieder in Deckung → ein späterer Mismatch darf erneut warnen
     }
   }
 
@@ -657,10 +912,39 @@ export class AgentSession {
           case "system":
             if (m.subtype === "init") {
               this.sessionId = m.session_id as string;
+              // NUR den Hauptloop gegenprüfen: ein Sub-Agent (Task/Explore-Tool) läuft bewusst auf
+              // dem schnellen Modell (Haiku) und emittiert eine EIGENE init mit gesetztem
+              // parent_tool_use_id — die darf das Stream-Modell NICHT als „Haiku" fehlmelden.
+              if (isMainLoop(m)) {
+                this.reconcileActiveModel(m.model as string | undefined);
+                // Verbrauch gleich beim Sitzungsstart holen: sonst stünde die Anzeige bis zum Ende
+                // des ersten Turns leer — genau dann, wenn man wissen will, ob das Konto noch trägt.
+                void this.reportUsage();
+              }
               this.onChange?.();
+            } else if (m.subtype === "status" && m.status === "compacting") {
+              // Client-seitiges Auto-Compact (SDK, ~95% Kontextfüllung) lief bisher komplett still
+              // durch — der Sidecar bekam den Status zwar zugestellt, ignorierte ihn aber (default-
+              // Zweig unten). Sichtbar machen kostet nichts: derselbe Mechanismus wie für Tool-Namen.
+              this.setStatus("running", "Kontext wird komprimiert…");
+            } else if (m.subtype === "status" && m.compact_result === "failed") {
+              // Fehlgeschlagene Kompaktierung darf nicht stillschweigend untergehen — die Session
+              // läuft mit vollem (oder wachsendem) Kontext weiter, ohne dass wer davon erfährt.
+              this.emit({
+                ...envelope(),
+                type: "error",
+                agentId: this.agentId,
+                scope: "agent",
+                code: "compact_failed",
+                message: `Kontext-Komprimierung fehlgeschlagen: ${String(m.compact_error ?? "unbekannter Fehler")}`,
+                recoverable: true,
+              });
             }
             break;
           case "assistant": {
+            // Doppel-Check: jede Assistant-Nachricht des HAUPTLOOPS trägt das real gelaufene Modell.
+            // Sub-Agent-Antworten (parent_tool_use_id gesetzt) überspringen — sie laufen legitim auf Haiku.
+            if (isMainLoop(m)) this.reconcileActiveModel((m.message as { model?: string })?.model);
             const content = ((m.message as { content?: unknown[] })?.content ?? []) as Array<Record<string, unknown>>;
             for (const block of content) {
               if (block.type === "text") {
@@ -669,7 +953,10 @@ export class AgentSession {
                 const t = String(block.thinking ?? block.text ?? "");
                 if (t) this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "thinking", text: t } });
               } else if (block.type === "tool_use") {
-                this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId: String(block.id), name: String(block.name), input: (block.input ?? {}) as Record<string, unknown> } });
+                // parent_tool_use_id mitgeben: bei einem Sub-Agenten (Task/Agent-Tool) trägt die Nachricht
+                // die tool_use_id ihres Starters → das Frontend ordnet die Aktivität dem Teil-Agenten zu.
+                const parentToolUseId = (m.parent_tool_use_id as string | null) ?? undefined;
+                this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId: String(block.id), name: String(block.name), input: (block.input ?? {}) as Record<string, unknown>, parentToolUseId } });
                 this.setStatus("running", String(block.name));
               }
             }
@@ -734,15 +1021,149 @@ export class AgentSession {
               isError: Boolean(m.is_error),
             });
             this.setStatus(m.is_error ? "error" : "done");
+            // Fremd-Edit-Schutz: den Worktree-Zustand JETZT (Turn-Ende, alle Tool-Calls fertig) als
+            // „agent-authored" festhalten. AWAIT (nicht floating): sonst könnte der 25s-Poll im ms-Fenster
+            // danach mit undefined/veraltetem Fingerprint prüfen → ungeguardeter Commit ODER Falsch-Pause
+            // (Review-Race 4a/b/c). Der Turn ist hier zu Ende → das kurze Warten stört nichts.
+            if (this.worktreePath) {
+              try {
+                this.turnFingerprint = await worktreeFingerprint(this.worktreePath);
+              } catch {
+                /* git-Fehler → Fingerprint bleibt wie er war; Guard fällt im Zweifel auf „kein Vergleich" */
+              }
+            }
+            // Verbrauch nach jedem Turn nachführen (nicht awaiten — der Turn ist fertig, die
+            // Anzeige darf ihn nicht aufhalten; Fehler schluckt reportUsage selbst).
+            void this.reportUsage();
             break;
           }
+          case "rate_limit_event":
+            // Maschinenlesbarer Kontingent-Stand des SDK (status/resetsAt/rateLimitType/utilization).
+            // Deshalb ist KEIN Parsen von Fließtext-Fehlermeldungen nötig — und keine Mustertabelle,
+            // die bei jeder Textänderung von Anthropic nachgezogen werden müsste.
+            this.onRateLimit(m.rate_limit_info as Record<string, unknown> | undefined);
+            break;
           default:
             break; // defensiv: unbekannte Event-Typen tolerieren
         }
       }
     } catch (e) {
+      // Roh-Detail mitloggen: `String(e)` verliert status/code/stack — genau die Felder, an denen
+      // sich ein Kontingent-Fehler von einem Transportfehler unterscheiden lässt.
+      log(`[${this.agentId}] consume-Fehler (roh): ${describeError(e)}`);
       this.fail("consume_failed", `Stream-Fehler: ${String(e)}`, false);
     }
+  }
+
+  /**
+   * Plan-Nutzungslimits abfragen und ans Frontend melden (5-Stunden-, Wochen-Fenster).
+   *
+   * Anders als `rate_limit_event` ist das eine AKTIVE Abfrage: sie liefert alle Fenster auf einmal,
+   * ohne auf ein Ereignis zu warten. Damit sieht man das Limit kommen, statt es beim Anschlag zu
+   * bemerken. Braucht eine laufende Sitzung — ein unbenutztes Konto lässt sich so nicht abfragen.
+   *
+   * Best effort: die API ist als EXPERIMENTAL markiert. Jeder Fehler wird geschluckt und nur
+   * geloggt — eine Verbrauchsanzeige darf niemals einen laufenden Auftrag gefährden.
+   */
+  async reportUsage(): Promise<void> {
+    const fn = this.q?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (!fn || this.mock) return;
+    try {
+      const res = (await fn.call(this.q)) as Record<string, unknown> | undefined;
+      if (!res) return;
+      if (res.rate_limits_available === false) {
+        log(`[${this.agentId}] Plan-Limits nicht verfügbar (API-Key-/Drittanbieter-Sitzung)`);
+        return;
+      }
+      const limits = res.rate_limits as Record<string, unknown> | null | undefined;
+      if (!limits) return;
+
+      const win = (raw: unknown): { utilization?: number; resetsAt?: number } | undefined => {
+        if (!raw || typeof raw !== "object") return undefined;
+        const r = raw as { utilization?: unknown; resets_at?: unknown };
+        const utilization = typeof r.utilization === "number" ? r.utilization : undefined;
+        const resetsAt = toEpochMs(r.resets_at);
+        return utilization === undefined && resetsAt === undefined ? undefined : { utilization, resetsAt };
+      };
+
+      const fiveHour = win(limits.five_hour);
+      const sevenDay = win(limits.seven_day);
+      const sevenDayOpus = win(limits.seven_day_opus);
+      if (!fiveHour && !sevenDay && !sevenDayOpus) return;
+
+      log(
+        `[${this.agentId}] Plan-Limits (${this.accountId}): 5h=${fiveHour?.utilization ?? "?"}% ` +
+          `Woche=${sevenDay?.utilization ?? "?"}% Woche-Opus=${sevenDayOpus?.utilization ?? "?"}%`,
+      );
+      this.emit({
+        ...envelope(),
+        type: "account_usage",
+        accountId: this.accountId,
+        fiveHour,
+        sevenDay,
+        sevenDayOpus,
+        subscription: typeof res.subscription_type === "string" ? res.subscription_type : undefined,
+      });
+    } catch (e) {
+      log(`[${this.agentId}] Plan-Limits nicht abrufbar: ${String(e)}`);
+    }
+  }
+
+  /**
+   * Kontingent-Meldung des SDK verarbeiten. mads wechselt das Konto NICHT selbstständig — der
+   * Wechsel startet den Claude-Prozess neu und bleibt deshalb eine bewusste menschliche Aktion.
+   * Hier wird nur der Cooldown festgehalten und die Oberfläche informiert.
+   */
+  private onRateLimit(info: Record<string, unknown> | undefined): void {
+    if (!info) return;
+    const status = typeof info.status === "string" ? info.status : "";
+    if (status !== "rejected" && status !== "allowed_warning" && status !== "allowed") return;
+
+    const rejected = status === "rejected";
+    const resetsAt = toEpochMs(info.resetsAt);
+    const window = typeof info.rateLimitType === "string" ? info.rateLimitType : undefined;
+    const utilization = typeof info.utilization === "number" ? info.utilization : undefined;
+
+    // Entprellen. Die Auslastung MIT in den Schlüssel (auf Prozentpunkte gerundet): sonst käme bei
+    // "allowed" nur das allererste Event durch und die Verbrauchsanzeige bliebe für immer stehen.
+    const pct = utilization === undefined ? -1 : Math.round(utilization * 100);
+    const key = `${status}:${window ?? ""}:${resetsAt ?? 0}:${pct}`;
+    if (this.lastRateLimitKey === key) return;
+    this.lastRateLimitKey = key;
+
+    log(
+      `[${this.agentId}] Kontingent: status=${status} fenster=${window ?? "?"} ` +
+        `reset=${resetsAt ? new Date(resetsAt).toISOString() : "?"} auslastung=${pct >= 0 ? `${pct}%` : "?"}`,
+    );
+
+    let suggestId: string | undefined;
+    if (status !== "allowed") {
+      // Nur bei Vorwarnung/Abweisung an die Registry: eine reine Verbrauchsanzeige soll die
+      // Datei nicht bei jedem Prozentpunkt neu schreiben.
+      try {
+        const state = loadAccounts();
+        if (rejected && resetsAt) {
+          saveAccounts(withCooldown(state, this.accountId, { until: resetsAt, window, rejected, utilization }));
+        }
+        suggestId = pickFallback(loadAccounts(), this.accountId)?.id;
+      } catch (e) {
+        log(`[${this.agentId}] Cooldown konnte nicht gespeichert werden: ${String(e)}`);
+      }
+    }
+
+    this.emit({
+      ...envelope(),
+      type: "rate_limit_notice",
+      agentId: this.agentId,
+      accountId: this.accountId,
+      status,
+      rejected,
+      resetsAt,
+      window,
+      utilization,
+      suggestId,
+    });
+    if (status !== "allowed") this.onChange?.(); // Registry-Änderung sichtbar machen
   }
 
   // ---------------------------- Mock-Modus ----------------------------------
@@ -803,10 +1224,97 @@ export class AgentSession {
   /** Die vom Menschen eingegebene Anweisung als Event ausspielen → auf ALLEN Clients (Mac + Remote)
    *  im Verlauf sichtbar, nicht nur dort, wo sie getippt wurde. Geht durch den zentralen Egress →
    *  Timeline-Puffer (Snapshot-Replay für später verbundene Remotes) UND Bridge-Tee. */
-  private emitUserText(text: string, images?: ImageInput[]): void {
+  private emitUserText(text: string, images?: ImageInput[], continuation?: boolean): void {
     const t = text.trim();
-    if (!t) return;
-    this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "user_text", text: t, images: images?.length } });
+    // Vollbilder EINMAL auf Platte legen; ins Event geht nur die Referenz + das kleine Thumbnail.
+    const attachments = (images ?? []).map((im) => this.persistAttachment(im));
+    if (!t && attachments.length === 0) return; // nichts zu zeigen
+    this.emit({
+      ...envelope(),
+      type: "agent_event",
+      agentId: this.agentId,
+      // continuation markiert die automatische Resume-Anweisung — sie steht zwar sichtbar im Verlauf,
+      // darf aber die Kachel-Auftragsanzeige NICHT übernehmen (Frontend überspringt sie dafür).
+      event: { kind: "user_text", text: t, attachments: attachments.length ? attachments : undefined, continuation: continuation || undefined },
+    });
+  }
+
+  /** Das Vollbild eines Anhangs einmal ins (gitignorte) `.mads/attachments/` schreiben und die
+   *  Timeline-Referenz bauen. Bewusst SYNC: so steht das user_text-Event garantiert VOR der Antwort
+   *  des Agenten in der Timeline (emit vor inbox.push). Ohne cwd (Mock/kein Projekt) wird nichts
+   *  geschrieben → Thumbnail ja, Vollbild-Klick nein. Schreibfehler dürfen die Nachricht nie killen. */
+  private persistAttachment(im: ImageInput): TimelineAttachment {
+    // Thumbnail deckeln: send_input kann von einem gekoppelten REMOTE kommen — ein überdimensioniertes
+    // thumbBase64 läge sonst im 500er-Ringpuffer, würde bei JEDEM Snapshot neu ausgespielt und über die
+    // Bridge an alle Geräte geschoben. Ein 320px-JPEG liegt weit darunter; darüber → lieber kein Thumbnail.
+    const thumbOk = typeof im.thumbBase64 === "string" && im.thumbBase64.length <= MAX_THUMB_B64;
+    const mediaType = typeof im.mediaType === "string" && /^image\/[a-z0-9.+-]+$/i.test(im.mediaType) ? im.mediaType : "image/png";
+    const att: TimelineAttachment = {
+      id: randomUUID(),
+      mediaType,
+      thumbBase64: thumbOk ? im.thumbBase64 : undefined,
+      thumbMediaType: thumbOk ? im.thumbMediaType : undefined,
+    };
+    if (!this.cwd) return att;
+    // Vollbild ebenfalls deckeln: dataBase64 landet auf PLATTE und kommt (via Bridge) auch von einem
+    // Remote — ohne Grenze könnte ein Gerät die Platte volllaufen lassen. Darüber: Thumbnail bleibt,
+    // nur der Vollbild-Klick entfällt (bereits unterstützter Degraded-Modus).
+    if (typeof im.dataBase64 !== "string" || im.dataBase64.length > MAX_IMAGE_B64) {
+      log(`[${this.agentId}] Bild-Anhang übersprungen (fehlt oder > ${Math.round(MAX_IMAGE_B64 / 1024 / 1024)} MB base64)`);
+      return att;
+    }
+    try {
+      // `.mads/` im Worktree selbst-ignorieren, BEVOR die erste Datei darin landet — sonst zählt der
+      // Anhang als „dirty" und der Autopilot committet ihn per `git add -A` ins Projekt-Repo.
+      ensureMadsDir(this.cwd);
+      const dir = join(this.cwd, ".mads", "attachments");
+      mkdirSync(dir, { recursive: true });
+      // Object.hasOwn: kein Prototyp-Durchgriff (z. B. mediaType "constructor" → Müll-Dateiname).
+      const ext = Object.hasOwn(IMG_EXT, mediaType) ? IMG_EXT[mediaType] : "png";
+      const p = join(dir, `${att.id}.${ext}`);
+      writeFileSync(p, Buffer.from(im.dataBase64, "base64"));
+      att.path = p;
+    } catch (e) {
+      log(`[${this.agentId}] Bild-Anhang nicht gespeichert: ${String(e)}`);
+    }
+    return att;
+  }
+
+  /**
+   * Existiert die Claude-Code-Session `sessionId` lokal für dieses `cwd`? Claude legt Sessions unter
+   * `<configDir>/projects/<enc(cwd)>/<sessionId>.jsonl` ab, wobei `enc` den absoluten cwd-Pfad kodiert,
+   * indem `/` und `.` durch `-` ersetzt werden (z. B. `/Users/x/coding/Boba` → `-Users-x-coding-Boba`).
+   * Best effort: bei jedem Fehler/Unsicherheit `false` → der Stream startet lieber frisch, statt am
+   * Resume einer nicht vorhandenen Session hart zu scheitern.
+   *
+   * WICHTIG (Mehrkonten): das Verzeichnis MUSS das des aktiven Kontos sein, nicht pauschal `~/.claude`.
+   * Sonst schlüge die Prüfung nach einem Kontowechsel fehl und mads startete still eine FRISCHE
+   * Session — also genau der Kontextverlust, den der Wechsel vermeiden soll. Ob beide Konten sich
+   * `projects/` per Symlink teilen, ist dabei egal: der Pfad wird so oder so korrekt aufgelöst.
+   */
+  private claudeSessionExists(cwd: string, sessionId: string): boolean {
+    try {
+      const enc = cwd.replace(/[/.]/g, "-");
+      return existsSync(join(this.accountConfigDir, "projects", enc, `${sessionId}.jsonl`));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Konto-Profil auflösen und `accountId`/`accountConfigDir` konsistent setzen.
+   * Ohne (oder mit unbekannter) ID gilt das AKTIVE Konto der Registry — nicht blind `~/.claude`:
+   * sonst liefe ein Stream im Standardverzeichnis, während die Registry längst auf ein anderes
+   * Konto zeigt, und die Session läge anschliessend im falschen `projects/`.
+   */
+  private applyAccount(accountId?: string): void {
+    const state = loadAccounts();
+    const prof = resolveProfile(state, accountId);
+    if (accountId && prof.id !== accountId) {
+      log(`[${this.agentId}] Unbekanntes Claude-Konto "${accountId}" → "${prof.id}"`);
+    }
+    this.accountId = prof.id;
+    this.accountConfigDir = prof.configDir;
   }
 
   private emitText(text: string): void {
@@ -836,7 +1344,10 @@ export class AgentSession {
   }
   private setStatus(status: AgentStatus, currentStep?: string): void {
     this.status = status;
-    this.emit({ ...envelope(), type: "status_update", agentId: this.agentId, status, currentStep, label: this.label, role: this.role });
+    // `accountId` mitschicken: der Sidecar hat den Prozess gestartet und kennt das reale Konto,
+    // die Oberfläche kann es nur raten. Damit heilt jede Abweichung von selbst, statt bis zum
+    // nächsten Kontingent-Anschlag unbemerkt zu bleiben.
+    this.emit({ ...envelope(), type: "status_update", agentId: this.agentId, status, currentStep, label: this.label, role: this.role, accountId: this.accountId, sandboxMode: this.sandboxMode });
     this.onChange?.();
   }
   private fail(code: string, message: string, recoverable: boolean): void {

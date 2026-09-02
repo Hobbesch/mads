@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useStore } from "./store";
 import { ensureNotificationPermission } from "./osNotify";
@@ -15,14 +16,33 @@ import { AboutDialog } from "./components/AboutDialog";
 import { ParallelDialog } from "./components/ParallelDialog";
 import { SaveToast } from "./components/SaveToast";
 import { StalenessBanner } from "./components/StalenessBanner";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import "./App.css";
+
+/** Status, die einen aktiven Stream markieren — vor dem Schließen des Hauptfensters wird davor gewarnt. */
+const ACTIVE_ON_CLOSE = new Set(["starting", "running", "waiting_input", "escalation"]);
 
 export default function App() {
   const init = useStore((s) => s.init);
   const escalations = useStore((s) => s.escalations);
+  const agents = useStore((s) => s.agents);
+  // Laufende Summe über alle Streams dieser Session — macht Effort-/Modell-Sparmaßnahmen sichtbar,
+  // statt nur pro Stream einzeln in AgentGrid/Inspector zu stehen. Reine API-Schätzung (siehe dort).
+  const sessionCost = useMemo(() => {
+    const list = Object.values(agents);
+    return list.reduce(
+      (acc, a) => ({
+        usd: acc.usd + (a.costUsd || 0),
+        input: acc.input + (a.inputTokens || 0),
+        output: acc.output + (a.outputTokens || 0),
+      }),
+      { usd: 0, input: 0, output: 0 },
+    );
+  }, [agents]);
   const sidecar = useStore((s) => s.sidecar);
   const project = useStore((s) => s.project);
   const projectLocked = useStore((s) => s.projectLocked);
+  const authReloginNeeded = useStore((s) => s.authReloginNeeded);
   const pollProject = useStore((s) => s.pollProject);
   const resumables = useStore((s) => s.resumables);
   const resumeAgent = useStore((s) => s.resumeAgent);
@@ -38,8 +58,11 @@ export default function App() {
   const handoff = useStore((s) => s.handoff);
   const dismissHandoff = useStore((s) => s.dismissHandoff);
   const openRecentProject = useStore((s) => s.openRecentProject);
+  const newStreamRequested = useStore((s) => s.newStreamRequested);
   const [showNew, setShowNew] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
+  // Sicherheits-Rückfrage vor dem Schließen des Hauptfensters (aktive Streams / ungesendeter Entwurf).
+  const [closeGuard, setCloseGuard] = useState<{ activeCount: number; hasDraft: boolean } | null>(null);
 
   useEffect(() => {
     void init();
@@ -62,6 +85,39 @@ export default function App() {
     const unlisten = listen("show-about", () => setShowAbout(true));
     return () => {
       void unlisten.then((un) => un());
+    };
+  }, []);
+
+  // Sicherheits-Warnung vor dem Schließen des HAUPTFENSTERS: laufen noch Streams ODER steht
+  // ungesendeter Text/Anhang im Composer, erst rückfragen — sonst geht der (nur im Fenster gehaltene)
+  // Composer-Entwurf verloren. Nur das Hauptfenster rendert <App/>, der Handler greift also
+  // ausschließlich hier; losgelöste Markdown-Fenster (md-*) sind unberührt. preventDefault MUSS synchron
+  // vor jedem await passieren (sonst schließt das Fenster trotzdem) → State erst danach setzen.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void getCurrentWindow()
+      .onCloseRequested((event) => {
+        const s = useStore.getState();
+        const activeCount = s.order.reduce((n, id) => {
+          const a = s.agents[id];
+          return a && ACTIVE_ON_CLOSE.has(a.status) ? n + 1 : n;
+        }, 0);
+        const hasDraft =
+          Object.values(s.drafts).some((t) => (t ?? "").trim().length > 0) ||
+          Object.values(s.draftImages).some((imgs) => (imgs?.length ?? 0) > 0) ||
+          Object.values(s.draftFiles).some((f) => (f?.length ?? 0) > 0);
+        if (activeCount === 0 && !hasDraft) return; // nichts zu verlieren → normal schließen
+        event.preventDefault(); // Schließen abfangen; erst nach Bestätigung wirklich zerstören
+        setCloseGuard({ activeCount, hasDraft });
+      })
+      .then((un) => {
+        if (disposed) un();
+        else unlisten = un;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -201,6 +257,8 @@ export default function App() {
   }, []);
 
   const lastEscalation = escalations[escalations.length - 1];
+  // Eskalation stammt aus einem konkreten Stream (agentId) → dessen Klartext-Namen für die Meldung auflösen.
+  const escStreamLabel = lastEscalation?.agentId ? agents[lastEscalation.agentId]?.label : undefined;
   const defaultBranch = project?.defaultBranch ?? "main";
   // Echt fortsetzbare Streams vs. erledigte (gemergte) mit lokalen Resten → getrennt anbieten.
   const liveResumables = resumables.filter((r) => !r.merged);
@@ -229,6 +287,22 @@ export default function App() {
                   : "Mock-Modus"
                 : sidecar.status}
             </span>
+            {sidecar.status === "ready" && sidecar.buildStale && (
+              <span
+                className="pill stale"
+                title={`Sidecar läuft auf Commit ${sidecar.buildCommit}, älter als main. npm run sidecar:build + mads neu starten.`}
+              >
+                Sidecar veraltet
+              </span>
+            )}
+            {sessionCost.usd > 0 && (
+              <span
+                className="pill cost"
+                title={`↑ ${sessionCost.input.toLocaleString()} Input · ↓ ${sessionCost.output.toLocaleString()} Output Tokens über alle Streams dieser Session — API-Schätzung, bei Abo nicht abgerechnet`}
+              >
+                Σ ${sessionCost.usd.toFixed(2)}
+              </span>
+            )}
             {project && (
               <>
                 <button
@@ -295,10 +369,35 @@ export default function App() {
           </div>
         )}
 
+        {authReloginNeeded && (
+          <div className="escalation-banner">
+            <span className="escalation-text">
+              ✖ Authentifizierung fehlgeschlagen. Oft nur vorübergehend — sende den betroffenen Stream
+              einfach erneut. Bleibt es, ist dein Claude-Login abgelaufen: hier neu anmelden (kein Neustart nötig).
+            </span>
+            <button
+              className="banner-action"
+              title="Öffnet ein Terminal mit dem Befehl claude auth login (Browser-OAuth). mads sieht deinen Token nie."
+              onClick={() => void useStore.getState().reloginClaude()}
+            >
+              Bei Claude neu anmelden
+            </button>
+            <button
+              className="banner-close"
+              title="Hinweis schließen"
+              aria-label="Hinweis schließen"
+              onClick={() => useStore.getState().dismissAuthRelogin()}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {lastEscalation && (
           <div className="escalation-banner">
             <span className="escalation-text">
-              ▲ Eskalation ({lastEscalation.code}): {lastEscalation.message}
+              ▲ Eskalation{escStreamLabel ? ` · Stream „${escStreamLabel}"` : ""} ({lastEscalation.code}):{" "}
+              {lastEscalation.message}
             </span>
             <button
               className="banner-close"
@@ -318,6 +417,8 @@ export default function App() {
             const rc = reconcileSummary;
             const hasGit = rc.mainFastForwarded > 0 || rc.cleaned.length > 0 || rc.residue.length > 0 || rc.mainBehind > 0;
             const seed = rc.seedGenerated ?? 0;
+            const relocated = rc.relocated ?? [];
+            const adopted = rc.adopted ?? [];
             return (
               <div className={`reconcile-banner${rc.mainBehind > 0 ? " warn" : ""}`}>
                 <span className="reconcile-text">
@@ -342,6 +443,10 @@ export default function App() {
                   )}
                   {seed > 0 &&
                     `${hasGit ? " · " : ""}📦 ${seed} lokale Config-Datei(en) erkannt → werden in neue Streams kopiert (.mads/worktree-seed)`}
+                  {relocated.length > 0 &&
+                    `${hasGit || seed > 0 ? " · " : ""}🔀 ${relocated.length} Stream(s) von einem anderen Rechner wiederhergestellt (Worktree neu angelegt): ${relocated.join(", ")}`}
+                  {adopted.length > 0 &&
+                    `${hasGit || seed > 0 || relocated.length > 0 ? " · " : ""}⬇︎ ${adopted.length} aktive(r) Branch(es) von GitHub übernommen — lokaler Worktree angelegt, bereit zum Weiterarbeiten: ${adopted.join(", ")}`}
                 </span>
                 <button
                   className="banner-close"
@@ -469,8 +574,41 @@ export default function App() {
         </div>
       </div>
 
-      {showNew && <NewStreamDialog onClose={() => setShowNew(false)} />}
+      {(showNew || newStreamRequested) && (
+        <NewStreamDialog
+          onClose={() => {
+            setShowNew(false);
+            if (newStreamRequested) useStore.setState({ newStreamRequested: false });
+          }}
+        />
+      )}
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
+      {closeGuard && (
+        <ConfirmDialog
+          title="mads-Hauptfenster schließen?"
+          danger
+          confirmLabel="Trotzdem schließen"
+          cancelLabel="Offen lassen"
+          body={
+            <>
+              {closeGuard.hasDraft && (
+                <p>Im Composer steht ungesendeter Text/Anhang — beim Schließen geht er verloren.</p>
+              )}
+              {closeGuard.activeCount > 0 && (
+                <p>
+                  {closeGuard.activeCount === 1
+                    ? "1 Stream ist noch aktiv"
+                    : `${closeGuard.activeCount} Streams sind noch aktiv`}{" "}
+                  — läuft im Hintergrund weiter, aber das Fenster verschwindet.
+                </p>
+              )}
+              <p>Zurückholen später über „Fenster → Hauptfenster" (⌘0) oder das Dock-Icon.</p>
+            </>
+          }
+          onConfirm={() => void getCurrentWindow().destroy()}
+          onClose={() => setCloseGuard(null)}
+        />
+      )}
       <PermissionDialog />
       <ParallelDialog />
       <ChangeOverlay />

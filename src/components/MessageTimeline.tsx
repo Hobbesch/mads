@@ -1,9 +1,12 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../store";
 import { Elapsed } from "./Elapsed";
 import { MarkdownView } from "../mdPipeline";
 import { openExternalLink } from "../openExternal";
 import type { TimelineEvent, TodoItem } from "../store";
+import type { TimelineAttachment } from "../../shared/protocol";
 
 // Stabile Leer-Referenz (kein neues [] pro Render im Selektor → keine Render-Schleife).
 const NO_EVENTS: TimelineEvent[] = [];
@@ -88,13 +91,97 @@ function Todos({ todos }: { todos: TodoItem[] }) {
   );
 }
 
+/**
+ * Bild-Anhänge einer User-Nachricht: das ECHTE Thumbnail (kam als kleines Bild inline im Event mit,
+ * daher auch auf dem Remote sichtbar) + Klick → Vollbild. Das Vollbild wird ERST beim Klick von
+ * Platte geladen — es reist bewusst nicht durch Protokoll/Ringpuffer/Bridge. Fehlt das Thumbnail
+ * (z. B. SVG/nicht dekodierbar), bleibt ein neutraler Chip.
+ */
+function Attachments({ items }: { items: TimelineAttachment[] }) {
+  const [open, setOpen] = useState<TimelineAttachment | null>(null);
+  const [full, setFull] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Schließen gibt die (u. U. mehrere MB große) data:-URL wieder frei — sonst bliebe sie für die
+  // Lebensdauer der Timeline-Zeile im Speicher hängen.
+  const close = () => {
+    setOpen(null);
+    setFull(null);
+    setError(null);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const show = async (a: TimelineAttachment) => {
+    setOpen(a);
+    setFull(null);
+    setError(null);
+    if (!a.path) {
+      setError("Vollbild nicht verfügbar (ohne Projekt/Worktree gesendet).");
+      return;
+    }
+    try {
+      const res = (await invoke("mads_read_file", { path: a.path })) as
+        | { kind: "binary"; bytesBase64: string; truncated: boolean }
+        | { kind: "text"; truncated: boolean };
+      // Der Core liefert Bilder über 5 MB bewusst als abgeschnittenen Binär-Fallback — das ist KEIN
+      // Lesefehler, sondern eine Vorschau-Grenze. Ehrlich benennen statt „konnte nicht gelesen werden".
+      if (res?.kind === "binary" && !res.truncated && res.bytesBase64) {
+        setFull(`data:${a.mediaType};base64,${res.bytesBase64}`);
+      } else if (res?.truncated) {
+        setError("Bild zu groß für die Vorschau (über 5 MB) — das Thumbnail oben zeigt den Inhalt.");
+      } else {
+        setError("Bild konnte nicht gelesen werden.");
+      }
+    } catch (e) {
+      setError(`Bild konnte nicht geladen werden: ${String(e)}`);
+    }
+  };
+
+  return (
+    <>
+      <div className="tl-thumbs">
+        {items.map((a) =>
+          a.thumbBase64 ? (
+            <button key={a.id} type="button" className="tl-thumb" onClick={() => void show(a)} title="Anhang groß anzeigen">
+              <img src={`data:${a.thumbMediaType ?? "image/jpeg"};base64,${a.thumbBase64}`} alt="Angehängtes Bild" />
+            </button>
+          ) : (
+            <span key={a.id} className="tl-img-chip">
+              Bild
+            </span>
+          ),
+        )}
+      </div>
+      {open &&
+        createPortal(
+          <div className="tl-lightbox" role="dialog" aria-modal="true" aria-label="Angehängtes Bild" onClick={close}>
+            {full ? (
+              <img src={full} alt="Angehängtes Bild in voller Größe" />
+            ) : (
+              <p className="tl-lightbox-msg">{error ?? "Lade …"}</p>
+            )}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
+
 function renderEvent(ev: TimelineEvent) {
   switch (ev.kind) {
     case "user":
       return (
         <div key={ev.id} className="tl-user">
           {ev.text}
-          {ev.images ? <span className="tl-img-chip">+{ev.images} Bild</span> : null}
+          {ev.attachments?.length ? <Attachments items={ev.attachments} /> : null}
         </div>
       );
     case "assistant":

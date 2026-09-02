@@ -13,8 +13,8 @@ export function envelope() {
 }
 
 /** Nativer macOS-Ordner-Picker. Gibt den gewählten Repo-Pfad zurück (oder null). */
-export async function pickFolder(): Promise<string | null> {
-  const res = await open({ directory: true, multiple: false, title: "Projekt-Repo wählen" });
+export async function pickFolder(title = "Projekt-Repo wählen"): Promise<string | null> {
+  const res = await open({ directory: true, multiple: false, title });
   return typeof res === "string" ? res : null;
 }
 

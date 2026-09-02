@@ -47,7 +47,11 @@ geteilter Datei-Edit → paix-Shared-File-Protokoll (land-first oder single-owne
 
 ## Aktuelle Modelle
 
-Integrator `claude-opus-4-8`; Sub-Agents `claude-sonnet-4-6`; Hilfs-/Explore `claude-haiku-4-5`.
+Rollen-Tiers: Integrator = stärkstes Coding-Modell, Sub-Agents = ausgewogen (günstiger),
+Hilfs-/Explore = schnell & günstig. Die **exakten Model-IDs stehen im Code** (Single Source of
+Truth — hier nicht hartcodieren, sonst driftet es): `shared/protocol.ts` → `DEFAULT_MODEL`
+(Integrator-Default, aktuell `claude-opus-5`); `src/modelCatalog.ts` → wählbarer Katalog + Effort;
+Sub-Agent-Default im Sidecar (`sidecar/src/orchestrator.ts`).
 Model-IDs exakt verwenden (keine Datums-Suffixe außer dokumentiert).
 
 ## Offene Entscheidungen
