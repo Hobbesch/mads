@@ -6,10 +6,18 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, renameSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import type { ResumableAgent } from "../../shared/protocol.js";
+import type { InvestigationTarget, ResumableAgent, SavedPrompt } from "../../shared/protocol.js";
 
 export interface RegistryEntry extends ResumableAgent {
   updatedAt: number;
+  /**
+   * „Mergen & weiterarbeiten": dieser bereits gemergte PR wird im Poll unterdrückt, damit der Stream
+   * nicht als „erledigt" aus dem aktiven Grid fällt — der Mensch hat ja bewusst WEITERARBEITEN gewählt.
+   * MUSS persistent sein: die Absicht lag früher nur in einer In-Memory-Map, also war sie nach einem
+   * App-Neustart weg → der Poll meldete den PR wieder MERGED, und weil der Branch nach dem Merge exakt
+   * auf main sitzt (ahead 0) und der Worktree sauber ist, griff isMergedDone → der Stream verschwand.
+   */
+  suppressedPr?: number;
 }
 
 function regPath(repoRoot: string): string {
@@ -133,6 +141,58 @@ export function saveRegistry(repoRoot: string, agents: RegistryEntry[]): void {
   renameSync(tmp, p); // atomar (write-temp + rename)
 }
 
+// ─── Gespeicherte Prompts (Prompt-Verwaltung) ───────────────────────────────
+// Kuratierte, wiederverwendbare Anweisungen je Projekt (shared/protocol.ts → SavedPrompt).
+// Gleiche Mechanik wie die Agenten-Registry: <repoRoot>/.mads/prompts.json, atomar
+// geschrieben (tmp + rename), defensiv gelesen (kaputte/fehlende Datei → leere Liste).
+
+function promptsPath(repoRoot: string): string {
+  return join(repoRoot, ".mads", "prompts.json");
+}
+
+export function loadPrompts(repoRoot: string): SavedPrompt[] {
+  try {
+    const j = JSON.parse(readFileSync(promptsPath(repoRoot), "utf8"));
+    return Array.isArray(j?.prompts) ? (j.prompts as SavedPrompt[]) : [];
+  } catch {
+    return []; // fehlend/kaputt → leere Liste (nie werfen)
+  }
+}
+
+export function savePrompts(repoRoot: string, prompts: SavedPrompt[]): void {
+  const p = promptsPath(repoRoot);
+  ensureMadsDir(repoRoot); // legt .mads/ an + .gitignore (selbst-ignorierend)
+  const tmp = `${p}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ v: 1, prompts }, null, 2), "utf8");
+  renameSync(tmp, p); // atomar (write-temp + rename)
+}
+
+// ─── Untersuchungsziele (Sandbox-Stufe A) ───────────────────────────────────
+// Projektweite externe Hosts, die ein Sub-Stream im Modus `"targets"` zusätzlich zur normalen
+// Egress-Allowlist erreichen darf (shared/protocol.ts → InvestigationTarget). Gleiche Mechanik
+// wie prompts.json: <repoRoot>/.mads/targets.json, atomar geschrieben, defensiv gelesen.
+
+function targetsPath(repoRoot: string): string {
+  return join(repoRoot, ".mads", "targets.json");
+}
+
+export function loadTargets(repoRoot: string): InvestigationTarget[] {
+  try {
+    const j = JSON.parse(readFileSync(targetsPath(repoRoot), "utf8"));
+    return Array.isArray(j?.targets) ? (j.targets as InvestigationTarget[]) : [];
+  } catch {
+    return []; // fehlend/kaputt → leere Liste (nie werfen)
+  }
+}
+
+export function saveTargets(repoRoot: string, targets: InvestigationTarget[]): void {
+  const p = targetsPath(repoRoot);
+  ensureMadsDir(repoRoot);
+  const tmp = `${p}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ v: 1, targets }, null, 2), "utf8");
+  renameSync(tmp, p); // atomar (write-temp + rename)
+}
+
 /**
  * REIN: Registry-Merge fürs Persistieren. `persist()` darf die Registry NICHT mit dem
  * Live-Pool überschreiben — passiv wiederhergestellte Kacheln (v.a. der **Integrator**, der
@@ -141,17 +201,33 @@ export function saveRegistry(repoRoot: string, agents: RegistryEntry[]): void {
  * (ohne Worktree) NICHT → „main verschwindet". Daher: bestehende Einträge bewahren, den Pool
  * drüberlegen (frischer Stand gewinnt), nur explizit entfernte (`removed`) oder mit
  * verschwundenem Worktree verwerfen.
+ *
+ * Der Worktree-weg-Drop war früher STILL — genau der Datenverlust-Pfad beim Cross-Machine-Copy:
+ * ein fremder (auf einem anderen Home eingebackener) `worktreePath` existiert lokal nicht → der Sub
+ * flog wortlos raus, obwohl Branch + Transcripts intakt waren. Seit dem Öffnen relocatet die
+ * Orchestration solche Einträge auf den lokalen Kanon-Pfad (siehe relocateForeignWorktrees), daher
+ * ist dieser Drop nur noch Ultima Ratio (Worktree WIRKLICH weg). Er wird jetzt über `onDrop`
+ * sichtbar gemacht (Aufrufer loggt), statt lautlos zu verschwinden — Branch/Transcripts bleiben ohnehin,
+ * die Worktree-Discovery kann den Stream beim nächsten Öffnen erneut anbieten.
  */
 export function mergeRegistry(
   existing: RegistryEntry[],
   poolEntries: RegistryEntry[],
   removed: ReadonlySet<string>,
   worktreeExists: (path: string) => boolean,
+  onDrop?: (entry: RegistryEntry) => void,
 ): RegistryEntry[] {
   const byId = new Map<string, RegistryEntry>();
   for (const e of existing) {
-    if (removed.has(e.agentId)) continue; // gestoppt/aufgeräumt → nicht wiederbeleben
-    if (e.worktreePath && !worktreeExists(e.worktreePath)) continue; // verwaister Sub → raus
+    // Invariante: der INTEGRATOR mit fortsetzbarer Session überlebt selbst ein explizites `removed` —
+    // ein einziger (Fehl-)Klick auf „Stop" löschte sonst den Main-Stream samt Session-Kontext endgültig
+    // aus der Registry (Vorfall 2026-09-01). Löschbar bleibt nur ein Integrator OHNE Session (nie
+    // hochgekommen — da gibt es nichts zu verlieren). Subs bleiben wie gehabt entfernbar.
+    if (removed.has(e.agentId) && !(e.role === "integrator" && e.sessionId)) continue; // gestoppt/aufgeräumt → nicht wiederbeleben
+    if (e.worktreePath && !worktreeExists(e.worktreePath)) {
+      onDrop?.(e); // verwaister Sub → raus, aber NICHT mehr still: Aufrufer surfaced/loggt es
+      continue;
+    }
     byId.set(e.agentId, e); // Integrator (kein worktreePath) bleibt IMMER erhalten
   }
   for (const e of poolEntries) {

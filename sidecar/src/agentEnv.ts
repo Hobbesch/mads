@@ -47,3 +47,52 @@ export function scrubbedAgentEnv(base: NodeJS.ProcessEnv = process.env): {
   }
   return { env, stripped };
 }
+
+/**
+ * Auth-Variablen, die eine ANGEMELDETE Sitzung übersteuern. Sie haben in Claude Code Vorrang vor
+ * dem Schlüsselbund-Login — stünden sie noch in der Env, liefe der Agent trotz gesetztem
+ * `CLAUDE_CONFIG_DIR` weiter auf dem übersteuernden Zugang und die Kontowahl wäre wirkungslos.
+ */
+export const ACCOUNT_OVERRIDE_ENV: readonly string[] = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+];
+
+/**
+ * Env für einen Agenten-Prozess unter einem BESTIMMTEN Claude-Konto.
+ *
+ * `configDir` wählt das Konto (eigener Schlüsselbund-Eintrag, eigene `.claude.json`, eigenes
+ * `projects/`). Zusätzlich zum normalen Credential-Scrub werden die Auth-Übersteuerer entfernt —
+ * aber NUR, wenn ein anderes als das Standard-Verzeichnis gewählt ist: wer mads ohne
+ * Konto-Umschaltung nutzt und sich bewusst per `ANTHROPIC_API_KEY` anmeldet, soll genau so
+ * weiterlaufen wie bisher (sonst bräche diese Änderung eine bestehende Anmeldeart).
+ */
+export function accountAgentEnv(
+  configDir: string,
+  defaultConfigDir: string,
+  base: NodeJS.ProcessEnv = process.env,
+): { env: Record<string, string | undefined>; stripped: string[] } {
+  const { env, stripped } = scrubbedAgentEnv(base);
+  if (configDir === defaultConfigDir) {
+    // WICHTIG: Für das Standardkonto die Variable ENTFERNEN, nicht auf `~/.claude` setzen.
+    // Claude Code leitet den Schlüsselbund-Eintrag unterschiedlich ab, je nachdem ob
+    // CLAUDE_CONFIG_DIR GESETZT ist — mit `=~/.claude` sucht es einen abgeleiteten Eintrag, der für
+    // das Standardkonto gar nicht existiert, und meldet „Not logged in". Verifiziert:
+    //   ohne Variable          → loggedIn: true
+    //   CLAUDE_CONFIG_DIR=~/.claude → loggedIn: false   ← genau dieser Fehler
+    //   CLAUDE_CONFIG_DIR=~/.claude-medici → loggedIn: true
+    // Löschen (statt nur nicht setzen) macht das Verhalten auch dann deterministisch, wenn der
+    // Sidecar-Prozess die Variable selbst geerbt hat.
+    delete env.CLAUDE_CONFIG_DIR;
+    return { env, stripped };
+  }
+  env.CLAUDE_CONFIG_DIR = configDir;
+  for (const k of ACCOUNT_OVERRIDE_ENV) {
+    if (env[k] !== undefined) {
+      delete env[k];
+      stripped.push(k);
+    }
+  }
+  return { env, stripped };
+}

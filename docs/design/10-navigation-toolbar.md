@@ -154,6 +154,7 @@ Orte, die ohnehin existieren oder von diesem Doc eingeführt werden.
 | **`streams`** (Default) | **leer** — kein Mittel-Panel | Das Grid+Inspector ist der Content; eine mittlere Stream-Liste wäre das Duplikat (a.1/a.2). |
 | **`files`** ([[07-file-explorer]]) | **Datei-Baum** (aktivitäts-spezifisch) | Klassisches Master-Detail: Baum speist die Preview/den Editor. Genau der HIG-„content list"-Fall (a.2). |
 | **„Änderungen"** ([[09-change-overview]]) | **kein Primary-Panel** — `position:fixed`-Overlay | Toggle (`changeOverviewOn`), **nicht** `activeView`; koexistiert mit jeder View (OE-41, §09 §1.4). |
+| **„Konflikt lösen"** | **kein Primary-Panel** — Bestätigungs-Dialog | Aktion (`kind:"action"`), keine View. Hält alle Sub-Streams an und übergibt an den Integrator (§a.7). |
 | **`settings`** | **Settings-Panel** | Aktivitäts-spezifisch (Autonomie/Modelle/Permission-Defaults). |
 | geplant (`updates`, Plugins) | je eigenes Panel | Registry-getrieben, je Feature (§3.2). |
 
@@ -161,6 +162,35 @@ Das Primary-Panel ist also **als Slot sinnvoll**, aber **nur aktivitäts-getrage
 *persistenten* Streifen zu führen (alte Annahme) war der Fehler; als *bedarfsweise* Spalte für
 genau die Views, die eine zweite Navigations-/Inhaltsebene brauchen, ist es korrekt und
 best-practice-konform.
+
+### a.7 „Konflikt lösen" — die einzige übergreifende Aktion der Rail
+
+Alle anderen Rail-Einträge wechseln eine Ansicht. Dieser eine greift in **alle Streams
+gleichzeitig** ein, und genau darum steht er hier statt am einzelnen Stream.
+
+**Warum nicht per Stream** (der Zustand bis 2026-08-28): Der frühere Inspector-Knopf
+„Konflikt lösen" schickte nur einen Prompt in den betroffenen Sub-Stream. Der läuft aber
+gesandboxt (`sidecar/src/sandbox.ts`) und darf ausschliesslich in seinen eigenen Worktree
+schreiben — andere Worktrees unter `~/mads-worktrees/…` sind für ihn unerreichbar. Damit kann er
+`git merge-tree` zwischen zwei Branches, einen Hunk-Vergleich oder die Frage „welcher Branch
+zuerst?" **prinzipiell nicht** beantworten. Er rebaset blind, während die übrigen Streams
+weiterarbeiten und die Lage erneut verschieben.
+
+**Was der Knopf stattdessen tut** (`panic_resolve`, `shared/protocol.ts`):
+
+1. Alle Sub-Streams anhalten und ihren Autopilot auf `manual` setzen — nichts verschiebt sich
+   mehr, während gemessen wird. Der vorherige Level wird gemerkt.
+2. Den **Integrator** beauftragen: der einzige Stream ohne Sandbox, im `repoRoot`, mit Sicht auf
+   alle Worktrees — und per Invariante 1 ohnehin der Einzige, der mergen darf. Er braucht dafür
+   **keine zusätzlichen Rechte**; die Verlagerung allein löst das Problem.
+3. Er bekommt das Playbook (`sidecar/playbooks/conflict-resolution.md`) plus einen Lagebericht
+   über alle Streams. Merge nach main nur nach menschlicher Rückfrage.
+4. Freigabe ist ein eigener, menschlicher Schritt (`panic_release`) — derselbe Rail-Eintrag
+   wechselt dafür zu „Streams fortsetzen".
+
+Das Badge zählt **Streams** in Konfliktlage (`conflictCount` in `src/derive.ts`), nicht Meldungen:
+ein einzelner Trespass-Alarm feuert im Autopilot dutzendfach, eine zweistellige Zahl an der Rail
+wäre irreführend.
 
 ### a.5 Die Entscheidung
 

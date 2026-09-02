@@ -148,10 +148,23 @@ git -C <worktree> diff --merge-base origin/main --unified=0
 # Hunk-Header `@@ ... @@ <enclosing symbol>` → ChangedRegion{ path, symbols[] }
 ```
 
-> Für Sprachen ohne gute git-`xfuncname`-Defaults kann ein `.gitattributes`
-> (`*.py diff=python`, `*.ts diff=...`) die Symbol-Erkennung verbessern. Fällt die
-> Symbol-Extraktion aus, degradiert mads sicher: Datei-Treffer ohne Symbol ⇒ konservativ
-> als möglicher Trespass markieren (lieber einmal zu viel eskalieren).
+> **Diff-Driver sind Pflicht, nicht Kür** (Lehre aus dem Vorfall 2026-08-28). Ohne
+> zugewiesenen `xfuncname`-Driver nimmt git die Default-Heuristik — „die letzte Zeile, die nicht
+> mit Whitespace beginnt". In C#/Java ist das die `namespace`- bzw. `package`-Zeile, und zwar bei
+> **jedem** Hunk **jeder** Datei. Die Symbol-Extraktion fiel damit nicht etwa aus, sondern lieferte
+> ein falsches, für alle Hunks IDENTISCHES Pseudo-Symbol: die Schnittmenge zweier Streams war nie
+> leer, `detectCollisions` meldete `severity: "region"` (harte Kollision) und der Autopilot-Push
+> wurde als `ownership_trespass` blockiert — für Änderungen, die hunderte Zeilen auseinanderlagen.
+> Drei Streams standen so fest, obwohl git exakt zwei triviale Konflikte hatte.
+>
+> Deshalb liefert `sidecar/src/gitAttributes.ts` eine eigene Attributes-Datei mit Gits eingebauten
+> Drivern und ruft den Region-Diff als `git -c core.attributesFile=<pfad> diff …` auf. Bewusst
+> **kein** `.gitattributes` im Ziel-Repo: mads verändert fremde Projekte nicht.
+>
+> Zweite Verteidigungslinie in `shared/collision.ts`: Kontexte, die die ganze Datei umspannen
+> (`namespace`, `using`, `import`, `package`, …) liefern **kein** Symbol mehr. Dann greift die
+> gewollte konservative Degradierung — Datei-Treffer ohne Symbol ⇒ `severity: "file"`, eine
+> Warnung ohne Push-Blockade (Whole-File-Ownership wird nicht erzwungen, siehe §5.2).
 
 ### 5.2 Die Entscheidung (`shared/ownership.ts`)
 
