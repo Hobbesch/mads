@@ -112,7 +112,9 @@ fn content_hash(p: &Path) -> Result<String, String> {
 fn hash_bytes(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("{:x}", h.finalize())
+    // sha2 0.11 liefert `Array` (hybrid-array) statt `GenericArray`; das implementiert kein
+    // LowerHex mehr, `{:x}` fällt also weg. Gleiches Hex-Muster wie in dictation.rs::verify_model.
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Untrennbares Confinement (§5.1/§5.2). Reihenfolge:
