@@ -138,7 +138,16 @@ function doImport(bundleFile, targetRepoRootArg, targetWtBaseArg) {
   const targetUser = userInfo().username;
   const verbatim = !targetRepoRootArg && !targetWtBaseArg && manifest.sourceUser === targetUser;
 
-  const repoRoot = (targetRepoRootArg || (verbatim ? manifest.repoRoot : join(home, "Documents", "coding", manifest.project))).replace(/\/+$/, "");
+  // Default-Ziel BEWUSST ~/coding statt ~/Documents/coding: auf Macs mit "Schreibtisch & Dokumente
+  // in iCloud" liegt ~/Documents in der Cloud. Ein git-Repo dort erzeugt verwaiste Worktrees,
+  // riesige Sync-Ordner und Konflikte — real passiert, inkl. 350 MB Repo-Kopien in iCloud.
+  let repoRoot = (targetRepoRootArg || (verbatim ? manifest.repoRoot : join(home, "coding", manifest.project))).replace(/\/+$/, "");
+  // Nachsichtig: Wurde ein ELTERN-Ordner gewaehlt (z. B. ~/coding statt ~/coding/Boba), den
+  // Projektordner anhaengen — sonst landet das Repo direkt im Sammelordner. Ein bereits
+  // bestehendes Repo (.git vorhanden) wird unveraendert uebernommen.
+  if (targetRepoRootArg && !existsSync(join(repoRoot, ".git")) && basename(repoRoot) !== manifest.project) {
+    repoRoot = join(repoRoot, manifest.project);
+  }
   const wtBase = targetWtBaseArg || (verbatim ? manifest.worktreeBase : join(home, "mads-worktrees", manifest.project));
   const projDir = claudeProjectsDir();
   const homeWt = (agentId, srcWt) => (verbatim ? srcWt : join(wtBase, agentId));

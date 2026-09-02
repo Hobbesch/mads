@@ -28,7 +28,12 @@ const PATTERNS: Array<{ kind: string; re: RegExp }> = [
   { kind: "JWT", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/ },
   {
     kind: "Secret-Zuweisung",
-    re: /(?:api[_-]?key|secret|passwd|password|token|access[_-]?key|client[_-]?secret|private[_-]?key)\s*[:=]\s*['"][^'"]{12,}['"]/i,
+    // Wert in Quotes ≥12 Zeichen — ABER nicht, wenn der GANZE Wert eine reine Variablen-/Template-
+    // Referenz ist (`"${VAR}"`, `"${VAR:-x}"`, `"$VAR"`, `"${{ secrets.X }}"`, `"{{ .Values.x }}"`): das ist
+    // der idiomatische, SICHERE Weg, Secrets via Env durchzureichen (z. B. `-e PASSWORD="${PASSWORD:-}"`)
+    // und enthält KEINEN Klartext. Ein an eine Referenz ANGEHÄNGTER Klartext (`"${X}realsecret"`) wird
+    // weiterhin geflaggt; format-spezifische Muster (AWS/GitHub/JWT …) greifen ohnehin unabhängig davor.
+    re: /(?:api[_-]?key|secret|passwd|password|token|access[_-]?key|client[_-]?secret|private[_-]?key)\s*[:=]\s*['"](?!(?:\$\{[^'"{}]*\}|\$\w+|\$?\{\{[^'"]*\}\})['"])[^'"]{12,}['"]/i,
   },
   {
     // Unquoted (z. B. .env-Zeile) — eng gefasst: spezifische Schlüsselnamen, Wert ≥20

@@ -7,14 +7,18 @@ import { STATUS_META } from "../status";
 import { StatusDot } from "./StatusDot";
 import { agentBadges, nextStep, unsavedWork, gateDisabledReason, syncDisabledReason } from "../derive";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { saveNewStreamDraft, loadNewStreamDraft, draftHasContent } from "../newStreamDraft";
 import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
 import { ModelEffortPicker } from "./ModelEffortPicker";
+import { UsageMeter } from "./UsageMeter";
+import { modelLabel } from "../modelCatalog";
+import { PromptButton, PromptManagerDialog } from "./PromptLibrary";
 import { Elapsed } from "./Elapsed";
 import { fmtTokens } from "../format";
-import { blobToBase64 } from "../blob";
+import { blobToBase64, makeThumbnail } from "../blob";
 import { loadUiPrefs, saveUiPrefs } from "../uiPrefs";
-import type { PermissionMode, ImageInput, AutopilotLevel } from "../../shared/protocol";
+import type { PermissionMode, ImageInput, AutopilotLevel, SandboxMode } from "../../shared/protocol";
 
 // Stabile Leer-Referenz: ein zustand-Selektor darf NICHT bei jedem Render ein neues []
 // zurückgeben (sonst Endlos-Render-Schleife → App-Crash / graues Fenster).
@@ -31,15 +35,19 @@ export function Inspector() {
   const commitAgent = useStore((s) => s.commitAgent);
   const createPr = useStore((s) => s.createPr);
   const syncBranch = useStore((s) => s.syncBranch);
-  const resolveConflict = useStore((s) => s.resolveConflict);
   const outsourceMain = useStore((s) => s.outsourceMain);
   const commitMainRelease = useStore((s) => s.commitMainRelease);
   const updateMain = useStore((s) => s.updateMain);
+  const resetMain = useStore((s) => s.resetMain);
+  const pushMain = useStore((s) => s.pushMain);
   const continueStream = useStore((s) => s.continueStream);
   const integratePr = useStore((s) => s.integratePr);
   const runGate = useStore((s) => s.runGate);
   const startDevServer = useStore((s) => s.startDevServer);
   const stopDevServer = useStore((s) => s.stopDevServer);
+  const configureDevServer = useStore((s) => s.configureDevServer);
+  const mergeReview = useStore((s) => s.mergeReview);
+  const closeReview = useStore((s) => s.closeReview);
   const devLog = useStore((s) => (s.selectedId ? s.devLog[s.selectedId] ?? NO_DEVLOG : NO_DEVLOG));
   const devLogRef = useRef<HTMLDivElement>(null);
   const devLogStickRef = useRef(true); // an den unteren Rand „geklebt"? (nur dann folgen)
@@ -55,6 +63,11 @@ export function Inspector() {
   const setAutopilot = useStore((s) => s.setAutopilot);
   const setStreamModel = useStore((s) => s.setStreamModel);
   const setStreamEffort = useStore((s) => s.setStreamEffort);
+  const setStreamAccount = useStore((s) => s.setStreamAccount);
+  const setSandboxMode = useStore((s) => s.setSandboxMode);
+  const investigationTargets = useStore((s) => s.investigationTargets);
+  const accounts = useStore((s) => s.accounts);
+  const accountUsage = useStore((s) => s.accountUsage);
   const defaultModel = useStore((s) => s.defaultModel);
   // Composer-Entwürfe je Agent (im Store) — beim Umschalten bleibt jeder Entwurf erhalten.
   const draft = useStore((s) => (s.selectedId ? s.drafts[s.selectedId] ?? "" : ""));
@@ -75,6 +88,10 @@ export function Inspector() {
     null | { title: string; body: React.ReactNode; confirmLabel: string; danger?: boolean; onConfirm: () => void }
   >(null);
   const [dragging, setDragging] = useState(false); // Bild per Drag&Drop in den Composer
+  const [integratorGuard, setIntegratorGuard] = useState(false); // Rückfrage vor dem Senden an den Integrator (main)
+  // Prompt-Verwaltungs-Dialog: HIER (außerhalb des Composer-<form>) gerendert, damit sein
+  // Bearbeiten-Formular kein verschachteltes <form> im Composer wird.
+  const [managePrompts, setManagePrompts] = useState(false);
 
   // Auto-wachsende Composer-Höhe (Textarea): bei jeder Entwurfs-Änderung neu messen.
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -94,12 +111,10 @@ export function Inspector() {
     );
   }
 
-  const submit = (e?: { preventDefault: () => void }) => {
-    e?.preventDefault();
+  // Der eigentliche Versand (nach evtl. Guard). Datei-Anhänge (Nicht-Bilder) als lesbare Referenzen in
+  // den Prompt hängen — der Agent liest sie über den Pfad (in `.mads/attachments/`, im cwd → keine Rückfrage).
+  const doSend = () => {
     let text = draft.trim();
-    if (!text && attached.length === 0 && attachedFiles.length === 0) return;
-    // Datei-Anhänge (Nicht-Bilder) als lesbare Referenzen in den Prompt hängen — der Agent
-    // liest sie über den Pfad (liegen in `.mads/attachments/`, im cwd → keine Rückfrage).
     if (attachedFiles.length) {
       const list = attachedFiles.map((f) => `- ${f.relPath}`).join("\n");
       text = `${text ? text + "\n\n" : ""}📎 Angehängte Dateien (bitte lesen):\n${list}`;
@@ -110,11 +125,47 @@ export function Inspector() {
     setDraftFiles(selectedId, []);
   };
 
+  // Integrator-Guard „Als Sub-Stream starten": den getippten Text in einen frischen Sub-Stream-Entwurf
+  // legen und den „Neuer Stream"-Dialog vorbefüllt öffnen — so beginnt die Arbeit gleich im richtigen
+  // Sub-Stream statt (versehentlich) auf main. VERLUSTFREI: liegt bereits ein (nicht gespeicherter)
+  // „Neuer Stream"-Entwurf vor, wird er NICHT überschrieben — dann öffnet nur der Dialog, und der
+  // Integrator-Text bleibt im Composer. Bild-/Datei-Anhänge bleiben ohnehin im Composer (der Dialog
+  // kann sie nicht übernehmen). So geht in keinem Fall Text verloren.
+  const redirectToSubStream = () => {
+    const s = useStore.getState();
+    const existing = loadNewStreamDraft();
+    const hasPending = !!existing && draftHasContent({ label: existing.label ?? "", prompt: existing.prompt ?? "", branch: existing.branch ?? "" });
+    if (!hasPending) {
+      saveNewStreamDraft({ label: "", prompt: draft.trim(), role: "sub", model: s.defaultModel, effort: s.defaultEffort, branch: "", mode: "auto" });
+      setDraft(selectedId, ""); // Text lebt jetzt im persistenten Entwurf → übersteht Abbrechen des Dialogs
+    }
+    s.requestNewStream();
+  };
+
+  const submit = (e?: { preventDefault: () => void }) => {
+    e?.preventDefault();
+    if (!draft.trim() && attached.length === 0 && attachedFiles.length === 0) return;
+    // Guard gegen versehentliches Arbeiten im INTEGRATOR (main): er soll nur integrieren, nicht direkt
+    // umsetzen — Umsetzungen gehören in einen Sub-Stream. Greift bei jedem TEXT an den Integrator
+    // (nur-Anhänge ohne Text → direkt senden, ein Redirect wäre sinnlos). Der Integrator wartet
+    // Rückfragen NICHT im Composer ab (das läuft über den Permission-/Frage-Dialog), daher keine
+    // Status-Ausnahme. Beide Guard-Aktionen sind verlustfrei.
+    if (agent.role === "integrator" && !!draft.trim()) {
+      setIntegratorGuard(true);
+      return;
+    }
+    doSend();
+  };
+
   // Bild-Dateien (aus Paste ODER Drag&Drop) als Anhänge übernehmen (base64, ImageInput).
   const attachImageFiles = async (files: File[]) => {
     const imgs: ImageInput[] = [];
     for (const f of files) {
-      if (f.type.startsWith("image/")) imgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f) });
+      if (!f.type.startsWith("image/")) continue;
+      // Thumbnail gleich hier erzeugen (Canvas gibt's nur im Frontend) → es reist im user_text-Event
+      // mit, damit Mac UND Remote das echte Bild statt eines Zählers zeigen.
+      const thumb = await makeThumbnail(f);
+      imgs.push({ mediaType: f.type || "image/png", dataBase64: await blobToBase64(f), ...thumb });
     }
     if (imgs.length) setDraftImages(selectedId, [...attached, ...imgs]);
     return imgs.length;
@@ -202,6 +253,86 @@ export function Inspector() {
     });
   };
 
+  // Sandbox-Betriebsart (Untersuchungs-Freigabe, Stufe A/B): Zurück auf "on" geht ohne Rückfrage
+  // (härten braucht keine Bestätigung); jede LOCKERUNG bestätigt der Mensch bewusst im Dialog.
+  const askSandboxMode = (mode: SandboxMode) => {
+    if (mode === (agent.sandboxMode ?? "on")) return;
+    if (mode === "on") {
+      void setSandboxMode(selectedId, "on");
+      return;
+    }
+    if (mode === "targets") {
+      if (investigationTargets.length === 0) {
+        setConfirm({
+          title: "Keine Untersuchungsziele definiert",
+          body: (
+            <p>
+              Für den Untersuchungs-Modus braucht das Projekt eine Liste externer Hosts (Test-/Prod-APIs). Lege sie
+              in den <strong>Einstellungen → Untersuchungsziele</strong> an — die Sandbox bleibt dabei aktiv, nur
+              diese Hosts werden zusätzlich erreichbar.
+            </p>
+          ),
+          confirmLabel: "OK",
+          onConfirm: () => {},
+        });
+        return;
+      }
+      const prodTargets = investigationTargets.filter((t) => t.prod);
+      setConfirm({
+        title: "Untersuchungs-Modus einschalten?",
+        danger: prodTargets.length > 0,
+        body: (
+          <>
+            <p>
+              Die Sandbox <strong>bleibt aktiv</strong> (Dateisystem + Secrets geschützt) — zusätzlich erreichbar
+              werden die Untersuchungsziele des Projekts:
+            </p>
+            <p>
+              {investigationTargets.map((t) => (
+                <span key={t.host}>
+                  <code>{t.host}</code>
+                  {t.label ? ` (${t.label})` : ""}
+                  {t.prod ? " — PROD" : ""}
+                  <br />
+                </span>
+              ))}
+            </p>
+            {prodTargets.length > 0 && (
+              <p>
+                <strong>Achtung:</strong> Die Liste enthält {prodTargets.length} Produktions-Ziel(e). Der Stream
+                kann dort selbstständig Anfragen stellen.
+              </p>
+            )}
+          </>
+        ),
+        confirmLabel: "Ziele freischalten",
+        onConfirm: () => void setSandboxMode(selectedId, "targets"),
+      });
+      return;
+    }
+    // mode === "off" — Freigang: die eingriffstiefste Stufe, entsprechend deutlich warnen.
+    setConfirm({
+      title: "Sandbox ausschalten (Freigang)?",
+      danger: true,
+      body: (
+        <>
+          <p>
+            Der Stream darf dann <strong>frei auf externe Systeme zugreifen</strong> (auch SSH) — dafür fallen alle
+            Sandbox-Schutzschichten: Egress unbeschränkt, Secret-Ablagen (<code>~/.ssh</code>, <code>~/.aws</code>,
+            gh-Token) lesbar, Schreiben außerhalb des Worktrees möglich.
+          </p>
+          <p>
+            Geländer: Der Autopilot <strong>pusht/erstellt keine PRs</strong>, solange Freigang aktiv ist; nach{" "}
+            <strong>15 Min. Inaktivität</strong> schaltet mads selbst zurück; ein Neustart/Resume startet immer
+            wieder sandboxed. Für reine HTTPS-Untersuchungen ist der Untersuchungs-Modus (🔎) die sicherere Wahl.
+          </p>
+        </>
+      ),
+      confirmLabel: "Sandbox ausschalten",
+      onConfirm: () => void setSandboxMode(selectedId, "off"),
+    });
+  };
+
   // Main-Edits in einen neuen Sub-Stream auslagern (main bleibt sauber; direkter Commit auf main
   // ist bewusst nicht vorgesehen).
   const askOutsource = () =>
@@ -249,7 +380,16 @@ export function Inspector() {
     else if (step.kind === "pr") void createPr(selectedId);
     else if (step.kind === "integrate") askMerge(true); // Default = mergen + Stream BEHALTEN
     else if (step.kind === "outsource") askOutsource();
+    else if (step.kind === "commit_release") askCommitRelease(); // Deploy-Fall: Release-Commit ist primär
     else if (step.kind === "cleanup") void stopAgent(selectedId, true); // bereits gemergt → sicher
+  };
+
+  // Gespeicherten Prompt in den Composer-ENTWURF einfügen (nie automatisch senden — der
+  // Mensch liest und schickt selbst ab): leer → Text, sonst Entwurf + Leerzeile + Text.
+  const insertPromptText = (text: string) => {
+    const cur = draft;
+    setDraft(selectedId, cur.trim() ? `${cur.replace(/\s+$/, "")}\n\n${text}` : text);
+    composerRef.current?.focus();
   };
 
   return (
@@ -258,6 +398,13 @@ export function Inspector() {
         <StatusDot status={agent.status} />
         <div className="inspector-title">
           <span className="inspector-label">{agent.label}</span>
+          {/* Gelockerte Sandbox auch hier unübersehbar (Gegenstück zum Kachel-Badge). */}
+          {agent.role === "sub" && agent.sandboxMode === "off" && (
+            <span className="sandbox-badge off" title="Sandbox AUS (Freigang) — fällt nach 15 Min. Inaktivität automatisch zurück.">🔓 Sandbox aus</span>
+          )}
+          {agent.role === "sub" && agent.sandboxMode === "targets" && (
+            <span className="sandbox-badge targets" title="Untersuchungs-Modus — Sandbox aktiv, Untersuchungsziele im Egress erlaubt.">🔎 Untersuchung</span>
+          )}
           <span className="inspector-sub">
             {STATUS_META[agent.status].label}
             {agent.currentStep ? ` · ${agent.currentStep}` : ""}
@@ -307,6 +454,21 @@ export function Inspector() {
               <option value="autopilot">🤖 Autopilot</option>
             </select>
           )}
+          {/* Sandbox-Betriebsart (Untersuchungs-Freigabe): nur Sub-Streams — der Integrator läuft
+              ohnehin ohne Sandbox. Nicht optimistisch: das Select zeigt den vom Sidecar bestätigten
+              Zustand; ein Wechsel startet den Prozess mit Resume neu (Kontext bleibt). */}
+          {agent.role === "sub" && live && !agent.mock && (
+            <select
+              className={`mode-select sandbox-select ${agent.sandboxMode ?? "on"}`}
+              value={agent.sandboxMode ?? "on"}
+              onChange={(e) => askSandboxMode(e.target.value as SandboxMode)}
+              title="Sandbox dieses Streams: an (Standard) · Untersuchungs-Modus (Projekt-Ziele im Egress erlaubt, Sandbox bleibt an) · Freigang (Sandbox aus — nur für Untersuchungen auf Test-/Prod-Servern; fällt nach 15 Min. Inaktivität automatisch zurück)."
+            >
+              <option value="on">🔒 Sandbox an</option>
+              <option value="targets">🔎 Untersuchung — Ziele frei</option>
+              <option value="off">🔓 Sandbox aus (Freigang)</option>
+            </select>
+          )}
           {/* Modell + Effort DIESES Streams live umstellen (Modell via setModel, Effort/Ultracode
               via applyFlagSettings — ohne Neustart). Kleines „Stream"-Label als Gegenstück zum
               „· DEFAULT" der linken Leiste, damit klar ist: das gilt nur für diesen Stream. */}
@@ -321,17 +483,114 @@ export function Inspector() {
                 effort={agent.effort}
                 onModel={(m) => void setStreamModel(selectedId, m)}
                 onEffort={(e) => void setStreamEffort(selectedId, e)}
-                className="inspector"
+                variant="inspector"
               />
+            </div>
+          )}
+          {/* Claude-Konto dieses Streams. Nur sichtbar, wenn überhaupt mehrere Konten eingerichtet
+              sind — wer nur eines nutzt, soll keine sinnlose Auswahl sehen. Der Wechsel startet den
+              Claude-Prozess im Zielkonto neu und setzt dieselbe Session per Resume fort. */}
+          {live && !agent.mock && accounts && accounts.profiles.length > 1 && (
+            <div
+              className="insp-me"
+              title="Claude-Konto NUR für diesen Stream. Beim Wechsel wird der Prozess im anderen Konto neu gestartet und dasselbe Gespräch fortgesetzt."
+            >
+              <span className="insp-me-label">Konto</span>
+              {/* KEIN Fallback auf `accounts.activeId`: das ist das Standardkonto für NEUE Streams
+                  und sagt nichts darüber, unter welchem Konto DIESER Prozess gestartet wurde. Der
+                  Fallback behauptete ein Konto, das der Stream gar nicht benutzte — samt dessen
+                  beruhigendem Verbrauchsbalken, während das echte Konto an sein Limit lief.
+                  Unbekannt heißt jetzt unbekannt; der Sidecar bestätigt das reale Konto mit dem
+                  nächsten status_update, dann steht es hier von selbst richtig. */}
+              <select
+                className="mode-select"
+                value={agent.accountId ?? ""}
+                onChange={(e) => void setStreamAccount(selectedId, e.target.value)}
+              >
+                {agent.accountId === undefined && (
+                  <option value="" disabled>
+                    — noch unbekannt
+                  </option>
+                )}
+                {accounts.profiles.map((p) => {
+                  const cd = accounts.cooldowns[p.id];
+                  const blocked = !!cd && cd.rejected && cd.until > Date.now();
+                  const until = cd ? new Date(cd.until).toLocaleTimeString("de-CH", { hour: "2-digit", minute: "2-digit" }) : "";
+                  // Laufender Verbrauch, sobald das SDK ihn für dieses Konto gemeldet hat. Erst damit
+                  // sieht man das Limit KOMMEN statt es erst beim Anschlag zu bemerken.
+                  const use = accountUsage[p.id];
+                  // Im Menü das ENGSTE Fenster zeigen — das ist es, was zuerst blockiert.
+                  const pct = [use?.fiveHour?.utilization, use?.sevenDay?.utilization].filter(
+                    (v): v is number => v !== undefined,
+                  );
+                  const worst = pct.length ? Math.round(Math.max(...pct)) : undefined;
+                  const suffix = blocked
+                    ? ` — Limit bis ${until}`
+                    : worst !== undefined
+                      ? ` — ${worst}% verbraucht`
+                      : "";
+                  return (
+                    <option key={p.id} value={p.id} title={p.email ?? p.configDir}>
+                      {p.label}
+                      {suffix}
+                    </option>
+                  );
+                })}
+              </select>
+              {/* Plan-Nutzungslimits des gewählten Kontos — 5-Stunden- und Wochenfenster als Balken. */}
+              <UsageMeter usage={agent.accountId ? accountUsage[agent.accountId] : undefined} />
+            </div>
+          )}
+          {/* Doppel-Check: läuft der Stream real auf einem ANDEREN Modell als angefordert (stiller
+              SDK-Default), das laut + sichtbar machen — der Picker allein spiegelt nur den Wunsch. */}
+          {agent.modelMismatch && agent.activeModel && (
+            <div
+              className="insp-model-warn"
+              title="Der SDK lief auf einem anderen Modell als angefordert. mads zieht automatisch nach — bei Bedarf im Picker erneut umstellen."
+            >
+              ⚠ läuft real auf {modelLabel(agent.activeModel)}
             </div>
           )}
           </div>
           {/* Cluster 2 — Aktions-Buttons (kontextabhängig). Bricht als eigene Einheit um. */}
           <div className="insp-ops">
+          {/* Review-Stream (fremder PR, read-only): PR annehmen ODER verwerfen — KEIN „Fortsetzen"
+              (es ist keine KI-Session). Dev-Server-Knopf steht separat weiter unten. */}
+          {agent.reviewPr && (
+            <>
+              <button
+                className="step-primary"
+                title={`PR #${agent.reviewPr} squash-mergen und Review-Stream schließen`}
+                onClick={() =>
+                  setConfirm({
+                    title: `PR #${agent.reviewPr} nach main mergen?`,
+                    body: (
+                      <p>
+                        Squash-merged den fremden PR nach <code>main</code> und schließt den Review-Stream. Außen-sichtbar.
+                        <br />
+                        <small>Kein automatischer CI-Check — deine Prüfung (Dev-Server/Diff) entscheidet.</small>
+                      </p>
+                    ),
+                    confirmLabel: "PR mergen",
+                    onConfirm: () => void mergeReview(selectedId),
+                  })
+                }
+              >
+                ✓ PR #{agent.reviewPr} mergen
+              </button>
+              <button
+                className="step-primary cleanup"
+                title="Review verwerfen (Worktree entfernen) — der fremde PR bleibt unberührt"
+                onClick={() => void closeReview(selectedId)}
+              >
+                ✕ Verwerfen
+              </button>
+            </>
+          )}
           {/* Passiv wiederhergestellt → erst reaktivieren, bevor Git-Aktionen möglich sind.
               Beim INTEGRATOR (Leitstelle) erst rückfragen: reaktivieren kann sofort Aktionen
               auslösen (versehentliches „Fortsetzen" hat genau das getan). */}
-          {!live && (
+          {!live && !agent.reviewPr && (
             <button
               className="step-primary"
               title="Stream fortsetzen (Session reaktivieren, dann weiterarbeiten)"
@@ -368,11 +627,16 @@ export function Inspector() {
             </button>
           )}
           {/* Geführter „nächster Schritt": Committen → PR erstellen → Integrieren */}
-          {live && step.kind !== "none" && (
+          {/* Auch bei einem PASSIV wiederhergestellten Stream (nach App-Neustart, live=false) den Schritt
+              ZEIGEN — nur deaktiviert und mit Grund. Vorher war der Knopf komplett ausgeblendet: der
+              „Mergen & weiterarbeiten"-Knopf fehlte nach jedem Neustart spurlos, obwohl ein offener PR
+              da war, und niemand konnte sehen warum. Handeln kann mads erst, wenn der Stream wieder im
+              Pool ist → „Fortsetzen". */}
+          {step.kind !== "none" && (
             <button
               className={`step-primary${step.kind === "cleanup" ? " cleanup" : ""}`}
-              disabled={step.disabled}
-              title={step.hint}
+              disabled={step.disabled || !live}
+              title={live ? step.hint : `${step.label}: erst „Fortsetzen“ — der Stream ist nach dem App-Neustart noch nicht aktiv.`}
               onClick={runStep}
             >
               {step.label}
@@ -402,6 +666,16 @@ export function Inspector() {
               Als Release committen
             </button>
           )}
+          {/* Deploy-Fall (main_deploy_dirty): „Als Release committen" ist die Primäraktion (oben) —
+              das Auslagern in einen Sub-Stream bleibt als sekundäre Alternative erreichbar. */}
+          {live && step.kind === "commit_release" && (
+            <button
+              title="Deine uncommitteten main-Änderungen stattdessen in einen neuen Sub-Stream verschieben (main bleibt sauber; normaler Commit→PR→Integrate-Fluss)."
+              onClick={askOutsource}
+            >
+              In Sub-Stream auslagern
+            </button>
+          )}
           {live && agent.role === "sub" && agent.worktreePath && (
             <button
               disabled={!!gateDisabledReason(agent)}
@@ -417,30 +691,93 @@ export function Inspector() {
           {agent.role === "sub" && agent.worktreePath && (
             (() => {
               const ds = agent.devServer;
-              const on = !!ds && ds.state !== "stopped" && ds.state !== "error";
+              // „unconfigured" gilt als AUS (nicht laufend) — sonst würde der Knopf fälschlich „stoppen".
+              const on = !!ds && ds.state !== "stopped" && ds.state !== "error" && ds.state !== "unconfigured";
+              // TEILWEISE: mindestens ein konfigurierter Dienst ist tot. Der Knopf darf dann NICHT
+              // grün „läuft" behaupten — sonst sucht man den Fehler im eigenen Code, während in
+              // Wahrheit z. B. das Frontend weg ist (und der Link auf die API zeigte).
+              const degraded = ds?.state === "running" && ds.degraded;
               const label =
                 ds?.state === "running"
-                  ? "■ Dev-Server (läuft)"
+                  ? degraded
+                    ? `■ Dev-Server (teilweise${ds.deadServices?.length ? ` — ${ds.deadServices.join(", ")} aus` : ""})`
+                    : "■ Dev-Server (läuft)"
                   : ds?.state === "installing"
                     ? "■ Dev-Server (install…)"
                     : ds?.state === "starting"
                       ? "■ Dev-Server (startet…)"
                       : "▶ Dev-Server";
               return (
-                <button
-                  className={`devserver-btn${on ? " on" : ""}`}
-                  onClick={() => (on ? void stopDevServer(selectedId) : void startDevServer(selectedId))}
-                  title={
-                    on
-                      ? "Dev-Server dieses Streams stoppen"
-                      : "Front-/Backend dieses Streams lokal starten (aus dem Worktree — main bleibt unberührt). Konfig: .mads/run.json"
-                  }
-                >
-                  {label}
-                </button>
+                <>
+                  <button
+                    className={`devserver-btn${on ? " on" : ""}${degraded ? " degraded" : ""}`}
+                    onClick={() => (on ? void stopDevServer(selectedId) : void startDevServer(selectedId))}
+                    title={
+                      degraded
+                        ? `Nur teilweise gestartet — nicht (mehr) aktiv: ${ds?.deadServices?.join(", ")}. ` +
+                          "Zum Neustarten hier stoppen und erneut starten."
+                        : on
+                          ? "Dev-Server dieses Streams stoppen"
+                          : "Front-/Backend dieses Streams lokal starten (aus dem Worktree — main bleibt unberührt). Konfig: .mads/run.json"
+                    }
+                  >
+                    {label}
+                  </button>
+                  {/* „Konfigurieren": öffnet .mads/run.json im Editor (mit erkannter Vorlage) — hier
+                      konstruiert der Nutzer projekt-spezifisch, WAS beim Start passiert. Prominent bei
+                      „unconfigured", sonst als dezenter Zahnrad-Knopf immer erreichbar. */}
+                  <button
+                    className={`devserver-config${ds?.state === "unconfigured" ? " prominent" : ""}`}
+                    onClick={() => void configureDevServer(selectedId)}
+                    title="Dev-Server einrichten/anpassen — .mads/run.json im Editor öffnen"
+                  >
+                    {ds?.state === "unconfigured" ? "⚙ Konfigurieren" : "⚙"}
+                  </button>
+                </>
               );
             })()
           )}
+          {/* PRO DIENST ein eigener Indikator (frontend/backend). Der Sammel-Knopf allein log:
+              „läuft" konnte heißen „Frontend oben, Backend kompiliert noch" — und das Login lief
+              gegen ein Backend, das es noch nicht gab. Grün = am Port bestätigt, gelb = startet
+              bzw. nur angenommen, rot = Prozess weg. */}
+          {agent.role === "sub" &&
+            ((agent.devServer?.services?.length ?? 0) > 1 || (agent.devServer?.dependencies?.length ?? 0) > 0) && (
+              <span className="devsvc-row">
+                {(agent.devServer?.services ?? []).map((sv) => {
+                  // Eine fehlende Abhängigkeit schlägt alles andere: der Dienst lauscht zwar, kann aber
+                  // nichts beantworten — das darf nie grün aussehen.
+                  const cls = sv.depMissing ? "dead" : !sv.alive ? "dead" : sv.ready ? (sv.assumed ? "assumed" : "ok") : "starting";
+                  const what = sv.depMissing
+                    ? `läuft, aber Abhängigkeit fehlt: ${sv.depMissing}`
+                    : !sv.alive
+                      ? "läuft nicht (mehr)"
+                      : sv.ready
+                        ? sv.assumed
+                          ? "vermutlich bereit (kein Port prüfbar)"
+                          : "bereit — antwortet"
+                        : "startet noch …";
+                  return (
+                    <span key={sv.name} className={`devsvc ${cls}`} title={`${sv.name}: ${what}${sv.url ? ` · ${sv.url}` : ""}`}>
+                      <span className="devsvc-dot" />
+                      {sv.name}
+                    </span>
+                  );
+                })}
+                {/* Dritter Indikator: externe Abhängigkeiten (DB/Cache aus docker-compose). Gestrichelt,
+                    weil sie nicht mads gehören — aber ohne sie ist das Backend funktional tot. */}
+                {(agent.devServer?.dependencies ?? []).map((d) => (
+                  <span
+                    key={d.target}
+                    className={`devsvc dep ${d.ok ? "ok" : "dead"}`}
+                    title={`${d.name} (${d.target}): ${d.ok ? "erreichbar" : "NICHT erreichbar — läuft Docker bzw. der Dienst?"}`}
+                  >
+                    <span className="devsvc-dot" />
+                    {d.name}
+                  </span>
+                ))}
+              </span>
+            )}
           {agent.role === "sub" && agent.devServer?.state === "running" && agent.devServer.url && (
             <button
               className="devserver-open"
@@ -450,18 +787,13 @@ export function Inspector() {
               {agent.devServer.url.replace(/^https?:\/\//, "")} ↗
             </button>
           )}
-          {/* Sub: rebase onto origin/<default> + force-with-lease. NIE für den Integrator —
+          {/* Kein per-Stream-„Konflikt lösen" mehr: ein Sub-Stream sieht aus seiner Sandbox nur den
+              eigenen Worktree und kann eine Lage ZWISCHEN Streams nicht beurteilen (er rebaset
+              blind, während die anderen weiterarbeiten). Das übernimmt jetzt der übergreifende
+              Knopf in der Activity-Rail, der alle Streams anhält und den Integrator beauftragt.
+              Sub: rebase onto origin/<default> + force-with-lease. NIE für den Integrator —
               dessen „behind" betrifft den main-Checkout, der per fast-forward (nicht rebase!)
               nachgezogen wird. */}
-          {live && agent.role === "sub" && agent.syncBlocked && (
-            <button
-              className="step-primary"
-              title="Den Agenten den Rebase-Konflikt in seinem Worktree lösen lassen (git rebase + Konflikte beheben, kein Push/PR)."
-              onClick={() => void resolveConflict(selectedId)}
-            >
-              ⚠ Konflikt lösen
-            </button>
-          )}
           {live && agent.role === "sub" && (agent.behind > 0 || agent.syncBlocked) && (
             <button
               disabled={!!syncDisabledReason(agent)}
@@ -469,7 +801,7 @@ export function Inspector() {
               title={
                 syncDisabledReason(agent) ??
                 (agent.syncBlocked
-                  ? "Auto-Sync ist wegen eines Konflikts pausiert. Konflikt im Worktree lösen, dann erneut Sync."
+                  ? "Auto-Sync ist wegen eines Konflikts pausiert. Über „Konflikt lösen“ in der Seitenleiste auflösen, dann erneut Sync."
                   : "Manuell auf origin/main rebasen (läuft sonst automatisch)")
               }
             >
@@ -485,18 +817,70 @@ export function Inspector() {
               main aktualisieren ({agent.behind})
             </button>
           )}
+          {live && agent.role === "integrator" && agent.ahead > 0 && (
+            <button
+              onClick={() => void pushMain(selectedId)}
+              title={`Deine ${agent.ahead} lokale(n) Commit(s) auf main (z. B. Release-Version-Bumps) nach origin/main pushen — Fast-Forward, behält sie. Danach ist main in Sync.`}
+            >
+              nach main pushen ({agent.ahead})
+            </button>
+          )}
+          {live && agent.role === "integrator" && agent.ahead > 0 && (
+            <button
+              className="danger"
+              onClick={() =>
+                setConfirm({
+                  title: `${agent.ahead} lokale Commit(s) verwerfen?`,
+                  body: (
+                    <>
+                      <p>
+                        Dein <code>main</code>-Checkout ist <strong>{agent.ahead}</strong> lokale(n), nicht
+                        gepushte(n) Commit(s) VORAUS. Diese werden <strong>verworfen</strong>, und <code>main</code>{" "}
+                        wird hart auf <code>origin/main</code> gesetzt.
+                      </p>
+                      <p>
+                        Ein Backup-Branch (<code>mads-backup/main-…</code>) wird vorher automatisch gesichert — die
+                        Commits bleiben verlustfrei rückholbar.
+                      </p>
+                    </>
+                  ),
+                  confirmLabel: `${agent.ahead} verwerfen & auf origin setzen`,
+                  danger: true,
+                  onConfirm: () => void resetMain(selectedId),
+                })
+              }
+              title={`Dein main-Checkout ist ${agent.ahead} lokale(n), nicht gepushte(n) Commit(s) VORAUS (die ein fast-forward nicht auflöst — z. B. Release-/Versions-Bumps). Hart auf origin zurücksetzen; ein Backup-Branch wird vorher gesichert.`}
+            >
+              main auf origin zurücksetzen ({agent.ahead})
+            </button>
+          )}
           {agent.pr && (
             <button onClick={() => void openUrl(agent.pr!.url)} title="PR auf GitHub öffnen">
               PR #{agent.pr.number} ↗
             </button>
           )}
-          <button
-            className="danger"
-            onClick={askStop}
-            title="Stoppen + aufräumen (Worktree/Branch entfernen bei Sub)"
-          >
-            Stop
-          </button>
+          {agent.reviewPr ? (
+            // Review-Stream: die generische „Stop" (pool-only stop_agent) greift hier NICHT und würde
+            // den Worktree lecken + den PR dauerhaft ausblenden. Stattdessen der PR-Link; Verwerfen/Mergen
+            // stehen unten als eigene Aktionen.
+            agent.reviewUrl && (
+              <button onClick={() => void openUrl(agent.reviewUrl!)} title="PR auf GitHub öffnen">
+                PR #{agent.reviewPr} ↗
+              </button>
+            )
+          ) : agent.role === "integrator" ? null : (
+            // KEIN Stop für den Integrator (Main-Stream): er ist die Leitstelle und nicht löschbar —
+            // ein einziger Klick entfernte ihn sonst samt Session-Kontext (der Main-Checkout ist meist
+            // sauber → askStop fragte nicht einmal nach). Not-Aus bleibt „Unterbrechen" im Composer;
+            // der Sidecar lehnt stop_agent für Integratoren zusätzlich ab (Defense in depth).
+            <button
+              className="danger"
+              onClick={askStop}
+              title="Stoppen + aufräumen (Worktree/Branch entfernen bei Sub)"
+            >
+              Stop
+            </button>
+          )}
           </div>
         </div>
       </header>
@@ -513,9 +897,9 @@ export function Inspector() {
           }}
         >
           <summary>
-            <span className={`devserver-dot ${agent.devServer?.state ?? "stopped"}`} />
+            <span className={`devserver-dot ${agent.devServer?.degraded ? "degraded" : (agent.devServer?.state ?? "stopped")}`} />
             Dev-Server
-            {agent.devServer?.state ? ` — ${agent.devServer.state}` : ""}
+            {agent.devServer?.state ? ` — ${agent.devServer.degraded ? "teilweise" : agent.devServer.state}` : ""}
             {agent.devServer?.message ? ` · ${agent.devServer.message}` : ""}
           </summary>
           <div
@@ -556,6 +940,21 @@ export function Inspector() {
               {b.label}
             </span>
           ))}
+        </div>
+      )}
+
+      {Object.keys(agent.subAgents ?? {}).length > 0 && (
+        <div className="subagents-panel">
+          <div className="subagents-title">▶ Teil-Agenten · {Object.keys(agent.subAgents ?? {}).length} aktiv</div>
+          {Object.values(agent.subAgents ?? {})
+            .sort((a, b) => a.startedAt - b.startedAt)
+            .map((sa) => (
+              <div key={sa.id} className="subagent-row">
+                <span className="subagent-dot" title="läuft" />
+                <span className="subagent-label">{sa.label}</span>
+                {sa.currentStep && <span className="subagent-step">{sa.currentStep}</span>}
+              </div>
+            ))}
         </div>
       )}
 
@@ -641,6 +1040,8 @@ export function Inspector() {
             aria-hidden="true"
             tabIndex={-1}
           />
+          {/* Prompt-Bibliothek: fügt kuratierte Prompts in den ENTWURF ein (nie Auto-Send). */}
+          <PromptButton role={agent.role} onInsert={insertPromptText} onManage={() => setManagePrompts(true)} />
           <button
             type="button"
             className="composer-btn attach"
@@ -731,6 +1132,26 @@ export function Inspector() {
           danger={confirm.danger}
           onConfirm={confirm.onConfirm}
           onClose={() => setConfirm(null)}
+        />
+      )}
+      {managePrompts && <PromptManagerDialog onClose={() => setManagePrompts(false)} />}
+      {integratorGuard && (
+        <ConfirmDialog
+          title="Im Integrator (main) arbeiten?"
+          confirmLabel="Als Sub-Stream starten"
+          cancelLabel="Abbrechen"
+          secondary={{ label: "An Integrator senden", onClick: doSend }}
+          body={
+            <>
+              <p>
+                Das ist der <b>Integrator</b> (main) — er soll nur <b>integrieren</b>, nicht direkt umsetzen.
+                Umsetzungen gehören in einen Sub-Stream (main bleibt nur über grün-getestete PR-Merges aktuell).
+              </p>
+              <p>Deinen Text als neuen <b>Sub-Stream</b> starten — oder trotzdem an den Integrator senden?</p>
+            </>
+          }
+          onConfirm={redirectToSubStream}
+          onClose={() => setIntegratorGuard(false)}
         />
       )}
     </section>

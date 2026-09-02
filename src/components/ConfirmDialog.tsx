@@ -12,6 +12,7 @@ export function ConfirmDialog({
   confirmLabel = "Bestätigen",
   cancelLabel = "Abbrechen",
   danger = false,
+  secondary,
   onConfirm,
   onClose,
 }: {
@@ -20,6 +21,8 @@ export function ConfirmDialog({
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
+  /** Optionale dritte Aktion (z. B. „trotzdem …") zwischen Abbrechen und der Primäraktion. */
+  secondary?: { label: string; onClick: () => void };
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -41,6 +44,17 @@ export function ConfirmDialog({
           <button type="button" onClick={onClose}>
             {cancelLabel}
           </button>
+          {secondary && (
+            <button
+              type="button"
+              onClick={() => {
+                secondary.onClick();
+                onClose();
+              }}
+            >
+              {secondary.label}
+            </button>
+          )}
           <button
             type="button"
             className={danger ? "danger" : "primary"}

@@ -13,19 +13,25 @@ export function ModelEffortPicker({
   onModel,
   onEffort,
   disabled = false,
-  className = "",
+  variant,
 }: {
   model: string;
   effort?: EffortMode;
   onModel: (m: string) => void;
   onEffort: (e: EffortMode) => void;
   disabled?: boolean;
-  className?: string;
+  /**
+   * Layout-Variante. Wird bewusst als `me-<variant>` gesetzt statt einen rohen Klassennamen
+   * durchzureichen: „inspector" landete sonst direkt neben `model-effort` und erbte die
+   * gleichnamige PANEL-Regel `.inspector` (flex-direction: column + flex: 1 1 0%) — Modell und
+   * Effort stapelten sich, der Picker wuchs auf volle Breite und riss den Inspector-Kopf auf.
+   */
+  variant?: "inspector" | "rail" | "dialog";
 }) {
   const levels = effortLevelsFor(model);
   const effVal = effort && levels.includes(effort) ? effort : levels[levels.length - 1];
   return (
-    <div className={`model-effort ${className}`}>
+    <div className={`model-effort${variant ? ` me-${variant}` : ""}`}>
       <select
         className="me-model"
         value={model}

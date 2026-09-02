@@ -22,19 +22,33 @@ import { findSecrets } from "./secrets.js";
 /** Kategorie einer Rückfrage — steuert das projektweite „Immer erlauben". `danger` (destruktiv:
  *  rm/sudo/dd/kill/…) ist BEWUSST NICHT merkbar und fragt IMMER. Alle anderen kann der Nutzer per
  *  „Immer erlauben" für das Projekt freischalten (näher an Claude Code). */
-export type CommandKind = "danger" | "network" | "pkg" | "secret" | "git" | "write";
+export type CommandKind = "danger" | "outward" | "network" | "pkg" | "secret" | "git" | "write" | "tool";
 
-/** Kategorien, die „Immer erlauben" merken darf (alles außer dem destruktiven `danger`). */
+/** Kategorien, die „Immer erlauben" merken darf. NICHT dabei: `danger` (destruktiv) und `outward`.
+ *  `outward` = die Aktion wird für ANDERE sichtbar (Push/PR/Merge/Issue). Sie lag früher in derselben
+ *  merkbaren Kategorie `git` wie das harmlose fetch/pull — ein einziger Klick auf „Immer erlauben
+ *  (Git-Fernaktionen)" autorisierte damit dauerhaft auch `git push` und `gh pr merge`. Das hebelte
+ *  die Invarianten 1 („nur der Integrator merged") und 4 („außen-sichtbare Aktionen sind explizit")
+ *  aus — im Autopilot, wo niemand zusieht. Außenwirkung muss jedes Mal bewusst bestätigt werden. */
 export const REMEMBERABLE_KINDS: readonly CommandKind[] = ["network", "pkg", "secret", "git", "write"];
 /** Menschliche Labels (Dialog-Knopf „Immer erlauben (…)" + Persistenz-Anzeige). */
 export const COMMAND_KIND_LABELS: Record<CommandKind, string> = {
   danger: "destruktive Befehle",
+  outward: "Push/PR/Merge nach außen",
   network: "Netzwerkzugriff nach außen",
   pkg: "Paket-/Dienst-Verwaltung",
   secret: "Zugriff auf Secrets/Config",
-  git: "Git-Fernaktionen",
+  git: "Git-Fernaktionen (lesend)",
   write: "Schreiben außerhalb des Projekts",
+  tool: "dieses Tool",
 };
+
+/** Kategorien, für die der Dialog „Immer erlauben" anbieten darf. `tool` wird NICHT pauschal
+ *  gemerkt, sondern pro Tool-NAME (wie WebFetch pro Domain) — deshalb steht es nicht in
+ *  REMEMBERABLE_KINDS (das persistiert Bash-Kategorien), aber der Knopf ist sinnvoll. */
+export function isRememberableKind(k: CommandKind | undefined): boolean {
+  return !!k && (k === "tool" || (REMEMBERABLE_KINDS as readonly string[]).includes(k));
+}
 
 export type AutoDecision = { decision: "allow" | "ask"; reason?: string; kind?: CommandKind };
 
@@ -46,6 +60,36 @@ const READ_TOOLS = new Set(["Read", "Glob", "Grep", "LS", "NotebookRead", "TodoW
 // Tools, die Dateien (im Worktree) ändern → auto-erlaubt, sofern Pfad sicher.
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
+/**
+ * Orchestrierungs-/Meta-Tools: delegieren oder verwalten Arbeit, greifen selbst NICHT auf Dateien,
+ * Netz oder Prozesse zu. Die Aufrufe der so gestarteten Sub-Agenten werden weiterhin einzeln geprüft.
+ * `Agent` ist der reale Tool-Name (der SDK benennt `Task` intern um) — beide Schreibweisen abdecken,
+ * sonst greift die Regel je nach SDK-Version nicht. `TaskOutput`/`TaskStop` heißen als Legacy-Alias
+ * `BashOutput`/`KillShell` und betreffen nur Hintergrund-Tasks, die der Agent selbst gestartet hat.
+ */
+/**
+ * Reine Doku-/Referenz-Nachschlagewerke (MCP): liefern Bibliotheks-Dokumentation. Lesend, ohne
+ * Datei-, Prozess- oder Zustandswirkung — dieselbe Klasse wie ein WebFetch auf einen kuratierten
+ * Doku-Host, der weiter unten längst still läuft. Ohne diese Ausnahme fragte JEDE einzelne
+ * Doku-Abfrage nach (und der „Immer erlauben"-Knopf half nicht, weil er nur für Bash griff).
+ * Die Argumente werden trotzdem auf Secret-Muster geprüft — der Query-Text ist frei formulierbar
+ * und wäre sonst ein Exfiltrationskanal.
+ */
+const DOC_LOOKUP_TOOLS = new Set([
+  "mcp__context7__resolve-library-id",
+  "mcp__context7__query-docs",
+]);
+
+const META_TOOLS = new Set([
+  "Agent", "Task",
+  "Workflow",
+  "ToolSearch",
+  "TaskCreate", "TaskGet", "TaskUpdate", "TaskList",
+  "TaskOutput", "BashOutput",
+  "TaskStop", "KillShell",
+  "Monitor",
+]);
+
 // „Trusted-Local-Dev": LOKALE Ausführung ist im Auto-Modus erlaubt (Skripte, Interpreter,
 // `python -c`, `-m`, unbekannte lokale Tools). DANGER listet nur DIREKT riskante Aktionen —
 // auswärts/destruktiv/System/Secrets — die IMMER fragen. Der Scan läuft QUOTE-NEUTRALISIERT
@@ -54,9 +98,9 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 // Jeder Eintrag trägt seine KATEGORIE (kind) fürs „Immer erlauben": die echt destruktiven/Exploit-
 // Muster sind `danger` (NIE merkbar, fragen immer); Shell-Netz (ssh/scp/…) ist `network`, System-/
 // Paketwerkzeuge sind `pkg`, gh/git-Fern sind `git` — die kann der Nutzer projektweit freischalten.
-const DANGER: { re: RegExp; why: string; kind: CommandKind }[] = [
+const DANGER: { re: RegExp; why: string; kind: CommandKind; id?: string }[] = [
   { re: /(^|[\s;&|(])sudo(\s|$)/, why: "läuft mit sudo", kind: "danger" },
-  { re: /(^|[\s;&|(])(rm|rmdir|shred|unlink)(\s|$)/, why: "löscht Dateien (rm)", kind: "danger" },
+  { re: /(^|[\s;&|(])(rm|rmdir|shred|unlink)(\s|$)/, why: "löscht Dateien (rm)", kind: "danger", id: "rm" },
   { re: /(^|[\s;&|(])(chmod|chown|chgrp)(\s|$)/, why: "ändert Dateirechte", kind: "danger" },
   { re: /(^|[\s;&|(])(kill|killall|pkill|shutdown|reboot|halt)(\s|$)/, why: "beendet Prozesse / fährt herunter", kind: "danger" },
   { re: /(^|[\s;&|(])(dd|mkfs|diskutil|fdisk)(\s|$)/, why: "Datenträger-/Low-Level-Operation", kind: "danger" },
@@ -64,11 +108,53 @@ const DANGER: { re: RegExp; why: string; kind: CommandKind }[] = [
   { re: /(^|[\s;&|(])(nc|ncat|telnet|ssh|scp|sftp|rsync|ftp)(\s|$)/, why: "Netzwerkzugriff nach aussen", kind: "network" },
   { re: /(^|[\s;&|(])(brew|apt|apt-get|yum|dnf|port|docker|podman|launchctl|crontab|systemctl)(\s|$)/, why: "System-/Paket-/Dienst-Verwaltung", kind: "pkg" },
   { re: /(^|[\s;&|(])(osascript|defaults|pbcopy|pbpaste)(\s|$)/, why: "macOS-Systemfunktionen/Zwischenablage", kind: "danger" },
+  // gh ABGESTUFT — Reihenfolge zählt (erster Treffer gewinnt): erst das Unwiderrufliche, dann das
+  // Außenwirksame, zuletzt der generische Backstop. Der generische Eintrag bleibt bewusst bestehen:
+  // er läuft quote-neutralisiert und fängt jede Form, die die spezifischen Muster nicht treffen.
+  {
+    re: /(^|[\s;&|(])gh\s+(?:-\S+\s+)*(?:pr\s+merge|repo\s+(?:delete|edit|archive|rename|transfer)|release\s+delete|secret\s+(?:set|delete)|variable\s+(?:set|delete)|auth\s+token|ruleset\s+delete)(\s|$)/,
+    why: "gh verändert GitHub unwiderruflich (Merge/Löschen/Secrets)",
+    kind: "danger",
+  },
+  {
+    // `gh api` mit verändernder HTTP-Methode — genau der Aufruf, mit dem sich Branches löschen oder
+    // Repo-Einstellungen ändern lassen. Auf das Segment begrenzt, damit kein Folgebefehl mitgelesen wird.
+    re: /(^|[\s;&|(])gh\s+api\b[^;|&\n]*(?:-X|--method)[\s=]+(?:DELETE|PATCH|PUT|POST)\b/i,
+    why: "gh api mit verändernder Methode (DELETE/PATCH/PUT/POST)",
+    kind: "danger",
+  },
+  {
+    re: /(^|[\s;&|(])gh\s+(?:-\S+\s+)*(?:pr\s+(?:create|close|reopen|ready|edit)|issue\s+(?:create|close|reopen|edit)|release\s+(?:create|upload)|workflow\s+(?:run|enable|disable))(\s|$)/,
+    why: "gh wirkt nach außen (PR/Issue/Release/Workflow)",
+    kind: "outward",
+  },
   { re: /(^|[\s;&|(])gh(\s|$)/, why: "GitHub-CLI (außen-sichtbar: PR/Issue/API)", kind: "git" },
   // git außen-sichtbar/destruktiv — auch code-versteckt (Scan ist quote-neutralisiert). Den
   // nuancierten Top-Level-Fall (`git remote -v` ok, `git remote add` fragt; Config-Exec-Keys)
   // deckt zusätzlich classifyGit ab; hier nur die eindeutig riskanten Subcommands.
-  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*(push|pull|fetch|clone|reset|clean)(\s|$)/, why: "git außen-sichtbar/verändernd", kind: "git" },
+  // ARBEITS-VERNICHTEND → kind "danger" = NIE per „Immer erlauben" merkbar. Diese Subcommands werfen
+  // uncommittete Arbeit bzw. ganze Commits weg (`git reset --hard`, `git clean -fd`, `git checkout -f`,
+  // `git restore`, `git branch -D`, `git stash drop/clear`). Sie lagen früher in derselben MERKBAREN
+  // Kategorie „git" wie das harmlose fetch/push — wer einmal „Immer erlauben (git)" klickte, autorisierte
+  // damit still auch `git reset --hard origin/main`. Genau so ging in einem echten Stream Arbeit verloren.
+  {
+    re: /(^|[\s;&|(])git\s+(?:-\S+\s+(?:\S+\s+)?)*(reset|clean|restore)(\s|$)/,
+    why: "git verwirft Arbeit (reset/clean/restore) — unwiderruflich",
+    kind: "danger",
+  },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+(?:\S+\s+)?)*checkout\s+(-f|--force)(\s|$)/, why: "git checkout --force verwirft Änderungen", kind: "danger" },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+(?:\S+\s+)?)*branch\s+(?:\S+\s+)*-D(\s|$)/, why: "git branch -D löscht ungemergten Branch", kind: "danger" },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+(?:\S+\s+)?)*stash\s+(drop|clear)(\s|$)/, why: "git stash drop/clear verwirft gesicherte Arbeit", kind: "danger" },
+  // Außen-sichtbar, aber NICHT arbeitsvernichtend → bleibt merkbar.
+  // Force-Push ÜBERSCHREIBT fremde Commits auf dem Remote — unwiderruflich, deshalb `danger` (nie
+  // merkbar). `--force-with-lease` prüft vorher den Remote-Stand und ist nur `outward`; es muss ZUERST
+  // stehen, sonst würde die allgemeine --force-Regel es fälschlich als danger einstufen.
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*push\b[^;|&\n]*--force-with-lease/, why: "git push --force-with-lease (außen-sichtbar)", kind: "outward" },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*push\b[^;|&\n]*(?:--force\b|\s-f(\s|$))/, why: "git push --force überschreibt fremde Commits auf dem Remote", kind: "danger" },
+  // push macht Arbeit für ANDERE sichtbar → `outward` (nicht merkbar). pull/fetch/clone holen nur
+  // herein und bleiben `git` (merkbar) — sie erzeugen keine Außenwirkung.
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*push(\s|$)/, why: "git push — außen-sichtbar", kind: "outward" },
+  { re: /(^|[\s;&|(])git\s+(?:-\S+\s+)*(pull|fetch|clone)(\s|$)/, why: "git holt vom Remote", kind: "git" },
   { re: /:\s*\(\s*\)\s*\{/, why: "verdächtiges Shell-Muster (Fork-Bomb)", kind: "danger" },
   // Hijack-/Egress-Umgebungsvariablen: laden fremde Libs bzw. übernehmen git/ssh nach aussen.
   {
@@ -94,6 +180,9 @@ const GIT_RISKY_SUB = new Set([
   "pull", "am", "apply", "format-patch", "send-email", "request-pull", "daemon",
   "fast-import", "p4", "svn", "instaweb", "clone", "ls-remote", "archive",
 ]);
+/** git-Subcommands mit AUSSENWIRKUNG: tragen Commits/Patches nach außen oder machen das Repo von
+ *  außen erreichbar. Bekommen kind `outward` → nie per „Immer erlauben" merkbar (Invariante 4). */
+const GIT_OUTWARD_SUB = new Set(["push", "send-email", "request-pull", "daemon", "instaweb", "p4", "svn"]);
 // Subcommands, die nur lesen bzw. lokal/harmlos sind. ALLES andere → default-deny (ASK),
 // damit ein unbekanntes/neues Subcommand nicht versehentlich auto-erlaubt wird.
 const GIT_SAFE_SUB = new Set([
@@ -234,7 +323,13 @@ function classifyGit(cmd: string): AutoDecision | null {
     }
     const sub = (toks[i] ?? "").toLowerCase();
     if (!sub) continue;
-    if (GIT_RISKY_SUB.has(sub)) return ASK(`git-Operation „${sub}“ — außen-sichtbar/verändernd`);
+    if (GIT_RISKY_SUB.has(sub))
+      return ASK(
+        `git-Operation „${sub}“ — außen-sichtbar/verändernd`,
+        // Trägt die Aktion Daten nach AUSSEN bzw. macht sie das Repo von außen erreichbar, ist sie
+        // `outward` (nicht per „Immer erlauben" merkbar). Alles Übrige behält die bisherige Einstufung.
+        GIT_OUTWARD_SUB.has(sub) ? "outward" : undefined,
+      );
     const a1 = (toks[i + 1] ?? "").toLowerCase();
     if (sub === "remote" && /^(add|remove|rm|set-url|rename|prune)$/.test(a1)) return ASK("git remote ändern");
     if (sub === "submodule" && /^(add|update|deinit|sync|set-url|set-branch)$/.test(a1)) return ASK("git submodule ändern");
@@ -436,7 +531,226 @@ function envOrSecretRead(s: string): string | null {
   return null;
 }
 
-export function classifyBashCommand(command: string): AutoDecision {
+/**
+ * Kommandos, deren quotierte Argumente reiner TEXT sind und NIE ausgeführt werden.
+ * `echo "=== defaults ==="` ist kein Aufruf von `defaults`; `git commit -m "fix port 3000"` startet
+ * keinen Paketmanager; `grep -n "rm -rf" src/` löscht nichts. Genau solche Argumente lösten bisher
+ * die häufigsten Fehlalarme aus, weil der Scan quote-neutralisiert über die GANZE Zeile läuft.
+ */
+const INERT_TEXT_HEADS = new Set(["echo", "printf"]);
+const INERT_SEARCH_HEADS = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack"]);
+/** Interpreter, die Text von STDIN ausführen könnten (`echo "curl x" | sh`). Steht so etwas in der
+ *  Zeile, wird GAR NICHT gestrippt — dann ist der „Text" womöglich doch Code. */
+const STDIN_EXECUTORS = /(?:^|[|;&]\s*)\s*(?:sudo\s+)?(?:sh|bash|zsh|ksh|dash|eval|source|python3?|node|perl|ruby|xargs|env)\b/;
+/** Auch in Anführungszeichen NIE als harmlos durchgehen lassen — die katastrophalen Fälle. */
+const NEVER_INERT = /(?:^|[\s;&|(])(?:sudo|dd|mkfs|shutdown|reboot)(?:\s|$)|rm\s+-[a-z]*[rf][a-z]*\s+\/(?:\s|$)/;
+
+/**
+ * Entfernt inerte Argument-TEXTE aus der Zeile, BEVOR der Gefahren-Scan darüberläuft.
+ * Bewusst eng (jede Lockerung hier ist sicherheitsrelevant):
+ *   • nur VOLLSTÄNDIG quotierte Werte — ein unquotierter Wert bleibt stehen;
+ *   • keine Interpolation im Wert (`$(`, Backtick, `${`, `<(`) → sonst könnte dort Code stecken;
+ *   • nur im Segment des jeweiligen Kommandos (Split an ; && || | Newline), damit ein `-m` nie
+ *     den Text eines ANDEREN Kommandos verschluckt;
+ *   • gar nicht, wenn irgendwo ein STDIN-Interpreter steht oder ein NEVER_INERT-Muster vorkommt.
+ * Rückgabe: bereinigte Zeile (oder das Original, wenn Strippen nicht sicher ist).
+ */
+export function stripInertArguments(command: string): string {
+  // NEVER_INERT auf der QUOTE-NEUTRALISIERTEN Sicht prüfen: die katastrophalen Tokens stehen im
+  // Angriffsfall direkt hinter einem Anführungszeichen (`echo "sudo …"`), wo die Wortgrenze sonst
+  // nicht greift. Lieber einmal zu viel gefragt als hier eine Lücke.
+  const bare = command.replace(/['"`]/g, " ");
+  if (STDIN_EXECUTORS.test(command) || NEVER_INERT.test(bare)) return command;
+  const out: string[] = [];
+  let seg = ""; // aktuelles Segment (bereits verarbeitet)
+  let head: string | null = null; // erstes Wort des Segments
+  let word = ""; // laufendes unquotiertes Wort
+  let searchPatternUsed = false;
+  const flush = () => {
+    out.push(seg);
+    seg = "";
+    head = null;
+    word = "";
+    searchPatternUsed = false;
+  };
+  const headIsInert = (): boolean => {
+    if (!head) return false;
+    const base = head.split("/").pop() ?? head;
+    if (INERT_TEXT_HEADS.has(base)) return true;
+    if (INERT_SEARCH_HEADS.has(base) && !searchPatternUsed) return true;
+    // `git commit|tag|stash|notes …` — Message/Beschreibung ist Text.
+    if (base === "git" && /(^|\s)(commit|tag|stash|notes)(\s|$)/.test(seg)) return true;
+    return false;
+  };
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (c === "'" || c === '"') {
+      // Quotiertes Stück am Stück einlesen (inkl. Escapes in "…").
+      let j = i + 1;
+      let raw = c;
+      while (j < command.length) {
+        if (c === '"' && command[j] === "\\") {
+          raw += command[j] + (command[j + 1] ?? "");
+          j += 2;
+          continue;
+        }
+        raw += command[j];
+        if (command[j] === c) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      const closed = raw.length > 1 && raw.endsWith(c);
+      const interpolates = /\$\(|`|\$\{|<\(|\$'/.test(raw);
+      if (closed && !interpolates && headIsInert()) {
+        if (INERT_SEARCH_HEADS.has((head ?? "").split("/").pop() ?? "")) searchPatternUsed = true;
+        seg += " "; // Text verwerfen — er wird nie ausgeführt
+      } else {
+        seg += raw;
+      }
+      i = j - 1;
+      word = "";
+      continue;
+    }
+    if (c === ";" || c === "\n" || c === "|" || c === "&") {
+      seg += c;
+      flush();
+      continue;
+    }
+    if (/\s/.test(c)) {
+      if (word && head === null) head = word;
+      word = "";
+      seg += c;
+      continue;
+    }
+    word += c;
+    if (head === null && /[=]/.test(c)) {
+      // Führende Zuweisung (VAR=wert) ist kein Kommando-Kopf.
+      word = "";
+    }
+    seg += c;
+  }
+  if (word && head === null) head = word;
+  out.push(seg);
+  return out.join("");
+}
+
+/** Temp-Wurzeln, unter denen Löschen unkritisch ist. */
+const TMP_ROOTS = ["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/"];
+
+/**
+ * Zerlegt eine Zeile quote-ERHALTEND in Segmente und Tokens. `segmentCommands()` wirft quotierte
+ * Stücke weg (für die Kommando-KOPF-Erkennung richtig) — hier brauchen wir die Argument-WERTE
+ * (`rm -rf "$UDD"` verlöre sonst sein Ziel und würde als „kein Ziel" fehlklassifiziert).
+ */
+function rawCommandTokens(command: string): string[][] {
+  const segs: string[][] = [];
+  let toks: string[] = [];
+  let cur = "";
+  let q: string | null = null;
+  const endTok = () => {
+    if (cur) toks.push(cur);
+    cur = "";
+  };
+  const endSeg = () => {
+    endTok();
+    if (toks.length) segs.push(toks);
+    toks = [];
+  };
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (q) {
+      cur += c;
+      if (c === q) q = null;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      q = c;
+      cur += c;
+      continue;
+    }
+    if (c === "\\") {
+      cur += (command[++i] ?? "");
+      continue;
+    }
+    if (c === ";" || c === "\n" || c === "|" || c === "&" || c === "(" || c === ")") {
+      endSeg();
+      continue;
+    }
+    if (/\s/.test(c)) {
+      endTok();
+      continue;
+    }
+    cur += c;
+  }
+  endSeg();
+  return segs;
+}
+
+/**
+ * Löscht dieser Befehl AUSSCHLIESSLICH innerhalb des eigenen Arbeitsbaums bzw. in Temp?
+ *
+ * Agenten räumen ständig eigene Wegwerf-Dateien weg (`rm -f client/__probe.mjs`, `rm -rf "$UDD"`
+ * mit UDD unter $TMPDIR). Jede dieser Zeilen war bisher eine `danger`-Rückfrage — bei weitem der
+ * häufigste destruktive Fehlalarm. Die OS-Sandbox (sidecar/src/sandbox.ts) lässt Schreib-/Lösch-
+ * zugriffe ohnehin nur im Worktree, `<repoRoot>/.git`, Temp und Toolchain-Caches zu; ein Ziel
+ * AUSSERHALB kann gar nicht mehr getroffen werden.
+ *
+ * FAIL CLOSED: Sobald EIN Ziel nicht nachweislich lokal ist (absolut außerhalb, `~`, `..`,
+ * unauflösbare Variable, gar kein Ziel), gilt der ganze Befehl als riskant → Rückfrage.
+ */
+export function deletesOnlyLocally(command: string, cwd?: string): boolean {
+  // Obfuskation hebt die Ausnahme auf: Kommando-Substitution (`$(…)`, Backticks) und IFS-Tricks
+  // können Ziel UND Kommando zur Laufzeit erzeugen — dann ist statisch nichts beweisbar.
+  // (Ein schlichtes `"$VAR"` ist davon NICHT betroffen und wird unten aufgelöst.)
+  if (/\$\(|`|\$\{IFS/.test(command)) return false;
+  // Einfache Zuweisungen der GLEICHEN Zeile auflösen (`export UDD="$TMPDIR/x"; rm -rf "$UDD"`).
+  const vars = new Map<string, string>();
+  for (const m of command.matchAll(/(?:^|[\s;&|])(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=("([^"]*)"|'([^']*)'|[^\s;&|]+)/g)) {
+    vars.set(m[1], m[3] ?? m[4] ?? m[2]);
+  }
+  const expand = (s: string): string => {
+    let out = s;
+    for (let i = 0; i < 3; i++) {
+      const next = out.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (whole, name: string) => {
+        if (name === "TMPDIR") return "/private/tmp/";
+        const v = vars.get(name);
+        return v === undefined ? whole : v;
+      });
+      if (next === out) break;
+      out = next;
+    }
+    return out;
+  };
+  const isLocal = (raw: string): boolean => {
+    const t = expand(raw.replace(/^['"]|['"]$/g, ""));
+    if (!t || t === "/" || t.includes("$")) return false; // leer oder unauflösbar → nicht sicher
+    if (t.startsWith("~")) return false;
+    if (t.split("/").includes("..")) return false;
+    if (!t.startsWith("/")) return true; // relativ ohne „..“ → innerhalb des cwd
+    if (TMP_ROOTS.some((r) => t.startsWith(r))) return true;
+    if (cwd && (t === cwd || t.startsWith(cwd.endsWith("/") ? cwd : cwd + "/"))) return true;
+    return false;
+  };
+  let sawDelete = false;
+  for (const toks of rawCommandTokens(command)) {
+    // Führende Zuweisungen/Keywords überspringen, damit `sudo rm …` nicht als Kopf „sudo" durchrutscht
+    // (sudo wird ohnehin separat gegated) und `FOO=1 rm x` korrekt erkannt wird.
+    let h = 0;
+    while (h < toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[h])) h++;
+    if (h >= toks.length) continue;
+    const base = (toks[h].split("/").pop() ?? toks[h]).toLowerCase();
+    if (!/^(rm|rmdir|shred|unlink)$/.test(base)) continue;
+    sawDelete = true;
+    const targets = toks.slice(h + 1).filter((t) => !t.startsWith("-"));
+    if (targets.length === 0) return false;
+    if (!targets.every(isLocal)) return false;
+  }
+  return sawDelete;
+}
+
+export function classifyBashCommand(command: string, ctx: { cwd?: string } = {}): AutoDecision {
   const cmd = command.trim();
   if (!cmd) return ASK("leerer Befehl");
 
@@ -450,11 +764,23 @@ export function classifyBashCommand(command: string): AutoDecision {
   // das ist der klassische Klassifizierer-Bypass, der SONST die ganze DANGER-/Secret-Liste entschärft
   // (`rm${IFS}-rf`, `cat${IFS}.env`, `${IFS}printenv`, auch die Modifier-Form `${IFS%??}gh`) — die
   // Shell splittet dort trotzdem in echte Tokens. `[^}]*` deckt Modifier wie `%??`/`:0:1` ab.
+  // PRÄZISION: Argument-TEXT, der nie ausgeführt wird (echo-Ausgaben, Commit-Messages, Such-Muster),
+  // vorher entfernen — sonst meldet `echo "=== defaults ==="` eine macOS-Systemfunktion und
+  // `git commit -m "fix port"` einen Paketmanager. stripInertArguments ist bewusst eng und gibt im
+  // Zweifel das Original zurück; die Neutralisierung darunter bleibt unverändert.
+  const scanned = stripInertArguments(cmd);
   const ifs = /\$\{IFS[^}]*\}|\$IFS\b/g;
-  const neutralized = cmd.replace(/['"`]/g, " ").replace(ifs, " ");
-  const collapsed = cmd.replace(/[\\'"`]/g, "").replace(ifs, " ");
+  const neutralized = scanned.replace(/['"`]/g, " ").replace(ifs, " ");
+  const collapsed = scanned.replace(/[\\'"`]/g, "").replace(ifs, " ");
 
-  for (const d of DANGER) if (d.re.test(neutralized) || d.re.test(collapsed)) return ASK(d.why, d.kind);
+  for (const d of DANGER) {
+    if (!d.re.test(neutralized) && !d.re.test(collapsed)) continue;
+    // Löschen AUSSCHLIESSLICH im eigenen Arbeitsbaum/Temp ist der Alltag jedes Agenten (eigene
+    // Wegwerf-Dateien aufräumen) und wird von der OS-Sandbox ohnehin auf genau diesen Bereich
+    // begrenzt → keine Rückfrage. Jedes andere Ziel (absolut außerhalb, ~, .., unauflösbar) fragt.
+    if (d.id === "rm" && deletesOnlyLocally(cmd, ctx.cwd)) continue;
+    return ASK(d.why, d.kind);
+  }
 
   const net = outwardNetworkRisk(neutralized) ?? outwardNetworkRisk(collapsed);
   if (net) return ASK(net, "network");
@@ -483,14 +809,18 @@ export function classifyBashCommand(command: string): AutoDecision {
   return ALLOW; // lokale Ausführung — im Trusted-Local-Dev-Modus erlaubt
 }
 
-// Für SCHREIB-Zugriffe (Edit/Write): innerhalb des Worktrees ok, ausserhalb bzw. auf geschützte
+// Für SCHREIB-Zugriffe (Edit/Write): innerhalb des Worktrees oder Temp ok, sonst bzw. auf geschützte
 // Pfade → fragen. Trusted-Local-Dev lockert das Lesen (siehe sensitivePath), NICHT das Schreiben.
+// Die Temp-Ausnahme (TMP_ROOTS) gilt für Bash-Schreibzugriffe (unsafeWriteRedirect,
+// writesOutsideProject, deletesOnlyLocally) bereits — Write/Edit auf denselben Temp-Pfad fragte
+// bislang trotzdem, reine Inkonsistenz zwischen den beiden Gates auf identisches Ziel.
 function pathUnsafe(p: string | undefined, cwd?: string): string | null {
   if (typeof p !== "string" || !p) return "kein Pfad angegeben";
   if (/(^|\/)\.(git|ssh|aws|gnupg)(\/|$)/.test(p)) return "geschützter Ordner";
   if (/(^|\/)(\.env(\.|$)|\.npmrc$|\.mcp\.json$|\.netrc$|id_rsa)/.test(p)) return "geschützte Datei";
   if (p.startsWith("/")) {
     if (cwd && (p === cwd || p.startsWith(cwd.endsWith("/") ? cwd : cwd + "/"))) return null;
+    if (TMP_ROOTS.some((r) => p.startsWith(r))) return null;
     return "Pfad außerhalb des Arbeitsverzeichnisses";
   }
   if (p.split("/").includes("..")) return "Pfad verlässt das Arbeitsverzeichnis (..)";
@@ -636,6 +966,8 @@ export function classifyToolCall(
     cwd?: string;
     isFetchHostApproved?: (host: string) => boolean;
     isKindApproved?: (kind: CommandKind) => boolean;
+    /** Der Nutzer hat GENAU dieses Tool per „Immer erlauben" freigegeben (pro Tool-Name). */
+    isToolApproved?: (toolName: string) => boolean;
   } = {},
 ): AutoDecision {
   if (toolName === "AskUserQuestion") return ASK("Rückfrage des Agenten");
@@ -656,7 +988,8 @@ export function classifyToolCall(
 
   if (toolName === "Bash") {
     const c = (input?.command ?? "") as string;
-    const d = classifyBashCommand(c);
+    // cwd durchreichen: erlaubt die Unterscheidung „löscht im eigenen Worktree" vs. „irgendwo".
+    const d = classifyBashCommand(c, { cwd: ctx.cwd });
     // Projektweit per „Immer erlauben" gemerkte Kategorie → still erlauben. `danger` (rm/sudo/dd/…)
     // ist NIE merkbar und fragt weiterhin. Kombi-Befehle: klassifiziert wird der ERSTE Treffer, und
     // die DANGER-Prüfung läuft zuerst → ein destruktiver Teil bleibt trotz erlaubtem network/pkg gegated.
@@ -698,6 +1031,28 @@ export function classifyToolCall(
     return ALLOW;
   }
 
-  // Drittanbieter-MCP-Tools, Task, Unbekanntes → fragen.
-  return ASK(`Tool „${toolName}“ nicht als auto-sicher eingestuft`);
+  // Orchestrierungs-/Meta-Tools: erlauben. Sie führen SELBST nichts aus — sie starten Sub-Agenten,
+  // planen Arbeit oder holen Zwischenstände ab. Jeder TATSÄCHLICHE Zugriff eines Sub-Agenten (Bash,
+  // Edit, WebFetch …) läuft weiterhin EINZELN durch dieses canUseTool — die Freigabe hier öffnet also
+  // keinen ungeprüften Pfad, sie erspart nur den Dialog für den Delegations-Akt selbst.
+  // Grund: der Catch-all fragte bei JEDEM `Workflow` (21 von 22 Aufrufen) und bei jedem Abholen eines
+  // Hintergrund-Ergebnisses — das bremste genau die Parallelarbeit aus, die mads schnell machen soll.
+  // BEWUSST NICHT hier: `ExitPlanMode` (könnte sich selbst Freigaben schreiben), `Skill` und
+  // Drittanbieter-MCP-Tools (fremder Code/fremde Instruktionen) — die fragen weiter.
+  if (META_TOOLS.has(toolName)) return ALLOW;
+
+  // Doku-Nachschlagen (context7 &co.): still — außer die Anfrage trägt ein mögliches Secret nach
+  // außen. Gleiche Logik wie bei WebFetch, wo `findSecrets(url)` den Exfil-Kanal schließt.
+  if (DOC_LOOKUP_TOOLS.has(toolName)) {
+    const hits = findSecrets(JSON.stringify(input ?? {}));
+    return hits.length
+      ? ASK(`Doku-Abfrage enthält ein mögliches Secret (${hits[0].kind}) — Exfiltration verhindern`)
+      : ALLOW;
+  }
+
+  // Drittanbieter-MCP-Tools, Unbekanntes → fragen. Kategorie `tool`, damit „Immer erlauben"
+  // überhaupt etwas bewirken KANN (der Merk-Pfad war bisher auf Bash beschränkt → der Knopf war
+  // bei MCP-Tools wirkungslos und dieselbe Rückfrage kam endlos wieder).
+  if (ctx.isToolApproved?.(toolName)) return ALLOW;
+  return ASK(`Tool „${toolName}“ nicht als auto-sicher eingestuft`, "tool");
 }

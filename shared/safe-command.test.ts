@@ -5,7 +5,7 @@
  * Gefragt wird NUR bei echtem Risiko: Netz nach AUSSEN, Paketmanager/Installer, git-outward/PR,
  * sudo/destruktiv/System, Secrets-Zugriff, Schreiben ausserhalb von Projekt/Temp.
  */
-import { classifyBashCommand, classifyToolCall, isDeployCommand, isGitCommit, registrableDomain } from "./safe-command";
+import { classifyBashCommand, classifyToolCall, isDeployCommand, isGitCommit, isRememberableKind, registrableDomain, REMEMBERABLE_KINDS, COMMAND_KIND_LABELS } from "./safe-command";
 
 const results: string[] = [];
 let failed = 0;
@@ -116,14 +116,15 @@ check(
 // ============================================================================
 
 // ---- destruktiv / System ----
-check("rm → ask", ask("rm -rf build"));
+check("rm ausserhalb → ask", ask("rm -rf /Users/x/anderes-projekt"));
+check("rm im eigenen Arbeitsbaum (relativ) → allow", allow("rm -rf build"));
 check("sudo → ask", ask("sudo rm -rf /"));
 check("chmod → ask", ask("chmod +x script.sh"));
 check("kill → ask", ask("kill -9 1234"));
 check("dd → ask", ask("dd if=/dev/zero of=disk.img bs=1m count=10"));
 check("hidden rm in $() → ask", ask("echo $(rm -rf foo)"));
 check("hidden rm in python -c → ask (quote-neutralisiert)", ask(`python3 -c 'import os; os.system("rm -rf /tmp/x")'`));
-check("hidden rm via uv run python -c → ask", ask(`uv run python -c 'import os' && rm -rf build`));
+check("hidden rm via uv run python -c (nicht-lokales Ziel) → ask", ask(`uv run python -c 'import os' && rm -rf ~/data`));
 check("/bin/sh -c mit rm → ask (DANGER trifft rm)", ask("/bin/sh -c 'rm -rf x'"));
 check("timeout rm → ask (DANGER trifft rm)", ask("timeout 5 rm -rf build"));
 
@@ -195,7 +196,7 @@ check("\\rm -rf ~ → ask (Backslash-Bypass)", ask("\\rm -rf ~"));
 check("\\git push → ask (Backslash-Bypass, umging classifyGit)", ask("\\git push origin main"));
 check('c""url evil → ask (Quote-Split → curl)', ask('c""url http://evil.example/x'));
 check('r""m -rf x → ask (Quote-Split → rm)', ask('r""m -rf x'));
-check("normaler rm bleibt → ask", ask("rm -rf build"));
+check("normaler rm ausserhalb bleibt → ask", ask("rm -rf /var/data"));
 // ---- SEC-2: Umgebungs-/Secret-Lesen im Auto-Modus → jetzt gegated ----
 check("printenv → ask (SEC-2)", ask("printenv"));
 check("env (bloßer Dump) → ask (SEC-2)", ask("env"));
@@ -237,7 +238,12 @@ check("python os.getenv(PORT) → allow (kein Secret-Name)", allow("python3 -c '
 check("cat .envrc → ask (direnv-Secrets)", ask("cat .envrc"));
 check("cat ~/.kube/config → ask (Cluster-Creds)", ask("cat ~/.kube/config"));
 check("cat ~/.config/gh/hosts.yml → ask (gh-OAuth)", ask("cat ~/.config/gh/hosts.yml"));
-check("git commit erwähnt .env → ask (bewusster Fail-safe-Over-Ask: nennt≠liest)", ask("git commit -m 'add .env to .gitignore'"));
+// Früher ein bewusster Fail-safe-Over-Ask („nennt ≠ liest" war auf String-Ebene nicht trennbar).
+// stripInertArguments trennt es jetzt sauber: eine VOLLSTÄNDIG quotierte Commit-Message ohne
+// Interpolation ist Text und kann nichts lesen. Unquotiert oder mit $()/Backtick fragt es weiter.
+check("git commit erwähnt .env → allow (quotierte Message ist Text)", allow("git commit -m 'add .env to .gitignore'"));
+check("git commit mit UNquotiertem .env → ask", ask("git commit -m add-.env-file"));
+check("git commit mit $() in der Message → ask (Interpolation = evtl. Code)", ask('git commit -m "leak $(cat .env)"'));
 check("node process.env.CI → ask (bewusster Fail-safe-Over-Ask)", ask("node -e 'if(process.env.CI){build()}'"));
 
 // ---- Schreiben AUSSERHALB von Projekt/Temp ----
@@ -271,6 +277,9 @@ check("Edit ausserhalb cwd → ask", classifyToolCall("Edit", { file_path: "/etc
 check("Write .env → ask", classifyToolCall("Write", { file_path: "/repo/.env" }, { cwd: "/repo" }).decision === "ask");
 check("Edit .git → ask", classifyToolCall("Edit", { file_path: "/repo/.git/config" }, { cwd: "/repo" }).decision === "ask");
 check("Write .. escape → ask", classifyToolCall("Write", { file_path: "../outside.ts" }, { cwd: "/repo" }).decision === "ask");
+check("Write nach /tmp → allow (Temp, konsistent zu Bash)", classifyToolCall("Write", { file_path: "/tmp/x/y.cs" }, { cwd: "/repo" }).decision === "allow");
+check("Edit in /private/var/folders → allow (Temp)", classifyToolCall("Edit", { file_path: "/private/var/folders/ab/x.txt" }, { cwd: "/repo" }).decision === "allow");
+check("Write /tmpXYZ (kein Temp-Präfix) → ask", classifyToolCall("Write", { file_path: "/tmpXYZ/y.cs" }, { cwd: "/repo" }).decision === "ask");
 
 check("WebFetch bekannter Host → allow", classifyToolCall("WebFetch", { url: "https://docs.rs/foo" }).decision === "allow");
 check("WebFetch github → allow", classifyToolCall("WebFetch", { url: "https://raw.githubusercontent.com/a/b/main/x" }).decision === "allow");
@@ -319,7 +328,9 @@ check("WebFetch freigegeben, aber SSRF → weiterhin ask", classifyToolCall("Web
 check("registrableDomain www.sec.gov = sec.gov", registrableDomain("www.sec.gov") === "sec.gov");
 check("registrableDomain a.b.co.uk = b.co.uk", registrableDomain("a.b.co.uk") === "b.co.uk");
 
-check("Task → ask", classifyToolCall("Task", {}).decision === "ask");
+// Task/Agent = Delegation, kein Zugriff → allow (siehe META_TOOLS; die Aufrufe des Sub-Agenten
+// werden weiterhin einzeln geprüft). Früher „ask" — das bremste die Parallelarbeit aus.
+check("Task/Agent → allow (Delegation, kein eigener Zugriff)", classifyToolCall("Task", {}).decision === "allow");
 check("Drittanbieter-mcp → ask", classifyToolCall("mcp__foo__bar", {}).decision === "ask");
 check(
   "mads spawn_substreams → ask",
@@ -348,9 +359,9 @@ check("ask liefert reason", typeof classifyBashCommand("git push").reason === "s
 const kind = (c: string) => classifyBashCommand(c).kind;
 check("curl → kind network", kind("curl https://app.ardexa.com/api/v1") === "network");
 check("docker compose → kind pkg", kind("docker compose -f x.yml up -d") === "pkg");
-check("rm -rf → kind danger", kind("rm -rf build") === "danger");
+check("rm -rf ausserhalb → kind danger", kind("rm -rf ~/data") === "danger");
 check("cat .env → kind secret", kind("cat .env") === "secret");
-check("git push → kind git", kind("git push origin main") === "git");
+check("git push → kind outward (frueher merkbar als git; siehe Invariante 4)", kind("git push origin main") === "outward");
 
 // ---- classifyToolCall: gemerkte Kategorie erlaubt still; danger ist NIE merkbar ----
 const bash = (c: string, approved: string[] = []) =>
@@ -359,9 +370,28 @@ check("network gemerkt → curl allow", bash("curl https://x.com/api", ["network
 check("network NICHT gemerkt → curl ask", bash("curl https://x.com/api", []) === "ask");
 check("pkg gemerkt → docker allow", bash("docker compose up", ["pkg"]) === "allow");
 check("secret gemerkt → cat .env allow", bash("cat .env", ["secret"]) === "allow");
-check("danger gemerkt → rm bleibt ask (nie merkbar)", bash("rm -rf x", ["danger"]) === "ask");
-check("rm mit erlaubtem network+danger → weiterhin ask", bash("rm -rf x", ["network", "danger"]) === "ask");
+check("danger gemerkt → rm bleibt ask (nie merkbar)", bash("rm -rf ~/x", ["danger"]) === "ask");
+check("rm mit erlaubtem network+danger → weiterhin ask", bash("rm -rf ~/x", ["network", "danger"]) === "ask");
 check("ohne isKindApproved-Callback → curl ask (Default sicher)", classifyToolCall("Bash", { command: "curl https://x.com" }, {}).decision === "ask");
+
+// ---- DATENVERLUST-SCHUTZ: arbeitsvernichtende git-Subcommands sind NIE merkbar ----
+// Regression: sie lagen in derselben merkbaren Kategorie "git" wie fetch/push — ein einziges
+// „Immer erlauben (git)" autorisierte damit still `git reset --hard origin/main`. So ging in einem
+// echten Stream Arbeit verloren. Trotz freigegebenem "git" MÜSSEN sie weiterhin fragen.
+check("git reset --hard fragt trotz freigegebenem git", bash("git reset --hard origin/main", ["git"]) === "ask");
+check("git clean -fd fragt trotz freigegebenem git", bash("git clean -fd", ["git"]) === "ask");
+check("git restore fragt trotz freigegebenem git", bash("git restore .", ["git"]) === "ask");
+check("git checkout --force fragt trotz freigegebenem git", bash("git checkout --force main", ["git"]) === "ask");
+check("git branch -D fragt trotz freigegebenem git", bash("git branch -D feature", ["git"]) === "ask");
+check("git stash drop fragt trotz freigegebenem git", bash("git stash drop", ["git"]) === "ask");
+check("auch mit -C fragt reset --hard", bash("git -C /repo reset --hard origin/main", ["git"]) === "ask");
+check("reset ist kind=danger (nie merkbar)", classifyBashCommand("git reset --hard origin/main").kind === "danger");
+// Außenwirkung ist NICHT merkbar: „Immer erlauben (git)" darf push NICHT mitfreischalten — genau
+// dieses Bündeln war das Loch in Invariante 1/4. Herein-holendes git bleibt merkbar.
+check("git push fragt TROTZ freigegebenem git (outward ≠ git)", bash("git push origin main", ["git"]) === "ask");
+check("auch mit freigegebenem outward-Versuch: nicht persistierbar", !REMEMBERABLE_KINDS.includes("outward"));
+check("git fetch bleibt merkbar → allow bei freigegebenem git", bash("git fetch origin", ["git"]) === "allow");
+check("git push ohne Freigabe → ask", bash("git push origin main", []) === "ask");
 
 // ---- isDeployCommand: Deploy/Publish erkennen, Alltag NICHT fälschlich ----
 check("deploy-test.sh → deploy", isDeployCommand("./deploy-test.sh"));
@@ -386,6 +416,104 @@ check("docker build ist KEIN deploy", !isDeployCommand("docker build -t app ."))
 check("docker compose up ist KEIN deploy", !isDeployCommand("docker compose up -d"));
 check("npm publish --dry-run ist KEIN deploy (Probelauf)", !isDeployCommand("npm publish --dry-run"));
 check("Skript in deploy/-Ordner ist KEIN deploy (Basename zählt)", !isDeployCommand("./deploy/build.sh"));
+
+// --- rm im eigenen Arbeitsbaum/Temp: kein Alarm (OS-Sandbox begrenzt ohnehin) ----------------
+const WT = "/Users/x/mads-worktrees/Boba/abc-123";
+const bashIn = (c: string) => classifyBashCommand(c, { cwd: WT }).decision;
+check("rm eigener Wegwerf-Dateien (relativ) → allow", bashIn("rm -f client/__probe.mjs client/__probe2.mjs && git status --short") === "allow");
+check("rm mit absolutem Pfad IM Worktree → allow", bashIn(`rm -f ${WT}/client/__repro.html ${WT}/client/__repro.ts`) === "allow");
+check("rm -rf $TMPDIR-Variable (gleiche Zeile zugewiesen) → allow", bashIn('export UDD="$TMPDIR/chrome-repro"; rm -rf "$UDD"; mkdir -p "$UDD"') === "allow");
+check("rm in /tmp → allow", bashIn("rm -rf /tmp/build-cache") === "allow");
+// GEGENPROBEN — alles außerhalb bleibt eine Rückfrage:
+check("rm ausserhalb des Worktrees → ask", bashIn("rm -rf /Users/x/coding/Boba/src") === "ask");
+check("rm im HOME (~) → ask", bashIn("rm -rf ~/Documents") === "ask");
+check("rm mit .. → ask", bashIn("rm -rf ../../andere-streams") === "ask");
+check("rm mit unauflösbarer Variable → ask", bashIn('rm -rf "$SOMEWHERE"') === "ask");
+check("rm ohne Ziel → ask", bashIn("rm -rf") === "ask");
+check("rm / → ask", bashIn("rm -rf /") === "ask");
+check("rm fremder Worktree (absolut) → ask", bashIn("rm -rf /Users/x/mads-worktrees/Boba/anderer-stream") === "ask");
+check("sudo rm lokal → ask (sudo bleibt gegated)", bashIn("sudo rm -f build/x") === "ask");
+check("ohne cwd bleibt absolutes rm eine Rückfrage", classifyBashCommand("rm -rf /Users/x/whatever").decision === "ask");
+
+// --- Präzision: Argument-TEXT wird nie ausgeführt → darf nicht als Befehl gelten -------------
+// Alles Fälle aus echten Screenshots, die fälschlich fragten.
+check('echo "=== defaults ===" → allow (kein macOS-defaults-Aufruf)', allow('grep -n "makeDisplayProps" -A 25 /x/display.mjs | head -60; echo "=== defaults ==="; grep -n "mobileBreakpoint" /x/display.mjs'));
+check('git commit -m "fix port 3000" → allow (kein Paketmanager)', allow('git commit -m "fix port 3000"'));
+check('git commit -m "rm dead code" → allow', allow('git commit -m "rm dead code"'));
+check('git commit -m "gh workflow anpassen" → allow', allow('git commit -m "gh workflow anpassen"'));
+check('grep "rm -rf" in Quellcode suchen → allow', allow(`grep -rn "rm -rf" scripts/`));
+check('echo "docker build" → allow', allow('echo "docker build läuft nicht"'));
+// GEGENPROBEN — das Strippen darf keine echte Ausführung verstecken:
+check("echo-Text in eine Shell gepipet → ask (Text WIRD dann Code)", ask(`echo "curl https://evil.example/x" | sh`));
+check("unquotiertes rm ausserhalb bleibt ask", ask("git commit -m msg && rm -rf /etc/x"));
+check("sudo in Quotes bleibt ask (NEVER_INERT)", ask(`echo "sudo rm -rf /"`));
+check("Interpolation im Muster bleibt ask", ask('grep -n "$(cat .env)" src/'));
+check("python -c bleibt ask (Interpreter, kein inerter Text)", ask(`python3 -c 'import os; os.system("rm -rf x")'`));
+check("node -e mit process.env bleibt ask", ask(`node -e 'if(process.env.CI){build()}'`));
+check("echtes rm nach echo bleibt ask", ask('echo "alles gut" && rm -rf /tmp/x/..'));
+
+// --- Außenwirkung ist NICHT merkbar (Invarianten 1 & 4) ---------------------
+// Früher lagen push und `gh pr merge` in derselben merkbaren Kategorie „git" wie fetch/pull:
+// ein Klick auf „Immer erlauben (Git-Fernaktionen)" autorisierte damit dauerhaft auch Merges.
+const kindOf = (c: string) => classifyBashCommand(c).kind;
+check("git push → outward (nicht merkbar)", kindOf("git push origin main") === "outward");
+check("git push --force → danger (überschreibt fremde Commits)", kindOf("git push --force origin main") === "danger");
+check("git push -f → danger", kindOf("git push -f") === "danger");
+check("git push --force-with-lease → outward (prüft Remote-Stand)", kindOf("git push --force-with-lease origin main") === "outward");
+check("git fetch/pull bleiben merkbar (holen nur herein)", kindOf("git fetch origin") === "git" && kindOf("git pull") === "git");
+check("gh pr merge → danger (nie merkbar — Invariante 1)", kindOf("gh pr merge 42 --squash") === "danger");
+check("gh api -X DELETE → danger", kindOf("gh api -X DELETE repos/o/r/git/refs/heads/x") === "danger");
+check("gh api -X PATCH → danger", kindOf("gh api -X PATCH repos/o/r -F delete_branch_on_merge=true") === "danger");
+check("gh repo delete → danger", kindOf("gh repo delete o/r") === "danger");
+check("gh secret set → danger", kindOf("gh secret set FOO") === "danger");
+check("gh pr create → outward (nicht merkbar)", kindOf("gh pr create --title x --body y") === "outward");
+check("gh pr list → git (lesend, merkbar)", kindOf("gh pr list") === "git");
+check("gh api (ohne -X, lesend) → git", kindOf("gh api repos/o/r") === "git");
+check("outward ist NICHT in REMEMBERABLE_KINDS", !REMEMBERABLE_KINDS.includes("outward"));
+check("danger ist NICHT in REMEMBERABLE_KINDS", !REMEMBERABLE_KINDS.includes("danger"));
+check("outward hat ein Label (Dialog zeigt sonst undefined)", typeof COMMAND_KIND_LABELS.outward === "string" && COMMAND_KIND_LABELS.outward.length > 0);
+// Quote-Verstecken darf die Einstufung nicht entschärfen (Scan läuft quote-neutralisiert).
+check("versteckter Merge in Code-String bleibt danger", kindOf(`python3 -c "import os; os.system('gh pr merge 42')"`) === "danger");
+check("versteckter Force-Push bleibt danger", kindOf(`bash -c "git push --force"`) === "danger");
+
+// --- Orchestrierungs-/Meta-Tools: erlaubt (die INNEREN Aufrufe werden weiterhin einzeln geprüft) ---
+check("Agent (Subagent starten) → allow", classifyToolCall("Agent", { description: "x" }).decision === "allow");
+check("Task (Legacy-Alias) → allow", classifyToolCall("Task", { description: "x" }).decision === "allow");
+check("Workflow → allow (Ultracode-Orchestrierung nicht ausbremsen)", classifyToolCall("Workflow", { script: "x" }).decision === "allow");
+check("ToolSearch → allow", classifyToolCall("ToolSearch", { query: "x" }).decision === "allow");
+check("TaskOutput/BashOutput (Hintergrund-Ergebnis abholen) → allow", classifyToolCall("TaskOutput", {}).decision === "allow" && classifyToolCall("BashOutput", {}).decision === "allow");
+check("TaskCreate/TaskUpdate → allow", classifyToolCall("TaskCreate", {}).decision === "allow" && classifyToolCall("TaskUpdate", {}).decision === "allow");
+// Gegenprobe: die riskanten bleiben gegated.
+check("ExitPlanMode bleibt ask (könnte sich Freigaben selbst schreiben)", classifyToolCall("ExitPlanMode", {}).decision === "ask");
+check("Skill bleibt ask", classifyToolCall("Skill", { skill: "x" }).decision === "ask");
+// --- Doku-Nachschlagen (context7): still, aber mit Exfil-Schutz ---
+check(
+  "context7 query-docs → allow (reines Nachschlagen)",
+  classifyToolCall("mcp__context7__query-docs", { libraryId: "/websites/vuetifyjs_en", query: "v-tabs API props stacked" }).decision === "allow",
+);
+check(
+  "context7 resolve-library-id → allow",
+  classifyToolCall("mcp__context7__resolve-library-id", { libraryName: "Vuetify", query: "VDataTable custom headers" }).decision === "allow",
+);
+check(
+  "context7 mit Secret im Query → ask (Exfiltration verhindern)",
+  classifyToolCall("mcp__context7__query-docs", { query: "warum lehnt sk-ant-api03-AA00bbCC11ddEE22ffGG33hhII44jjKK55llMM66nnOO77ppQQ88rr-bbccddee ab?" }).decision === "ask",
+);
+// Unbekannte MCP-Tools bleiben gegated — aber jetzt merkbar (Kategorie „tool", pro Tool-NAME).
+check("unbekanntes MCP bleibt ask", classifyToolCall("mcp__foo__bar", {}).decision === "ask");
+check("unbekanntes MCP hat kind=tool (Immer-erlauben wirkt jetzt)", classifyToolCall("mcp__foo__bar", {}).kind === "tool");
+check(
+  "freigegebenes Tool läuft still",
+  classifyToolCall("mcp__foo__bar", {}, { isToolApproved: (t) => t === "mcp__foo__bar" }).decision === "allow",
+);
+check(
+  "Freigabe gilt NUR für dieses Tool (kein Blanko für alle)",
+  classifyToolCall("mcp__evil__exfil", {}, { isToolApproved: (t) => t === "mcp__foo__bar" }).decision === "ask",
+);
+check("kind 'tool' ist merkbar, 'outward' nicht", isRememberableKind("tool") && !isRememberableKind("outward") && !isRememberableKind("danger"));
+check("spawn_substreams bleibt ask (echte Streams/Worktrees)", classifyToolCall("mcp__mads__spawn_substreams", {}).decision === "ask");
+check("unbekanntes Tool bleibt ask", classifyToolCall("SomeNewTool", {}).decision === "ask");
+check("Bash bleibt gegated (Meta-Liste öffnet Bash NICHT)", classifyToolCall("Bash", { command: "sudo rm -rf /" }).decision === "ask");
 
 for (const r of results) console.log(r);
 console.log(`\n${results.length - failed} passed, ${failed} failed`);

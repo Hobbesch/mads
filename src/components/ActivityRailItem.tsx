@@ -27,14 +27,22 @@ export function ActivityRailItem({
   const hasCountBadge = badge !== undefined && badge !== "dot";
 
   // aria-label: Badge eingebettet, damit VoiceOver es auch kollabiert ansagt (§8).
+  const BADGE_NOUN: Record<string, string> = { streams: "Eskalationen", changes: "Kollisionen", panic: "Streams in Konflikt" };
   const labelWithBadge = hasCountBadge
-    ? `${item.label} (${badge} ${item.id === "streams" ? "Eskalationen" : "Kollisionen"})`
+    ? `${item.label} (${badge} ${BADGE_NOUN[item.id] ?? "Hinweise"})`
     : item.label;
+  // `tooltip` gewinnt und greift IMMER — auch ausgeklappt. Für Einträge wie „Don't Panic", deren
+  // Label bewusst nicht beschreibt, was passiert. Im eingeklappten Zustand wird der Name
+  // vorangestellt, weil dort nur das Icon zu sehen ist.
   const title = disabled
     ? "Erst ein Projekt öffnen"
-    : collapsed
-      ? labelWithBadge + (item.shortcut ? ` · ${item.shortcut}` : "")
-      : undefined;
+    : item.tooltip
+      ? collapsed
+        ? `${labelWithBadge}\n\n${item.tooltip}`
+        : item.tooltip
+      : collapsed
+        ? labelWithBadge + (item.shortcut ? ` · ${item.shortcut}` : "")
+        : undefined;
 
   return (
     <button
@@ -49,7 +57,9 @@ export function ActivityRailItem({
       <span className="rail-icon" aria-hidden="true">
         <Icon size={18} strokeWidth={1.75} />
         {badge !== undefined && (
-          <span className={`rail-badge${badge === "dot" ? " dot" : ""}${item.id === "streams" ? " red" : ""}`}>
+          <span
+            className={`rail-badge${badge === "dot" ? " dot" : ""}${item.id === "streams" || item.id === "panic" ? " red" : ""}`}
+          >
             {badgeText}
           </span>
         )}

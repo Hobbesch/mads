@@ -37,6 +37,23 @@ export type EffortMode = "low" | "medium" | "high" | "xhigh" | "ultracode";
 export interface ImageInput {
   mediaType: string; // z.B. "image/png"
   dataBase64: string;
+  /** Kleines Anzeige-Thumbnail, das das FRONTEND beim Anhängen per Canvas erzeugt. Es reist INLINE im
+   *  user_text-Event mit, damit Mac UND Remote das echte Bild sehen. Das VOLLBILD geht bewusst NICHT
+   *  durch Timeline-Ringpuffer/Snapshot-Replay/Bridge (ein Screenshot sind schnell mehrere MB) —
+   *  es landet auf Platte und wird nur bei Bedarf (Klick) lokal geladen. Das SDK ignoriert diese
+   *  Felder (userMsg liest nur mediaType/dataBase64). */
+  thumbBase64?: string;
+  thumbMediaType?: string; // z.B. "image/jpeg"
+}
+
+/** Ein angehängtes Bild, wie es in der Timeline erscheint: kleines Inline-Thumbnail (überall anzeigbar)
+ *  + Pfad zum Vollbild auf Platte (nur lokal am Mac ladbar; fehlt ohne Projekt/Worktree). */
+export interface TimelineAttachment {
+  id: string;
+  mediaType: string;
+  thumbBase64?: string;
+  thumbMediaType?: string;
+  path?: string;
 }
 
 export interface BaseMsg {
@@ -57,6 +74,8 @@ export type HostMessage =
   | InterruptAgentMsg
   | SetPermissionModeMsg
   | StopAgentMsg
+  | PanicResolveMsg
+  | PanicReleaseMsg
   | CreatePrMsg
   | SyncBranchMsg
   | GateTaskMsg
@@ -71,9 +90,19 @@ export type HostMessage =
   | UpdateMainMsg
   | StartDevServerMsg
   | StopDevServerMsg
+  | ConfigureDevServerMsg
+  | OpenReviewStreamMsg
+  | MergeReviewMsg
+  | CloseReviewMsg
   | HandoffExportMsg
   | HandoffImportMsg
+  | PromptSaveMsg
+  | PromptDeleteMsg
   | RequestSnapshotMsg
+  | SetAccountMsg
+  | RequestAccountsMsg
+  | SetSandboxModeMsg
+  | TargetsSaveMsg
   | ShutdownMsg;
 
 /**
@@ -89,6 +118,168 @@ export interface StartDevServerMsg extends BaseMsg {
 export interface StopDevServerMsg extends BaseMsg {
   type: "stop_devserver";
   agentId: string;
+}
+/** „Dev-Server konfigurieren": stellt `.mads/run.json` sicher (erzeugt/aktualisiert die Vorlage aus
+ *  erkannten Services) und liefert per `devserver_config` den Pfad, den das Frontend im Editor öffnet. */
+export interface ConfigureDevServerMsg extends BaseMsg {
+  type: "configure_devserver";
+  agentId: string;
+}
+
+// ─── Review-Streams: eingehende (fremde) PRs read-only prüfen ────────────────
+/** Ein eingehender PR (nicht von mads erstellt) — Kandidat für einen Review-Stream. */
+export interface IncomingPr {
+  number: number;
+  title: string;
+  author: string;
+  headRefName: string;
+  url: string;
+  isFork: boolean;
+  isDraft: boolean;
+}
+/** „Eingehende PRs" — Liste fremder offener PRs (Bots gefiltert), die mads zum Review anbietet. */
+export interface IncomingPrsMsg extends BaseMsg {
+  type: "incoming_prs";
+  prs: IncomingPr[];
+}
+/** Einen eingehenden PR als READ-ONLY Review-Stream öffnen (isolierter Worktree auf dem PR-Stand,
+ *  keine KI-Session, Autopilot AUS — mads pusht NIE auf den fremden Branch). */
+export interface OpenReviewStreamMsg extends BaseMsg {
+  type: "open_review_stream";
+  prNumber: number;
+  headRefName: string;
+  title: string;
+  author: string;
+  url: string;
+}
+/** Den Review-PR über den Standard-Merge-Weg annehmen (`gh pr merge <#> --squash`) + Stream schließen. */
+export interface MergeReviewMsg extends BaseMsg {
+  type: "merge_review";
+  agentId: string;
+}
+/** Review-Stream verwerfen (ohne Merge): Worktree entfernen, Kachel schließen. Der fremde PR bleibt. */
+export interface CloseReviewMsg extends BaseMsg {
+  type: "close_review";
+  agentId: string;
+}
+/** Host→Client: ein gerade geöffneter Review-Stream (passive Kachel) — Descriptor zum Anlegen. */
+export interface ReviewStreamMsg extends BaseMsg {
+  type: "review_stream";
+  agentId: string;
+  label: string;
+  branch: string;
+  worktreePath: string;
+  reviewPr: number;
+  author: string;
+  url: string;
+}
+
+/**
+ * Standard-Modell — SINGLE SOURCE für Frontend UND Sidecar. Der Sidecar coerciert JEDE fehlende
+ * Modell-Angabe hierauf, BEVOR er den Agent-SDK aufruft: gibt man dem SDK `model: undefined`, wählt
+ * er still sein Flaggschiff (Fable 5) — das verbrennt teure Tokens „blind", ohne dass die UI es zeigt
+ * (der Picker spiegelt den WUNSCH, nicht das Ist). Deshalb nie undefined an den SDK. Siehe ModelActiveMsg.
+ */
+export const DEFAULT_MODEL = "claude-opus-5";
+
+/**
+ * Doppel-Check gegen „blindes Fahren auf dem falschen Modell": Der Sidecar liest aus JEDER
+ * Assistant-/Init-Nachricht das TATSÄCHLICH gelaufene Modell und meldet es hier. `mismatch=true`
+ * heißt: der SDK lief auf einem anderen Modell als angefordert (z. B. Fable statt Opus) — der Sidecar
+ * hat dann aktiv `setModel(requested)` nachgezogen. Die UI zeigt `active` (nicht mehr nur den Wunsch)
+ * und warnt bei mismatch, damit unerwartete Kosten sofort sichtbar werden.
+ */
+export interface ModelActiveMsg extends BaseMsg {
+  type: "model_active";
+  agentId: string;
+  active: string; // real vom SDK gemeldetes Modell
+  requested?: string; // was mads angefordert hatte
+  mismatch: boolean;
+}
+
+// ─── Prompt-Verwaltung ────────────────────────────────────────────────────────
+// Kuratierte, wiederverwendbare Anweisungen (z. B. Deploy-Rezepte) je Projekt.
+// Persistenz: `<repoRoot>/.mads/prompts.json`. Sicherheits-Eigenschaften by design:
+// (1) Ein Prompt wird beim Auswählen NUR in den Composer eingefügt (Review vor Senden,
+//     nie Auto-Send). (2) `role` bindet ihn an die Stream-Rolle — Deploy-Prompts z. B.
+//     erscheinen nur beim Integrator, nie bei Subs. (3) Platzhalter sind `{{name}}`-Tokens
+//     im Text; die UI fragt sie beim Einfügen ab (kein Skript-Aufruf ohne explizite Werte).
+export interface SavedPrompt {
+  id: string; // stabiler Slug oder uuid
+  title: string;
+  /** Kurzbeschreibung fürs Auswahlmenü (z. B. Vorbedingungen, Versions-Hinweis). */
+  description?: string;
+  /** An welche Stream-Rolle der Prompt gebunden ist. "any" = überall wählbar. */
+  role: "integrator" | "sub" | "any";
+  /** Der Anweisungstext; `{{name}}`-Tokens werden beim Einfügen abgefragt. */
+  text: string;
+  updatedAt: number;
+}
+
+// ---- Sandbox-Betriebsart & Untersuchungsziele (Stufe A/B der Untersuchungs-Freigabe) ----
+/**
+ * Sandbox-Betriebsart eines SUB-Streams. Der Bedarf: ein Sub muss gelegentlich auf Test-/Prod-
+ * Servern UNTERSUCHEN, die Sandbox sperrt aber Egress + Secrets. Statt eines binären Aus-Schalters
+ * zwei abgestufte Freigaben (der Integrator läuft ohnehin ohne Sandbox — für ihn irrelevant):
+ *
+ *  - `"on"` (Default): volle Sandbox — Schreiben nur im Worktree, Egress nur Paketquellen.
+ *  - `"targets"` (Stufe A): Sandbox BLEIBT AN (Dateisystem + Secrets geschützt), zusätzlich sind
+ *    die projektweiten Untersuchungsziele (`.mads/targets.json`) im Egress erlaubt. Deckt
+ *    HTTPS-Untersuchungen (APIs, Health, Logs) ohne echten Schutzverlust ab.
+ *  - `"off"` (Stufe B, „Freigang"): Sandbox aus — für SSH/psql-Untersuchungen. Geländer:
+ *    nur der MENSCH schaltet (UI; Agenten können keine Protokoll-Nachrichten senden), der Zustand
+ *    ist sichtbar (Badge), wird NIE persistiert (Resume startet sandboxed), der Autopilot pusht/
+ *    PRt währenddessen nicht automatisch, und nach 15 Min. Inaktivität schaltet der Sidecar
+ *    selbst zurück auf "on" (Drift-Schutz: „temporär aus" darf nicht „vergessen aus" werden).
+ *
+ * Umschalten = Prozess-Neustart mit `resumeSessionId` (Muster wie Kontowechsel) — Kontext bleibt.
+ */
+export type SandboxMode = "on" | "targets" | "off";
+
+/** Externes Untersuchungsziel des Projekts (Host für die Egress-Allowlist bei `"targets"`). */
+export interface InvestigationTarget {
+  /** Domain/Host, Wildcards wie im SDK-Schema (z. B. "api.test.example.ch", "*.example.ch"). */
+  host: string;
+  label?: string;
+  /** Prod-Ziel → deutlichere Bestätigung im UI beim Freischalten. */
+  prod?: boolean;
+}
+
+/** Sandbox-Betriebsart eines Sub-Streams umschalten (nur menschliche UI-Aktion). Mit Session:
+ *  Neustart+Resume im selben Gespräch; ganz neuer Stream ohne Session: frischer Neustart
+ *  (kein Verlauf zu verlieren). Beim ERSTELLEN wählt man die Betriebsart direkt im
+ *  New-Stream-Dialog (StartAgentMsg.sandboxMode) — dann ist gar kein Umschalten nötig. */
+export interface SetSandboxModeMsg extends BaseMsg {
+  type: "set_sandbox_mode";
+  agentId: string;
+  mode: SandboxMode;
+}
+
+/** Untersuchungsziele des Projekts komplett ersetzen (Editor in den Einstellungen). */
+export interface TargetsSaveMsg extends BaseMsg {
+  type: "targets_save";
+  targets: InvestigationTarget[];
+}
+
+/** Vollständige Ziel-Liste des Projekts (bei open_project und nach jeder Änderung). */
+export interface TargetsUpdateMsg extends BaseMsg {
+  type: "targets_update";
+  targets: InvestigationTarget[];
+}
+
+/** Prompt anlegen/ändern (Upsert per id). */
+export interface PromptSaveMsg extends BaseMsg {
+  type: "prompt_save";
+  prompt: SavedPrompt;
+}
+export interface PromptDeleteMsg extends BaseMsg {
+  type: "prompt_delete";
+  id: string;
+}
+/** Vollständige Prompt-Liste des Projekts (bei open_project und nach jeder Änderung). */
+export interface PromptsUpdateMsg extends BaseMsg {
+  type: "prompts_update";
+  prompts: SavedPrompt[];
 }
 
 export interface ProjectInfo {
@@ -118,6 +309,10 @@ export interface StartAgentMsg extends BaseMsg {
   type: "start_agent";
   agentId: string;
   prompt: string;
+  /** Screenshots/Bilder zum initialen Prompt (New-Stream-Dialog) — wie SendInputMsg.images. */
+  images?: ImageInput[];
+  /** Claude-Konto für diesen Stream (Profil-ID). Fehlt = aktives Konto der Registry. */
+  accountId?: string;
   cwd?: string; // explizit; sonst wird aus repoRoot+branch ein Worktree erzeugt
   repoRoot?: string; // P3: Worktree aus diesem Repo anlegen
   branch?: string; // P3: feat/<task> für den Worktree
@@ -138,6 +333,21 @@ export interface StartAgentMsg extends BaseMsg {
   mock?: boolean;
   /** Autopilot-Stufe (Default „assisted"). */
   autopilot?: AutopilotLevel;
+  /** OS-Sandbox für Agenten-Bash (macOS/Seatbelt, SDK-nativ). Default: AN (undefined = an).
+   *  `false` schaltet sie für diesen Stream ab — Notfall/Debug, wenn eine Toolchain am Sandkasten
+   *  scheitert. Global geht das auch per Env `MADS_SANDBOX=off`. Siehe sidecar/src/sandbox.ts. */
+  sandbox?: boolean;
+  /** Sandbox-Betriebsart (Untersuchungs-Freigabe, siehe SandboxMode). Präziser als `sandbox` und
+   *  gewinnt gegen es. Wird NIE persistiert — ein Resume startet immer wieder mit "on". */
+  sandboxMode?: SandboxMode;
+  /** Nur für `sandboxMode: "targets"`: zusätzliche Egress-Hosts. Wird vom ORCHESTRATOR aus
+   *  `.mads/targets.json` gesetzt (Single Source of Truth auf Platte) — Client-Angaben hier
+   *  werden überschrieben, damit kein (Remote-)Client beliebige Domains freischalten kann. */
+  investigationDomains?: string[];
+  /** true = automatische „Setze die Arbeit fort"-Anweisung beim Resume (kein echter Nutzer-Auftrag).
+   *  Der Sidecar überschreibt damit NICHT den zuletzt gemerkten Auftrag (`lastPrompt`) — die Kachel
+   *  zeigt weiter den echten Auftrag, den der Mensch abgesetzt hat. */
+  continuation?: boolean;
 }
 
 export interface CreatePrMsg extends BaseMsg {
@@ -287,6 +497,34 @@ export interface StopAgentMsg extends BaseMsg {
 }
 
 /**
+ * „Don't Panic": übergreifende Konfliktlösung. Die erste bewusst GLOBALE Aktion (kein `agentId`) —
+ * genau das ist der Punkt.
+ *
+ * WARUM global: Der frühere per-Stream-Knopf („Konflikt lösen") schickte nur einen Prompt in den
+ * betroffenen Sub-Stream. Der läuft aber laut sandbox.ts eingesperrt in seinem eigenen Worktree —
+ * `git merge-tree` zwischen zwei Branches, ein Hunk-Vergleich oder die Frage „welcher Branch
+ * sollte zuerst gemergt werden" sind ihm damit prinzipiell unmöglich. Er rebaset blind, während
+ * die anderen Streams weiterarbeiten und die Lage erneut verschieben.
+ *
+ * Stattdessen: alle Sub-Streams anhalten (nichts verändert sich mehr), Autopilot einfrieren, und
+ * den INTEGRATOR beauftragen — der einzige Stream ohne Sandbox, mit Sicht auf alle Worktrees, und
+ * per Invariante 1 ohnehin der Einzige, der mergen darf. Er bekommt das Playbook
+ * (sidecar/playbooks/conflict-resolution.md) plus einen Lagebericht über alle Streams.
+ */
+export interface PanicResolveMsg extends BaseMsg {
+  type: "panic_resolve";
+}
+
+/**
+ * Gegenstück zu `panic_resolve`: gibt die angehaltenen Sub-Streams wieder frei und stellt ihren
+ * gemerkten Autopilot-Level wieder her. Bewusst ein eigener, menschlicher Schritt — nach einer
+ * Konfliktlösung hat sich die Basis geändert, und kein Stream soll unbemerkt darauf weiterlaufen.
+ */
+export interface PanicReleaseMsg extends BaseMsg {
+  type: "panic_release";
+}
+
+/**
  * Verwalteten Zustand bereinigen: Worktree + lokalen Branch eines erledigten
  * (gemergten) Streams entfernen und aus der Resume-Registry nehmen. Wird vom
  * Frontend für „gemergt, aber lokale Reste"-Streams nach Nutzer-Bestätigung
@@ -314,6 +552,13 @@ export interface CleanupWorktreeMsg extends BaseMsg {
 export interface UpdateMainMsg extends BaseMsg {
   type: "update_main";
   agentId: string;
+  /** true: lokale, nicht gepushte ahead-Commits VERWERFEN und main hart auf origin/<base> setzen
+   *  (mit automatischem Backup-Branch). Für den Fall, dass main lokal voraus ist (z. B. Release-/
+   *  Versions-Bump-Commits), den ein fast-forward nicht auflösen kann. Ohne Flag: nur fast-forward. */
+  hard?: boolean;
+  /** true: lokale ahead-Commits BEHALTEN und nach origin/<base> PUSHEN (Fast-Forward, kein force) —
+   *  die sichere Alternative zu `hard`, wenn die Commits echt sind (z. B. Release-Version-Bumps). */
+  push?: boolean;
 }
 
 export interface ShutdownMsg extends BaseMsg {
@@ -343,12 +588,22 @@ export type SidecarMessage =
   | ResumableAgentsMsg
   | ReconcileSummaryMsg
   | CollisionWarningMsg
+  | PanicStateMsg
   | SpawnSubstreamsRequestMsg
   | DevServerStatusMsg
+  | DevServerConfigMsg
+  | IncomingPrsMsg
+  | ReviewStreamMsg
   | DevServerLogMsg
   | ProjectLockedMsg
   | SidecarErrorMsg
-  | HandoffResultMsg;
+  | HandoffResultMsg
+  | PromptsUpdateMsg
+  | AccountsUpdateMsg
+  | AccountUsageMsg
+  | RateLimitNoticeMsg
+  | ModelActiveMsg
+  | TargetsUpdateMsg;
 
 /**
  * Öffnen abgelehnt: dieses Projekt ist bereits in einer ANDEREN, laufenden mads-Instanz offen
@@ -365,19 +620,57 @@ export interface ProjectLockedMsg extends BaseMsg {
 /** Ein einzelner Service des Stream-Dev-Servers (aus `.mads/run.json`), für die Statusanzeige. */
 export interface DevServerService {
   name: string;
+  /** BEWIESEN bereit (Ready-Marker erkannt oder Port antwortet) — nicht bloß „Prozess läuft". */
   ready: boolean;
   url?: string;
+  /** Prozess lebt. Trennt „startet noch" (alive && !ready) von „abgestürzt" (!alive) — ohne das
+   *  sähen beide Zustände in der UI gleich aus. */
+  alive?: boolean;
+  /** Bereitschaft nur ANGENOMMEN (kein Ready-Marker, kein prüfbarer Port) → UI zeigt gelb statt grün. */
+  assumed?: boolean;
+  /** Nicht erreichbare Abhängigkeit (z. B. „:5433") — der Dienst lauscht, kann aber nicht arbeiten. */
+  depMissing?: string;
+}
+/** Externe Abhängigkeit eines Dienstes (Datenbank, Cache …) — eigener Indikator in der UI. */
+export interface DevServerDependency {
+  name: string;
+  /** host:port — was geprüft wurde. */
+  target: string;
+  ok: boolean;
 }
 /** Zustand des Stream-Dev-Servers (treibt Button/Badge/„im Browser öffnen"-Link im Frontend). */
 export interface DevServerStatusMsg extends BaseMsg {
   type: "devserver_status";
   agentId: string;
-  state: "installing" | "starting" | "running" | "stopped" | "error";
+  // „unconfigured": kein lauffähiges .mads/run.json (fehlt/leer/nicht erkannt) → Frontend bietet
+  // „Konfigurieren" an, statt einen toten Fehler zu zeigen.
+  state: "installing" | "starting" | "running" | "stopped" | "error" | "unconfigured";
   services?: DevServerService[];
+  /** Geprüfte externe Abhängigkeiten (aus `requires` in run.json). Eigene Indikatoren, weil ein
+   *  Dienst OHNE seine Datenbank zwar lauscht, aber nichts kann — das sah vorher grün aus. */
+  dependencies?: DevServerDependency[];
   /** primäre URL zum Öffnen im Browser (i. d. R. das Frontend), sobald bereit. */
   url?: string;
   /** menschenlesbarer Hinweis (Fehlergrund / „Vorlage erzeugt" o. Ä.). */
   message?: string;
+  /**
+   * TEILWEISE gestartet: mindestens ein konfigurierter Service ist tot, andere laufen weiter
+   * (Survivor-Modus). `state` bleibt dabei bewusst „running" — sonst würde ein toter Backend-Dienst
+   * das ansehbare Frontend als „Fehler" darstellen. Ohne dieses Flag sah die UI aber schlicht GRÜN
+   * aus, obwohl genau der Dienst fehlte, den der Nutzer öffnen wollte (er landete auf einem
+   * API-Endpunkt mit 404 und suchte den Fehler im eigenen Code). Die UI zeigt damit „teilweise".
+   */
+  degraded?: boolean;
+  /** Namen der konfigurierten, aber nicht (mehr) laufenden Services — für die Anzeige. */
+  deadServices?: string[];
+}
+/** Antwort auf `configure_devserver`: Pfad der (sichergestellten) `.mads/run.json`, die der Client
+ *  im Editor öffnet. `detected` = Anzahl automatisch erkannter Services in der frischen Vorlage. */
+export interface DevServerConfigMsg extends BaseMsg {
+  type: "devserver_config";
+  agentId: string;
+  path: string;
+  detected: number;
 }
 /** Eine Ausgabezeile eines Dev-Server-Services (Live-Log im Inspector). */
 export interface DevServerLogMsg extends BaseMsg {
@@ -394,6 +687,11 @@ export interface SidecarReadyMsg extends BaseMsg {
   sdkVersion: string;
   sdkAvailable: boolean;
   resumableAgents: Array<{ agentId: string; sessionId: string; branch?: string }>;
+  /** Kurzer Git-Commit, mit dem dist/index.js gebaut wurde (sidecar/scripts/build.mjs stempelt ihn ein). */
+  buildCommit: string;
+  /** true, wenn buildCommit vom aktuellen Repo-HEAD abweicht — der laufende Sidecar ist älter als main
+   *  (z. B. Fix gemergt, aber `npm run sidecar:build` + Neustart vergessen). */
+  buildStale: boolean;
 }
 
 export type AgentEvent =
@@ -402,8 +700,11 @@ export type AgentEvent =
   | { kind: "thinking"; text: string }
   // Vom Menschen eingegebene Anweisung (Prompt). Der Sidecar emittiert sie als Event, damit sie
   // auf ALLEN Clients (Mac + Remote) im Verlauf erscheint — nicht nur dort, wo sie getippt wurde.
-  | { kind: "user_text"; text: string; images?: number }
-  | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown> }
+  | { kind: "user_text"; text: string; attachments?: TimelineAttachment[]; continuation?: boolean }
+  // parentToolUseId: gesetzt, wenn dieser tool_use aus einem SUB-AGENTEN (Task/Agent-Tool) stammt —
+  // dann ist es die tool_use_id des Task-Aufrufs, der ihn startete. Erlaubt dem Frontend, die Aktivität
+  // dem richtigen Teil-Agenten zuzuordnen (Hintergrund-Agenten-Übersicht). null/fehlt = Hauptloop.
+  | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown>; parentToolUseId?: string }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; summary?: string; output?: string }
   | { kind: "system"; subtype: string; data?: Record<string, unknown> };
 
@@ -494,6 +795,16 @@ export interface StatusUpdateMsg extends BaseMsg {
   /** Menschlicher Stream-Name + Rolle — für Remote-Clients (iOS zeigt sonst nur die UUID). */
   label?: string;
   role?: "integrator" | "sub";
+  /**
+   * Claude-Konto, unter dem dieser Stream WIRKLICH läuft (Profil-ID). Der Sidecar startet den
+   * Prozess und besitzt damit die Wahrheit — die Oberfläche spiegelt sie nur. Ohne diese
+   * Bestätigung konnte eine Kachel dauerhaft ein anderes Konto anzeigen als das laufende
+   * (`CLAUDE_CONFIG_DIR` steht nach dem Spawn fest), ohne dass es je auffiel.
+   */
+  accountId?: string;
+  /** Sandbox-Betriebsart, in der dieser Stream WIRKLICH läuft (der Sidecar hat den Prozess mit
+   *  genau diesen Sandbox-Optionen gestartet — die Oberfläche spiegelt nur). */
+  sandboxMode?: SandboxMode;
 }
 
 export interface CostUpdateMsg extends BaseMsg {
@@ -615,10 +926,133 @@ export interface ResumableAgent {
   merged?: boolean;
   /** Worktree hat ungespeicherte oder ungepushte lokale Reste → nicht still löschen. */
   localChanges?: boolean;
+  /** Gesetzt = persistierter READ-ONLY Review-Stream (fremder PR). Beim Start wird daraus die
+   *  Review-Kachel wiederhergestellt (nicht als normaler Resume-Kandidat behandelt). */
+  reviewPr?: number;
+  reviewAuthor?: string;
+  reviewUrl?: string;
+  /** PR gemergt/geschlossen UND Worktree sauber, keine ungemergte Arbeit (ahead 0): wird zwar noch als
+   *  fortsetzbar angeboten (bleibt im Grid), aber der zugehörige Auftrag ist ERLEDIGT → die Kachel zeigt
+   *  ihn nach dem Neustart NICHT mehr (in-Session verbirgt ihn isMergedDone bereits — hier fehlt nur der
+   *  pr-Kontext, den wir bewusst nicht ins passive VM heben, um die Grid-Platzierung nicht zu ändern). */
+  mergedClean?: boolean;
+  /** Claude-Konto (Profil-ID aus der Account-Registry), unter dem dieser Stream läuft. Muss den
+   *  Neustart überleben: die Claude-Session liegt im `projects/`-Verzeichnis GENAU DIESES Profils —
+   *  ein Resume unter dem falschen Konto fände sie nicht und würde still frisch starten. */
+  accountId?: string;
 }
 export interface ResumableAgentsMsg extends BaseMsg {
   type: "resumable_agents";
   agents: ResumableAgent[];
+}
+
+// ---- Mehrere Claude-Konten (Failover bei erschöpftem Kontingent) ----
+/**
+ * Ein Claude-Konto, ausgewählt über `CLAUDE_CONFIG_DIR` beim Start des Agent-Prozesses.
+ * mads speichert KEINE Zugangsdaten — die liegen im macOS-Schlüsselbund, den Claude Code
+ * selbst pro Config-Verzeichnis verwaltet. Hier steht nur, WELCHES Verzeichnis gilt.
+ */
+export interface AccountProfile {
+  /** Stabile ID, wird pro Agent persistiert (`ResumableAgent.accountId`). */
+  id: string;
+  /** Anzeigename in der Oberfläche. */
+  label: string;
+  /** Absoluter Pfad des Config-Verzeichnisses (z. B. `/Users/x/.claude`). */
+  configDir: string;
+  /** Nur informativ (aus `<configDir>/.claude.json` gelesen), nie zum Anmelden benutzt. */
+  email?: string;
+}
+
+/**
+ * Kontingent-Zustand eines Kontos. Gefüttert aus dem `rate_limit_event` des Agent-SDK —
+ * also aus MASCHINENLESBAREN Feldern, nicht aus geparster Fließtext-Fehlermeldung.
+ */
+export interface AccountCooldown {
+  /** Millisekunden-Zeitstempel, ab dem das Kontingent wieder verfügbar ist. */
+  until: number;
+  /** Welches Fenster erschöpft ist — vom SDK gemeldet (z. B. "five_hour", "seven_day"). */
+  window?: string;
+  /** true = bereits abgewiesen; false = nur Vorwarnung (`allowed_warning`), läuft noch. */
+  rejected: boolean;
+  /** Auslastung 0..1, sofern gemeldet. */
+  utilization?: number;
+}
+
+export interface AccountsState {
+  profiles: AccountProfile[];
+  /** Konto für neue Streams (Vorauswahl im Dialog). */
+  activeId: string;
+  /** Cooldowns je Profil-ID; fehlender Eintrag = verfügbar. */
+  cooldowns: Record<string, AccountCooldown>;
+}
+
+/** Ein Kontingent-Fenster (5 Stunden, Woche, …) wie es die Plan-Nutzungslimits ausweisen. */
+export interface UsageWindow {
+  /** Auslastung in PROZENT (0–100), so wie die Usage-API sie liefert. */
+  utilization?: number;
+  /** Zeitpunkt der Zurücksetzung (ms seit Epoche). */
+  resetsAt?: number;
+}
+
+/**
+ * Sidecar → Host: Plan-Nutzungslimits eines Kontos, abgefragt über die Usage-API des SDK.
+ * Anders als `rate_limit_notice` (reagiert nur auf Ereignisse) liefert das ALLE Fenster auf einmal
+ * und auf Abruf — damit lässt sich das Limit kommen sehen, statt es erst beim Anschlag zu merken.
+ */
+export interface AccountUsageMsg extends BaseMsg {
+  type: "account_usage";
+  accountId: string;
+  /** 5-Stunden-Fenster. */
+  fiveHour?: UsageWindow;
+  /** Wochenfenster über alle Modelle. */
+  sevenDay?: UsageWindow;
+  /** Wochenfenster für die teuersten Modelle (separat limitiert). */
+  sevenDayOpus?: UsageWindow;
+  /** Abo-Art ("max", "pro", …) — rein informativ. */
+  subscription?: string;
+}
+
+/** Sidecar → Host: vollständiger Account-Zustand (Registry + Cooldowns). Ersetzt lokal alles. */
+export interface AccountsUpdateMsg extends BaseMsg {
+  type: "accounts_update";
+  accounts: AccountsState;
+}
+
+/**
+ * Sidecar → Host: Kontingent-Meldung zu einem Stream. Rein informativ — mads wechselt das Konto
+ * NICHT von selbst (bewusste Entscheidung: der Wechsel bleibt eine menschliche Aktion), sondern
+ * zeigt den Hinweis samt Reset-Zeitpunkt und bietet den Umschalter an.
+ */
+export interface RateLimitNoticeMsg extends BaseMsg {
+  type: "rate_limit_notice";
+  agentId: string;
+  accountId: string;
+  /** Vom SDK gemeldeter Stand. "allowed" = reine Verbrauchsanzeige, keine Meldung im Verlauf. */
+  status: "allowed" | "allowed_warning" | "rejected";
+  /** true = Anfrage wurde abgewiesen (Limit erreicht); false = läuft noch. */
+  rejected: boolean;
+  resetsAt?: number;
+  window?: string;
+  /** Auslastung 0..1 des genannten Fensters — Grundlage der laufenden Verbrauchsanzeige. */
+  utilization?: number;
+  /** ID eines verfügbaren Ausweich-Kontos, falls vorhanden → die UI kann den Wechsel anbieten. */
+  suggestId?: string;
+}
+
+/**
+ * Host → Sidecar: Konto dieses Streams wechseln. Der laufende Claude-Prozess wird dafür beendet
+ * und im Ziel-Konto per `--resume` derselben Session neu gestartet (die Umgebung eines Prozesses
+ * ist nach dem Start nicht mehr änderbar). Ohne `agentId`: nur das Default-Konto für neue Streams.
+ */
+export interface SetAccountMsg extends BaseMsg {
+  type: "set_account";
+  accountId: string;
+  agentId?: string;
+}
+
+/** Host → Sidecar: Account-Zustand neu senden (beim Start / nach Reconnect). */
+export interface RequestAccountsMsg extends BaseMsg {
+  type: "request_accounts";
 }
 
 /** Ergebnis eines Handoff-Export/-Imports → treibt einen dismissbaren Hinweis-Banner im Frontend. */
@@ -657,12 +1091,39 @@ export interface ReconcileSummaryMsg extends BaseMsg {
    * (> 0), wenn die Liste gerade generiert wurde UND ≥ 1 Datei erkannt wurde. Rein informativ.
    */
   seedGenerated?: number;
+  /**
+   * Cross-Machine-Reparatur: Streams, deren Worktree-Pfad unter einem FREMDEN Home eingebacken war
+   * (Repo zwischen zwei Macs kopiert), wurden auf den lokalen Kanon-Pfad umgezogen und der Worktree
+   * aus dem bestehenden Branch neu ausgecheckt — Labels der umgezogenen Streams. Früher fielen diese
+   * Subs beim Öffnen still aus dem Grid; jetzt sind sie zurück + der Nutzer sieht, dass es passiert ist.
+   */
+  relocated?: string[];
 }
 
 /** Laufzeit-Kollisionen zwischen aktiven Agenten (leeres Array = aufgeräumt). */
 export interface CollisionWarningMsg extends BaseMsg {
   type: "collision_warning";
   collisions: Collision[];
+}
+
+/**
+ * Panic-Zustand (Gegenstück zu `panic_resolve`/`panic_release`). Solange `active`, sind die
+ * genannten Sub-Streams angehalten und ihr Autopilot steht auf `manual`; das Frontend zeigt
+ * dann statt des Panic-Knopfs die Freigabe.
+ *
+ * GRENZE: nur Laufzeit-Zustand des Sidecars — ein Neustart verliert ihn. Die Streams bleiben dann
+ * korrekt auf `manual` (das ist in agents.json persistiert, es geht also nichts verloren und
+ * niemand läuft unbemerkt los), aber die Sammel-Freigabe fehlt; die Level werden dann einzeln im
+ * Inspector zurückgestellt. Bewusst so belassen, statt ein zweites Persistenz-Schema einzuführen —
+ * der Panic-Lauf dauert Minuten, ein Sidecar-Neustart genau darin ist der seltene Fall.
+ */
+export interface PanicStateMsg extends BaseMsg {
+  type: "panic_state";
+  active: boolean;
+  /** Sub-Streams, die durch den Panic angehalten wurden (leer, wenn nicht aktiv). */
+  stoppedAgentIds: string[];
+  /** agentId des Integrators, der die Auflösung übernommen hat. */
+  resolverAgentId?: string;
 }
 
 /** Agent-Tool (Integrator) bittet das Frontend, N Sub-Streams zu starten. */
@@ -686,6 +1147,7 @@ export type EscalationKind =
   | "secret_detected" // Secret im zu pushenden Diff (LEAK-1: Push fail-closed blockiert)
   | "main_edited" // Integrator hat main direkt geändert → in Sub-Stream auslagern (proaktiver Hinweis)
   | "main_deploy_dirty" // main-Dirt stammt aus einem gerade gelaufenen Deploy → „Als Release committen" anbieten
+  | "foreign_edit" // Worktree änderte sich, während der Agent ruhte → Autopilot committet nicht blind mit
   | "max_budget";
 
 export interface SidecarErrorMsg extends BaseMsg {

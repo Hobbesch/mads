@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useStore } from "../store";
 import { toolDescription, toolCommand } from "../toolText";
 import type { AskQuestion, PermissionRequestMsg } from "../../shared/protocol";
-import { COMMAND_KIND_LABELS } from "../../shared/safe-command";
+import { COMMAND_KIND_LABELS, isRememberableKind } from "../../shared/safe-command";
 
 // Sentinel für die „Etwas anderes…"-Option (Freitext statt einer angebotenen Option).
 const CUSTOM = "__custom__";
@@ -33,7 +33,10 @@ function ToolApproval({ req }: { req: PermissionRequestMsg }) {
           // bisher — für ein Tool mit Claude-Code-Regel-Vorschlägen (z. B. WebFetch-Domain). Das
           // destruktive `danger` (rm/sudo/dd/…) ist NIE merkbar → kein Knopf.
           const ck = req.commandKind;
-          const kindRemember = ck && ck !== "danger";
+          // NUR wirklich merkbare Kategorien anbieten. Früher stand hier `ck !== "danger"` — damit
+          // hätte der Knopf auch für `outward` (Push/PR/Merge) erschienen und eine Freigabe
+          // versprochen, die es bewusst nicht gibt.
+          const kindRemember = isRememberableKind(ck);
           const suggestRemember = !!req.suggestions && req.suggestions.length > 0;
           if (!kindRemember && !suggestRemember) return null;
           const label = kindRemember ? `Immer erlauben (${COMMAND_KIND_LABELS[ck!]})` : "Immer erlauben";
@@ -60,18 +63,34 @@ function QuestionForm({ req }: { req: PermissionRequestMsg }) {
   const requestParallel = useStore((s) => s.requestParallelAssessment);
   const agent = useStore((s) => s.agents[req.agentId]);
   const project = useStore((s) => s.project);
-  const [picks, setPicks] = useState<Record<string, string>>({});
+  // Gewählte Labels je Frage (Array): Einfachauswahl = 0/1 Element, Mehrfachauswahl (q.multiSelect) = beliebig viele.
+  const [picks, setPicks] = useState<Record<string, string[]>>({});
   const [customText, setCustomText] = useState<Record<string, string>>({});
   const questions = req.questions ?? [];
   const optionCount = questions.reduce((n, q) => n + (q.options?.length ?? 0), 0);
   const canParallel = !!project && agent?.role === "integrator" && optionCount >= 2;
 
-  // Effektive Antwort je Frage: bei „Etwas anderes…" der getippte Freitext, sonst das Label.
-  const effective = (q: AskQuestion) =>
-    picks[q.question] === CUSTOM ? (customText[q.question] ?? "").trim() : picks[q.question];
+  const isChosen = (q: AskQuestion, label: string) => (picks[q.question] ?? []).includes(label);
+  // Auswahl togglen: bei Mehrfachauswahl echte Optionen an-/abwählen (Freitext „Etwas anderes…" bleibt
+  // exklusiv → beim Wählen einer echten Option verdrängt); sonst (Einfachauswahl bzw. Freitext) exklusiv ersetzen.
+  const toggle = (q: AskQuestion, label: string) =>
+    setPicks((p) => {
+      const cur = p[q.question] ?? [];
+      if (q.multiSelect && label !== CUSTOM) {
+        const next = cur.includes(label) ? cur.filter((x) => x !== label) : [...cur.filter((x) => x !== CUSTOM), label];
+        return { ...p, [q.question]: next };
+      }
+      return { ...p, [q.question]: [label] };
+    });
+  // Effektive Antwort je Frage: „Etwas anderes…" → Freitext; Mehrfachauswahl → Labels zusammengefügt; sonst das eine Label.
+  const effective = (q: AskQuestion) => {
+    const sel = picks[q.question] ?? [];
+    return sel.includes(CUSTOM) ? (customText[q.question] ?? "").trim() : sel.join("; ");
+  };
   const allAnswered = questions.every((q) => {
-    const p = picks[q.question];
-    return p !== undefined && (p !== CUSTOM || (customText[q.question] ?? "").trim().length > 0);
+    const sel = picks[q.question] ?? [];
+    if (sel.length === 0) return false;
+    return !sel.includes(CUSTOM) || (customText[q.question] ?? "").trim().length > 0;
   });
 
   const submit = () => {
@@ -85,30 +104,32 @@ function QuestionForm({ req }: { req: PermissionRequestMsg }) {
       <div className="perm-scroll">
         {questions.map((q, i) => (
         <div key={i} className="perm-question">
-          <div className="perm-q">{q.question}</div>
+          <div className="perm-q">
+            {q.question}
+            {q.multiSelect && <span className="perm-q-multi"> · mehrere wählbar</span>}
+          </div>
           <div className="perm-options">
-            {q.options.map((o, j) => {
-              const chosen = picks[q.question] === o.label;
-              return (
-                <button
-                  key={j}
-                  className={`perm-opt${chosen ? " chosen" : ""}`}
-                  onClick={() => setPicks((p) => ({ ...p, [q.question]: o.label }))}
-                >
-                  <span className="opt-label">{o.label}</span>
-                  <span className="opt-desc">{o.description}</span>
-                </button>
-              );
-            })}
-            {/* „Etwas anderes…": eigene Antwort/Anweisung, falls keine Option passt. */}
+            {q.options.map((o, j) => (
+              <button
+                key={j}
+                className={`perm-opt${isChosen(q, o.label) ? " chosen" : ""}`}
+                aria-pressed={isChosen(q, o.label)}
+                onClick={() => toggle(q, o.label)}
+              >
+                <span className="opt-label">{o.label}</span>
+                <span className="opt-desc">{o.description}</span>
+              </button>
+            ))}
+            {/* „Etwas anderes…": eigene Antwort/Anweisung, falls keine Option passt (immer exklusiv). */}
             <button
-              className={`perm-opt perm-opt-custom${picks[q.question] === CUSTOM ? " chosen" : ""}`}
-              onClick={() => setPicks((p) => ({ ...p, [q.question]: CUSTOM }))}
+              className={`perm-opt perm-opt-custom${isChosen(q, CUSTOM) ? " chosen" : ""}`}
+              aria-pressed={isChosen(q, CUSTOM)}
+              onClick={() => toggle(q, CUSTOM)}
             >
               <span className="opt-label">Etwas anderes…</span>
               <span className="opt-desc">Eigene Antwort/Anweisung eingeben statt einer der Optionen.</span>
             </button>
-            {picks[q.question] === CUSTOM && (
+            {isChosen(q, CUSTOM) && (
               <textarea
                 className="perm-custom"
                 autoFocus
