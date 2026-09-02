@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use rand::rngs::OsRng;
-use rand::{Rng, RngCore};
+use rand::{Rng, RngCore, TryRngCore};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -75,7 +75,7 @@ impl AuthState {
 
     /// Einen 6-stelligen PIN ausgeben (überschreibt einen evtl. offenen), 60 s gültig, ≤5 Versuche.
     pub fn issue_pin(&self) -> String {
-        let pin = format!("{:06}", OsRng.gen_range(0u32..1_000_000));
+        let pin = format!("{:06}", OsRng.unwrap_err().random_range(0u32..1_000_000));
         *self.pin.lock().unwrap() = Some(PendingPin {
             pin: pin.clone(),
             expires_at: SystemTime::now() + PIN_TTL,
@@ -192,7 +192,7 @@ impl AuthState {
 
 fn hash_secret(secret: &str) -> Result<String, String> {
     let mut salt_bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut salt_bytes);
+    OsRng.unwrap_err().fill_bytes(&mut salt_bytes);
     let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| e.to_string())?;
     Ok(Argon2::default()
         .hash_password(secret.as_bytes(), &salt)
@@ -202,7 +202,7 @@ fn hash_secret(secret: &str) -> Result<String, String> {
 
 fn hex_rand(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    OsRng.fill_bytes(&mut buf);
+    OsRng.unwrap_err().fill_bytes(&mut buf);
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes * 2);
     for b in buf {
