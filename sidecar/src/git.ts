@@ -188,6 +188,183 @@ export async function relocateWorktree(
   return { ok: true, path: local, recreated: true };
 }
 
+// ─── Cross-Machine: aktive origin-Branches ohne lokalen Worktree übernehmen ───
+//
+// `.mads/agents.json` ist gitignored und damit MASCHINEN-LOKAL, die Branches liegen aber auf origin.
+// Ein Stream, der auf Mac A entsteht, hat auf Mac B deshalb weder Registry-Eintrag noch Worktree —
+// offerResumable kannte bis dahin nur diese beiden Quellen und sah den Branch schlicht nicht. Hier
+// kommt die dritte Quelle dazu: origin selbst.
+
+/**
+ * Herkunft der Branch-Spitze. Nur `own` wird übernommen.
+ *  • `bot`   — Dependabot/Renovate & Co. Deren Branches sind zwar „ungemergt über <default>", aber
+ *              nie ein Stream des Nutzers; ohne diesen Filter legte mads hier 14 Worktrees an.
+ *  • `other` — GitHub ordnet die Spitze nachweislich einem ANDEREN Account zu (Team-Repo).
+ *  • `own`   — eigene Identität ODER nicht auflösbar. Bewusst fail-open: die Commit-Mail eines
+ *              eigenen Rechners ist oft nicht mit dem GitHub-Konto verknüpft (API liefert dann
+ *              `author.login = null`), und `user.email` ist lokal häufig ungesetzt. Ein wörtliches
+ *              „nur exakte Identitätstreffer" verwürfe genau die eigenen Branches. Falsch-positiv
+ *              kostet einen löschbaren Worktree, falsch-negativ kostet den Stream.
+ */
+export type BranchOwner = "own" | "bot" | "other";
+
+/** Branch-Präfixe bekannter Bots — greift auch offline / ohne `gh`. */
+const BOT_BRANCH_RE = /^(dependabot|renovate|snyk-|greenkeeper|imgbot|pre-commit-ci)\b/i;
+
+/** Offline-Bot-Erkennung an Autor + Branch-Name (ohne Netz). `[bot]` ist GitHubs eigene Konvention. */
+export function looksLikeBotAuthor(name: string, email: string, branch: string): boolean {
+  const s = `${name} ${email}`.toLowerCase();
+  return s.includes("[bot]") || BOT_BRANCH_RE.test(branch);
+}
+
+/**
+ * agentId für einen übernommenen Branch — STABIL aus dem Branch-Namen abgeleitet, damit eine
+ * zweite Übernahme desselben Branches denselben Worktree-Pfad trifft (idempotent) statt einen
+ * Zwilling anzulegen. Der Kurz-Hash trennt Namen, die zum selben Slug kollabieren (`a/b_c` vs `a/b-c`).
+ */
+export function agentIdForBranch(branch: string): string {
+  const slug = branch
+    .replace(/^refs\/heads\//, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-+|-+$)/g, "")
+    .slice(0, 40)
+    .replace(/-+$/, "");
+  const h = createHash("sha1").update(branch).digest("hex").slice(0, 8);
+  return `adopted-${slug || "branch"}-${h}`;
+}
+
+/** GitHub-Login des angemeldeten Kontos (für die „fremder Account"-Abgrenzung). null = unbekannt. */
+export async function githubLogin(repoRoot: string): Promise<string | null> {
+  const r = await run("gh", ["api", "user", "--jq", ".login"], repoRoot, 15000);
+  const v = r.stdout.trim();
+  return r.code === 0 && v ? v : null;
+}
+
+/** Spitze eines Remote-Branches einordnen — erst offline, dann (wenn nötig) über GitHubs Auflösung. */
+async function classifyBranchTip(
+  repoRoot: string,
+  branch: string,
+  sha: string,
+  name: string,
+  email: string,
+  myLogin: string | null,
+): Promise<BranchOwner> {
+  if (looksLikeBotAuthor(name, email, branch)) return "bot";
+  // GitHub bildet Commit-Mail → Account ab; nur so sind Bots (type=Bot) und fremde Autoren sicher
+  // erkennbar. Schlägt der Aufruf fehl (offline, kein gh-Login), bleibt es bei der Offline-Heuristik.
+  const r = await run(
+    "gh",
+    ["api", `repos/{owner}/{repo}/commits/${sha}`, "--jq", '[(.author.login // ""), (.author.type // "")] | @tsv'],
+    repoRoot,
+    15000,
+  );
+  if (r.code !== 0) return "own";
+  const [login = "", type = ""] = r.stdout.trim().split("\t");
+  if (type.toLowerCase() === "bot") return "bot";
+  if (login && myLogin && login.toLowerCase() !== myLogin.toLowerCase()) return "other";
+  return "own";
+}
+
+export interface AdoptableBranch {
+  branch: string;
+  agentId: string;
+  /** Commits über origin/<default>. Immer > 0 — sonst steckt der Branch bereits vollständig in <default>. */
+  ahead: number;
+  /** Betreff des Spitzen-Commits — als Stream-Label sprechender als der nackte Branch-Name. */
+  subject: string;
+}
+
+/**
+ * Aktive Branches auf origin finden, die hier keinerlei lokale Spur haben.
+ * `taken` = bereits durch Registry/Worktrees/Pool abgedeckte Branch-Namen (die dürfen NICHT erneut
+ * übernommen werden, sonst entstünde ein zweiter Worktree auf demselben Branch).
+ * Setzt einen frischen `git fetch --prune` voraus (offerResumable macht den ohnehin).
+ */
+export async function discoverAdoptableBranches(
+  repoRoot: string,
+  defaultBranch: string,
+  taken: Set<string>,
+  max = 8,
+): Promise<AdoptableBranch[]> {
+  const listed = await git(
+    ["-C", repoRoot, "for-each-ref", "--format=%(refname:short)%09%(committerdate:unix)", "refs/remotes/origin"],
+    repoRoot,
+  );
+  if (listed.code !== 0) return [];
+  const rows: { branch: string; when: number }[] = [];
+  for (const line of listed.stdout.split("\n")) {
+    const [ref = "", when = "0"] = line.split("\t");
+    if (!ref.startsWith("origin/")) continue;
+    const branch = ref.slice("origin/".length);
+    if (!branch || branch === "HEAD" || branch === defaultBranch) continue;
+    if (branch.startsWith("mads-review/")) continue; // Review-Branch fremder PRs — kein eigener Stream
+    if (taken.has(branch)) continue;
+    rows.push({ branch, when: parseInt(when, 10) || 0 });
+  }
+  if (rows.length === 0) return [];
+  rows.sort((a, b) => b.when - a.when); // jüngste zuerst — am ehesten „die Arbeit von gestern"
+  const myLogin = await githubLogin(repoRoot);
+  const out: AdoptableBranch[] = [];
+  for (const { branch } of rows) {
+    if (out.length >= max) break;
+    const ahead = await run(
+      "git",
+      ["-C", repoRoot, "rev-list", "--count", `origin/${defaultBranch}..origin/${branch}`],
+      repoRoot,
+    );
+    const n = ahead.code === 0 ? parseInt(ahead.stdout.trim() || "0", 10) : 0;
+    if (n <= 0) continue; // vollständig in <default> → erledigt, kein aktiver Stream
+    const tip = await run("git", ["-C", repoRoot, "log", "-1", "--format=%H%x09%an%x09%ae%x09%s", `origin/${branch}`], repoRoot);
+    if (tip.code !== 0) continue;
+    const [sha = "", name = "", email = "", subject = ""] = tip.stdout.trim().split("\t");
+    const owner = await classifyBranchTip(repoRoot, branch, sha, name, email, myLogin);
+    if (owner !== "own") {
+      log(`[git] adopt: ${branch} übersprungen (${owner === "bot" ? "Bot-Autor" : "fremder GitHub-Account"})`);
+      continue;
+    }
+    out.push({ branch, agentId: agentIdForBranch(branch), ahead: n, subject });
+  }
+  return out;
+}
+
+/**
+ * Einen origin-Branch als lokalen Worktree auschecken. Legt den lokalen Branch mit Tracking auf
+ * origin/<branch> an (nur falls er lokal noch fehlt) — NIE mit `-b` auf einen bestehenden Branch,
+ * das schlüge fehl. Wie createWorktree: `.mads/` sofort git-unsichtbar + lokale Dev-Config seeden,
+ * damit der Stream ohne Nacharbeit lauffähig ist.
+ */
+export async function adoptRemoteBranch(
+  repoRoot: string,
+  agentId: string,
+  branch: string,
+): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+  const local = worktreePathFor(repoRoot, agentId);
+  if (existsSync(local)) {
+    await git(["-C", repoRoot, "worktree", "repair", local], repoRoot);
+    return { ok: true, path: local }; // idempotent: schon übernommen
+  }
+  await git(["-C", repoRoot, "worktree", "prune"], repoRoot); // verwaiste Admin-Zeiger geben den Branch frei
+  const hasLocal = await git(["-C", repoRoot, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repoRoot);
+  const add =
+    hasLocal.code === 0
+      ? await git(["-C", repoRoot, "worktree", "add", local, branch], repoRoot)
+      : await git(["-C", repoRoot, "worktree", "add", "--track", "-b", branch, local, `origin/${branch}`], repoRoot);
+  if (add.code !== 0) return { ok: false, error: add.stderr || add.stdout };
+  try {
+    ensureMadsDir(local);
+  } catch (e) {
+    log(`[git] adopt: .mads-Schutz im Worktree ${local} fehlgeschlagen: ${String(e)}`);
+  }
+  try {
+    const seeded = seedLocalDevFiles(repoRoot, local);
+    if (seeded.length) log(`[git] adopt ${branch}: ${seeded.length} lokale Dev-Datei(en) geseedet`);
+  } catch (e) {
+    log(`[git] adopt: seedLocalDevFiles fehlgeschlagen: ${String(e)}`);
+  }
+  return { ok: true, path: local };
+}
+
 export async function getRepoInfo(
   repoRoot: string,
 ): Promise<{ owner: string; repo: string; defaultBranch: string } | null> {
@@ -1179,7 +1356,7 @@ export async function syncBranch(
           `Versionierung nehmen (git rm --cached <pfad>) und in .gitignore aufnehmen.${stuckNote}`,
       };
     }
-    // Echter Rebase-Konflikt: die betroffenen Dateien nennen + auf „Konflikt lösen" verweisen
+    // Echter Rebase-Konflikt: die betroffenen Dateien nennen + auf den Rail-Knopf verweisen
     // (statt git-Rohtext). mads rebaset/pusht nach der Auflösung selbst.
     if (conflictFiles.length > 0) {
       const shown = conflictFiles.slice(0, 8).join(", ");
@@ -1189,7 +1366,7 @@ export async function syncBranch(
         kind: "merge_conflict",
         error:
           `Rebase-Konflikt mit origin/${defaultBranch} in ${conflictFiles.length} Datei(en): ${shown}${more}. ` +
-          `Über „Konflikt lösen" im Worktree beheben — mads rebaset/pusht danach.${stuckNote}`,
+          `Über „Konflikt lösen“ in der Seitenleiste auflösen — mads rebaset/pusht danach.${stuckNote}`,
       };
     }
     return { ok: false, kind: "merge_conflict", error: errText + stuckNote };

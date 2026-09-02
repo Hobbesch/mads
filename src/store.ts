@@ -34,6 +34,8 @@ import type {
   SavedPrompt,
   AccountsState,
   UsageWindow,
+  SandboxMode,
+  InvestigationTarget,
 } from "../shared/protocol";
 import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultEffortForModel } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
@@ -137,6 +139,9 @@ export interface AgentVM {
   modelMismatch?: boolean; // true = SDK lief auf einem anderen Modell als angefordert (mads zieht nach)
   effort?: EffortMode; // Reasoning-Effort dieses Streams (undefined = Modell ohne Effort, z. B. Haiku)
   accountId?: string; // Claude-Konto dieses Streams (Profil-ID der Account-Registry)
+  /** Sandbox-Betriebsart (Untersuchungs-Freigabe) — der Sidecar meldet den REALEN Zustand des
+   *  laufenden Prozesses via status_update; die UI spiegelt nur (nie optimistisch setzen). */
+  sandboxMode?: SandboxMode;
   createdAt: number;
   lastEventAt: number;
   /** Zeitpunkt, ab dem der aktuelle aktive Lauf zählt (für die Laufzeit-Anzeige). */
@@ -321,9 +326,18 @@ export interface MadsState {
   /** Ergebnis des letzten Handoff-Export/-Imports — treibt einen dismissbaren Banner. */
   handoff?: HandoffResultMsg;
   collisions: Collision[];
+  /**
+   * „Don't Panic"-Zustand: solange `active`, sind die genannten Sub-Streams angehalten und ihr
+   * Autopilot steht auf `manual`. Die Rail zeigt dann die Freigabe statt des Panic-Knopfs.
+   * Spiegel des Sidecars (`panic_state`) — nie lokal gesetzt, sonst driften UI und Wahrheit.
+   */
+  panic: { active: boolean; stoppedAgentIds: string[]; resolverAgentId?: string };
   /** Kuratierte, wiederverwendbare Prompts des Projekts (reiner Spiegel — Persistenz macht
    *  der Sidecar in `<repoRoot>/.mads/prompts.json`, gemeldet via prompts_update). */
   prompts: SavedPrompt[];
+  /** Untersuchungsziele des Projekts (Sandbox-Stufe A) — Spiegel von `.mads/targets.json`,
+   *  gemeldet via targets_update; Persistenz macht der Sidecar. */
+  investigationTargets: InvestigationTarget[];
   // ── Spracheingabe (lokales Whisper) ──
   whisper: WhisperVM;
   dictation: DictationVM;
@@ -403,6 +417,8 @@ export interface MadsState {
     permissionMode?: PermissionMode;
     images?: ImageInput[];
     accountId?: string;
+    /** Sandbox-Betriebsart schon beim Start (New-Stream-Dialog) — nur echte Sub-Streams. */
+    sandboxMode?: SandboxMode;
   }) => Promise<void>;
   selectAgent: (id: string) => void;
   requestNewStream: () => void;
@@ -427,6 +443,11 @@ export interface MadsState {
   savePrompt: (prompt: SavedPrompt) => Promise<void>;
   /** Prompt löschen (die Bestätigung macht die UI vorher). */
   deletePrompt: (id: string) => Promise<void>;
+  /** Sandbox-Betriebsart eines Sub-Streams umschalten (Untersuchungs-Freigabe). Nicht optimistisch —
+   *  der Sidecar startet den Prozess neu und bestätigt den realen Modus via status_update. */
+  setSandboxMode: (id: string, mode: SandboxMode) => Promise<void>;
+  /** Untersuchungsziele des Projekts ersetzen — der Sidecar validiert, persistiert und spiegelt. */
+  saveInvestigationTargets: (targets: InvestigationTarget[]) => Promise<void>;
   sendInput: (id: string, text: string, images?: ImageInput[]) => Promise<void>;
   setPermissionMode: (id: string, mode: PermissionMode) => Promise<void>;
   setAutopilot: (id: string, level: AutopilotLevel) => Promise<void>;
@@ -445,8 +466,14 @@ export interface MadsState {
   commitAgent: (id: string) => Promise<void>;
   createPr: (id: string) => Promise<void>;
   syncBranch: (id: string) => Promise<void>;
-  /** Geführte Konfliktlösung: beauftragt den Agenten, den Rebase-Konflikt im Worktree zu lösen. */
-  resolveConflict: (id: string) => Promise<void>;
+  /**
+   * „Don't Panic": hält alle Sub-Streams an und übergibt die Konfliktlösung an den Integrator.
+   * Ersetzt den früheren per-Stream-Knopf, der nur einen Prompt in einen gesandboxten Sub-Stream
+   * schickte — der kann die Lage über mehrere Worktrees hinweg gar nicht beurteilen.
+   */
+  panicResolve: () => Promise<void>;
+  /** Gegenstück: angehaltene Streams freigeben, gemerkte Autopilot-Level wiederherstellen. */
+  panicRelease: () => Promise<void>;
   /** Uncommittete Änderungen des Main-Checkouts in einen neuen Sub-Stream auslagern. */
   outsourceMain: (integratorId: string) => Promise<void>;
   /** Den aktuellen (Deploy-)Stand des Main-Checkouts als Release-Commit festhalten (chore(release): …). */
@@ -780,6 +807,7 @@ export const useStore = create<MadsState>((set) => {
                   escalations: [],
                   authReloginNeeded: false,
                   collisions: [],
+                  panic: { active: false, stoppedAgentIds: [] },
                   editsByFile: {},
                   selectedId: undefined,
                   parallelPicker: undefined,
@@ -814,10 +842,13 @@ export const useStore = create<MadsState>((set) => {
           // immer gegen den lokalen Stand. Eine optimistisch gesetzte Auswahl, die im Sidecar gar
           // nicht angekommen ist, wird hier also wieder eingefangen statt still weiterzuleben.
           const accountId = msg.accountId ?? a.accountId;
+          // Sandbox-Modus: wie das Konto meldet der Sidecar den REALEN Zustand des Prozesses —
+          // er gewinnt immer gegen den lokalen Stand (die UI setzt ihn nie optimistisch).
+          const sandboxMode = msg.sandboxMode ?? a.sandboxMode;
           return {
             agents: {
               ...s.agents,
-              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now(), subAgents, accountId },
+              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now(), subAgents, accountId, sandboxMode },
             },
           };
         });
@@ -962,9 +993,24 @@ export const useStore = create<MadsState>((set) => {
         set({ collisions: msg.collisions });
         break;
 
+      case "panic_state":
+        set({
+          panic: {
+            active: msg.active,
+            stoppedAgentIds: msg.stoppedAgentIds,
+            resolverAgentId: msg.resolverAgentId,
+          },
+        });
+        break;
+
       case "prompts_update":
         // Vollständige Prompt-Liste des Projekts (bei open_project + nach jeder Änderung) — Spiegel.
         set({ prompts: msg.prompts });
+        break;
+
+      case "targets_update":
+        // Untersuchungsziele (Sandbox-Stufe A) — Spiegel von .mads/targets.json.
+        set({ investigationTargets: msg.targets });
         break;
 
       case "model_active":
@@ -1257,7 +1303,9 @@ export const useStore = create<MadsState>((set) => {
     incomingPrs: [],
     reconcileSummary: undefined,
     collisions: [],
+    panic: { active: false, stoppedAgentIds: [] },
     prompts: [],
+    investigationTargets: [],
     whisper: { installed: false, checked: false, downloading: false, progress: 0 },
     dictation: { recording: false, transcribing: false },
     autonomy: { autoSync: true, collisionScan: true },
@@ -1366,7 +1414,7 @@ export const useStore = create<MadsState>((set) => {
       set((s) => ({ recentProjects: forgetProject(s.recentProjects, repoRoot) }));
     },
 
-    createAgent: async ({ label, prompt, role, mock, model, effort, branch, permissionMode, images, accountId }) => {
+    createAgent: async ({ label, prompt, role, mock, model, effort, branch, permissionMode, images, accountId, sandboxMode }) => {
       const id = crypto.randomUUID();
       const mode: PermissionMode = permissionMode ?? "auto";
       const st0 = useStore.getState();
@@ -1428,6 +1476,10 @@ export const useStore = create<MadsState>((set) => {
         mock,
         permissionMode: mode,
         autopilot: "assisted",
+        // Sandbox-Betriebsart aus dem New-Stream-Dialog: der Sidecar spawnt den Prozess direkt
+        // damit — kein Umschalt-Neustart nach dem ersten Prompt mehr nötig. Nur echte Sub-Streams
+        // (der Integrator läuft ohnehin ohne Sandbox) und nur abweichend vom Default "on".
+        ...(role === "sub" && !mock && sandboxMode && sandboxMode !== "on" ? { sandboxMode } : {}),
         ...(useWorktree && project
           ? { repoRoot: project.repoRoot, branch: finalBranch, baseRef: `origin/${project.defaultBranch}` }
           : project && !mock
@@ -1570,6 +1622,20 @@ export const useStore = create<MadsState>((set) => {
     },
     deletePrompt: async (id) => {
       await sendHost({ ...envelope(), type: "prompt_delete", id });
+    },
+
+    // ── Sandbox-Betriebsart (Untersuchungs-Freigabe): BEWUSST nicht optimistisch — der Wechsel
+    // ist ein Prozess-Neustart mit Resume und kann im Sidecar ausfallen (Stream nicht aktiv,
+    // keine Session, keine Ziele definiert). Der Sidecar bestätigt den realen Modus laufend
+    // per status_update; bis dahin bleibt die Anzeige beim alten Zustand (gleiche Philosophie
+    // wie beim Kontowechsel).
+    setSandboxMode: async (id, mode) => {
+      const label = mode === "off" ? "🔓 Sandbox aus (Freigang)" : mode === "targets" ? "🔎 Untersuchungs-Modus" : "🔒 Sandbox an";
+      notice(id, "accent", `${label} angefordert — Stream wird im selben Gespräch neu gestartet…`);
+      await sendHost({ ...envelope(), type: "set_sandbox_mode", agentId: id, mode });
+    },
+    saveInvestigationTargets: async (targets) => {
+      await sendHost({ ...envelope(), type: "targets_save", targets });
     },
 
     sendInput: async (id, text, images) => {
@@ -1759,27 +1825,16 @@ export const useStore = create<MadsState>((set) => {
       await sendHost({ ...envelope(), type: "commit_main_release", agentId: integratorId });
     },
 
-    resolveConflict: async (id) => {
-      // Geführte Konfliktlösung (3.4): den Agenten den Rebase IN SEINEM Worktree lösen lassen
-      // (reine git-Arbeit; kein Push/PR/Merge — das macht mads). Das syncBlocked-Flag löscht der
-      // Sidecar automatisch, sobald der Branch wieder aufgeholt hat (behind=0).
-      const db = useStore.getState().project?.defaultBranch ?? "main";
-      notice(id, "accent", "▶ Konflikt lösen (Agent rebaset im Worktree)");
-      await useStore.getState().sendInput(
-        id,
-        `Dein Branch hat einen Rebase-Konflikt mit origin/${db}. Löse ihn IN DIESEM Worktree:\n` +
-          `1. \`git rebase origin/${db}\` ausführen.\n` +
-          `2. Konfliktmarkierungen beheben. Ergänzen BEIDE Seiten unabhängig etwas (neue Routes, ` +
-          `Nav-Links, Dependencies, i18n-Keys), dann BEIDE behalten (nicht eine Seite verwerfen).\n` +
-          `3. GENERIERTE Sperrdateien NICHT von Hand mergen — neu erzeugen, nachdem die Quelldatei ` +
-          `konfliktfrei ist: \`uv.lock\` → \`uv lock\`; \`package-lock.json\` → \`npm install\`. ` +
-          `(Handgemergte Lockfiles sind kaputt und lassen das Gate „Lockfile up-to-date" scheitern.)\n` +
-          `4. \`git add -A && git rebase --continue\` (ggf. mehrfach, bis der Rebase durch ist).\n` +
-          `5. Verifizieren: die Projekt-Checks lokal grün laufen lassen (z. B. \`uv run ruff check .\`, ` +
-          `\`uv run mypy\`, \`uv run pytest -q\` bzw. \`npm run lint/typecheck/test\`).\n` +
-          `NICHT pushen, keinen PR, keinen Merge — Push/PR/Integration übernimmt mads. ` +
-          `Fasse am Ende kurz zusammen, welche Dateien du angepasst hast.`,
-      );
+    panicResolve: async () => {
+      // Der Sidecar hält die Sub-Streams an, friert ihren Autopilot ein und beauftragt den
+      // Integrator mit Playbook + Lagebericht. Hier bewusst KEINE Optimistik: der Panic-Zustand
+      // kommt ausschliesslich über `panic_state` zurück, damit UI und Sidecar nicht auseinander-
+      // laufen, wenn das Anhalten scheitert (z. B. weil kein Integrator läuft).
+      await sendHost({ ...envelope(), type: "panic_resolve" });
+    },
+
+    panicRelease: async () => {
+      await sendHost({ ...envelope(), type: "panic_release" });
     },
 
     integratePr: async (id, keep = false) => {

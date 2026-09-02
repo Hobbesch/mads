@@ -74,6 +74,8 @@ export type HostMessage =
   | InterruptAgentMsg
   | SetPermissionModeMsg
   | StopAgentMsg
+  | PanicResolveMsg
+  | PanicReleaseMsg
   | CreatePrMsg
   | SyncBranchMsg
   | GateTaskMsg
@@ -99,6 +101,8 @@ export type HostMessage =
   | RequestSnapshotMsg
   | SetAccountMsg
   | RequestAccountsMsg
+  | SetSandboxModeMsg
+  | TargetsSaveMsg
   | ShutdownMsg;
 
 /**
@@ -212,6 +216,57 @@ export interface SavedPrompt {
   updatedAt: number;
 }
 
+// ---- Sandbox-Betriebsart & Untersuchungsziele (Stufe A/B der Untersuchungs-Freigabe) ----
+/**
+ * Sandbox-Betriebsart eines SUB-Streams. Der Bedarf: ein Sub muss gelegentlich auf Test-/Prod-
+ * Servern UNTERSUCHEN, die Sandbox sperrt aber Egress + Secrets. Statt eines binären Aus-Schalters
+ * zwei abgestufte Freigaben (der Integrator läuft ohnehin ohne Sandbox — für ihn irrelevant):
+ *
+ *  - `"on"` (Default): volle Sandbox — Schreiben nur im Worktree, Egress nur Paketquellen.
+ *  - `"targets"` (Stufe A): Sandbox BLEIBT AN (Dateisystem + Secrets geschützt), zusätzlich sind
+ *    die projektweiten Untersuchungsziele (`.mads/targets.json`) im Egress erlaubt. Deckt
+ *    HTTPS-Untersuchungen (APIs, Health, Logs) ohne echten Schutzverlust ab.
+ *  - `"off"` (Stufe B, „Freigang"): Sandbox aus — für SSH/psql-Untersuchungen. Geländer:
+ *    nur der MENSCH schaltet (UI; Agenten können keine Protokoll-Nachrichten senden), der Zustand
+ *    ist sichtbar (Badge), wird NIE persistiert (Resume startet sandboxed), der Autopilot pusht/
+ *    PRt währenddessen nicht automatisch, und nach 15 Min. Inaktivität schaltet der Sidecar
+ *    selbst zurück auf "on" (Drift-Schutz: „temporär aus" darf nicht „vergessen aus" werden).
+ *
+ * Umschalten = Prozess-Neustart mit `resumeSessionId` (Muster wie Kontowechsel) — Kontext bleibt.
+ */
+export type SandboxMode = "on" | "targets" | "off";
+
+/** Externes Untersuchungsziel des Projekts (Host für die Egress-Allowlist bei `"targets"`). */
+export interface InvestigationTarget {
+  /** Domain/Host, Wildcards wie im SDK-Schema (z. B. "api.test.example.ch", "*.example.ch"). */
+  host: string;
+  label?: string;
+  /** Prod-Ziel → deutlichere Bestätigung im UI beim Freischalten. */
+  prod?: boolean;
+}
+
+/** Sandbox-Betriebsart eines Sub-Streams umschalten (nur menschliche UI-Aktion). Mit Session:
+ *  Neustart+Resume im selben Gespräch; ganz neuer Stream ohne Session: frischer Neustart
+ *  (kein Verlauf zu verlieren). Beim ERSTELLEN wählt man die Betriebsart direkt im
+ *  New-Stream-Dialog (StartAgentMsg.sandboxMode) — dann ist gar kein Umschalten nötig. */
+export interface SetSandboxModeMsg extends BaseMsg {
+  type: "set_sandbox_mode";
+  agentId: string;
+  mode: SandboxMode;
+}
+
+/** Untersuchungsziele des Projekts komplett ersetzen (Editor in den Einstellungen). */
+export interface TargetsSaveMsg extends BaseMsg {
+  type: "targets_save";
+  targets: InvestigationTarget[];
+}
+
+/** Vollständige Ziel-Liste des Projekts (bei open_project und nach jeder Änderung). */
+export interface TargetsUpdateMsg extends BaseMsg {
+  type: "targets_update";
+  targets: InvestigationTarget[];
+}
+
 /** Prompt anlegen/ändern (Upsert per id). */
 export interface PromptSaveMsg extends BaseMsg {
   type: "prompt_save";
@@ -282,6 +337,13 @@ export interface StartAgentMsg extends BaseMsg {
    *  `false` schaltet sie für diesen Stream ab — Notfall/Debug, wenn eine Toolchain am Sandkasten
    *  scheitert. Global geht das auch per Env `MADS_SANDBOX=off`. Siehe sidecar/src/sandbox.ts. */
   sandbox?: boolean;
+  /** Sandbox-Betriebsart (Untersuchungs-Freigabe, siehe SandboxMode). Präziser als `sandbox` und
+   *  gewinnt gegen es. Wird NIE persistiert — ein Resume startet immer wieder mit "on". */
+  sandboxMode?: SandboxMode;
+  /** Nur für `sandboxMode: "targets"`: zusätzliche Egress-Hosts. Wird vom ORCHESTRATOR aus
+   *  `.mads/targets.json` gesetzt (Single Source of Truth auf Platte) — Client-Angaben hier
+   *  werden überschrieben, damit kein (Remote-)Client beliebige Domains freischalten kann. */
+  investigationDomains?: string[];
   /** true = automatische „Setze die Arbeit fort"-Anweisung beim Resume (kein echter Nutzer-Auftrag).
    *  Der Sidecar überschreibt damit NICHT den zuletzt gemerkten Auftrag (`lastPrompt`) — die Kachel
    *  zeigt weiter den echten Auftrag, den der Mensch abgesetzt hat. */
@@ -435,6 +497,34 @@ export interface StopAgentMsg extends BaseMsg {
 }
 
 /**
+ * „Don't Panic": übergreifende Konfliktlösung. Die erste bewusst GLOBALE Aktion (kein `agentId`) —
+ * genau das ist der Punkt.
+ *
+ * WARUM global: Der frühere per-Stream-Knopf („Konflikt lösen") schickte nur einen Prompt in den
+ * betroffenen Sub-Stream. Der läuft aber laut sandbox.ts eingesperrt in seinem eigenen Worktree —
+ * `git merge-tree` zwischen zwei Branches, ein Hunk-Vergleich oder die Frage „welcher Branch
+ * sollte zuerst gemergt werden" sind ihm damit prinzipiell unmöglich. Er rebaset blind, während
+ * die anderen Streams weiterarbeiten und die Lage erneut verschieben.
+ *
+ * Stattdessen: alle Sub-Streams anhalten (nichts verändert sich mehr), Autopilot einfrieren, und
+ * den INTEGRATOR beauftragen — der einzige Stream ohne Sandbox, mit Sicht auf alle Worktrees, und
+ * per Invariante 1 ohnehin der Einzige, der mergen darf. Er bekommt das Playbook
+ * (sidecar/playbooks/conflict-resolution.md) plus einen Lagebericht über alle Streams.
+ */
+export interface PanicResolveMsg extends BaseMsg {
+  type: "panic_resolve";
+}
+
+/**
+ * Gegenstück zu `panic_resolve`: gibt die angehaltenen Sub-Streams wieder frei und stellt ihren
+ * gemerkten Autopilot-Level wieder her. Bewusst ein eigener, menschlicher Schritt — nach einer
+ * Konfliktlösung hat sich die Basis geändert, und kein Stream soll unbemerkt darauf weiterlaufen.
+ */
+export interface PanicReleaseMsg extends BaseMsg {
+  type: "panic_release";
+}
+
+/**
  * Verwalteten Zustand bereinigen: Worktree + lokalen Branch eines erledigten
  * (gemergten) Streams entfernen und aus der Resume-Registry nehmen. Wird vom
  * Frontend für „gemergt, aber lokale Reste"-Streams nach Nutzer-Bestätigung
@@ -498,6 +588,7 @@ export type SidecarMessage =
   | ResumableAgentsMsg
   | ReconcileSummaryMsg
   | CollisionWarningMsg
+  | PanicStateMsg
   | SpawnSubstreamsRequestMsg
   | DevServerStatusMsg
   | DevServerConfigMsg
@@ -511,7 +602,8 @@ export type SidecarMessage =
   | AccountsUpdateMsg
   | AccountUsageMsg
   | RateLimitNoticeMsg
-  | ModelActiveMsg;
+  | ModelActiveMsg
+  | TargetsUpdateMsg;
 
 /**
  * Öffnen abgelehnt: dieses Projekt ist bereits in einer ANDEREN, laufenden mads-Instanz offen
@@ -710,6 +802,9 @@ export interface StatusUpdateMsg extends BaseMsg {
    * (`CLAUDE_CONFIG_DIR` steht nach dem Spawn fest), ohne dass es je auffiel.
    */
   accountId?: string;
+  /** Sandbox-Betriebsart, in der dieser Stream WIRKLICH läuft (der Sidecar hat den Prozess mit
+   *  genau diesen Sandbox-Optionen gestartet — die Oberfläche spiegelt nur). */
+  sandboxMode?: SandboxMode;
 }
 
 export interface CostUpdateMsg extends BaseMsg {
@@ -1003,12 +1098,41 @@ export interface ReconcileSummaryMsg extends BaseMsg {
    * Subs beim Öffnen still aus dem Grid; jetzt sind sie zurück + der Nutzer sieht, dass es passiert ist.
    */
   relocated?: string[];
+  /**
+   * Cross-Machine-Fortsetzung: Branches, die auf origin AKTIV sind (ungemergt über <default>, nicht
+   * von einem Bot und nicht nachweislich einem fremden GitHub-Account zugeordnet), für die es hier
+   * aber weder Registry-Eintrag noch Worktree gab — typisch: auf dem ZWEITEN Mac angelegt. Sie wurden
+   * beim Öffnen automatisch als lokale Worktrees ausgecheckt und stehen als Streams bereit — Labels.
+   * `.mads/agents.json` ist gitignored und damit maschinen-lokal; ohne diesen Schritt ist ein nur auf
+   * origin existierender Branch für mads unsichtbar (die Ursache der „mein Stream fehlt"-Lücke).
+   */
+  adopted?: string[];
 }
 
 /** Laufzeit-Kollisionen zwischen aktiven Agenten (leeres Array = aufgeräumt). */
 export interface CollisionWarningMsg extends BaseMsg {
   type: "collision_warning";
   collisions: Collision[];
+}
+
+/**
+ * Panic-Zustand (Gegenstück zu `panic_resolve`/`panic_release`). Solange `active`, sind die
+ * genannten Sub-Streams angehalten und ihr Autopilot steht auf `manual`; das Frontend zeigt
+ * dann statt des Panic-Knopfs die Freigabe.
+ *
+ * GRENZE: nur Laufzeit-Zustand des Sidecars — ein Neustart verliert ihn. Die Streams bleiben dann
+ * korrekt auf `manual` (das ist in agents.json persistiert, es geht also nichts verloren und
+ * niemand läuft unbemerkt los), aber die Sammel-Freigabe fehlt; die Level werden dann einzeln im
+ * Inspector zurückgestellt. Bewusst so belassen, statt ein zweites Persistenz-Schema einzuführen —
+ * der Panic-Lauf dauert Minuten, ein Sidecar-Neustart genau darin ist der seltene Fall.
+ */
+export interface PanicStateMsg extends BaseMsg {
+  type: "panic_state";
+  active: boolean;
+  /** Sub-Streams, die durch den Panic angehalten wurden (leer, wenn nicht aktiv). */
+  stoppedAgentIds: string[];
+  /** agentId des Integrators, der die Auflösung übernommen hat. */
+  resolverAgentId?: string;
 }
 
 /** Agent-Tool (Integrator) bittet das Frontend, N Sub-Streams zu starten. */

@@ -24,6 +24,7 @@
  */
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SandboxMode } from "../../shared/protocol.js";
 import { loadAccounts } from "./accounts.js";
 
 /** Notfall-Schalter: `MADS_SANDBOX=off|0|false` deaktiviert die Sandbox global (z. B. wenn ein
@@ -143,6 +144,15 @@ export interface SandboxInput {
   repoRoot?: string;
   /** Explizit an/aus. Ohne Angabe entscheidet die ROLLE (siehe `role`). */
   enabled?: boolean;
+  /**
+   * Untersuchungs-Freigabe (shared/protocol.ts → SandboxMode). Gewinnt gegen `enabled`:
+   *  - "on"      → Sandbox an (wie Default).
+   *  - "targets" → Sandbox an, `extraDomains` zusätzlich im Egress erlaubt (Stufe A).
+   *  - "off"     → Sandbox aus (Stufe B „Freigang" — die Geländer sitzen im Orchestrator).
+   */
+  mode?: SandboxMode;
+  /** Zusätzliche Egress-Hosts — wirken NUR im Modus "targets" (Untersuchungsziele des Projekts). */
+  extraDomains?: string[];
   /** Bash ohne mads-Rückfrage freigeben, WEIL sandboxed. Default: AUS — siehe Modul-Kommentar. */
   autoAllowBash?: boolean;
   /**
@@ -174,10 +184,14 @@ export interface SandboxInput {
  */
 export function sandboxOptions(input: SandboxInput = {}): Record<string, unknown> {
   // Rollen-Default: Sub-Streams an, Integrator aus (Begründung an `role`). Eine EXPLIZITE Angabe
-  // (`enabled`) schlägt den Default in beide Richtungen; `MADS_SANDBOX=off` schaltet global ab.
+  // (`mode`, sonst `enabled`) schlägt den Default in beide Richtungen; `MADS_SANDBOX=off` global.
   const byRole = input.role !== "integrator";
-  const enabled = (input.enabled ?? byRole) && !envDisabled();
+  const byMode = input.mode === undefined ? undefined : input.mode !== "off";
+  const enabled = (byMode ?? input.enabled ?? byRole) && !envDisabled();
   if (!enabled) return {};
+  // Untersuchungsziele (Stufe A): NUR im Modus "targets" — sonst bleiben sie wirkungslos, selbst
+  // wenn ein Aufrufer sie versehentlich mitgibt.
+  const extra = input.mode === "targets" ? (input.extraDomains ?? []).filter((d) => typeof d === "string" && d.trim().length > 0) : [];
   return {
     sandbox: {
       enabled: true,
@@ -191,7 +205,7 @@ export function sandboxOptions(input: SandboxInput = {}): Record<string, unknown
         denyRead: sandboxDenyReadPaths(),
       },
       network: {
-        allowedDomains: sandboxAllowedDomains(),
+        allowedDomains: [...sandboxAllowedDomains(), ...extra],
         // Dev-Server/Tests binden lokale Ports (mads' Live-Preview lebt davon).
         allowLocalBinding: true,
         // Docker-CLI spricht über den Unix-Socket mit dem Daemon (macOS-only Option).

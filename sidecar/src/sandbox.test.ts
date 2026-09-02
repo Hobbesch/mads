@@ -48,6 +48,22 @@ check(
   Object.keys(sandboxOptions({ cwd: WT, role: "sub", enabled: false })).length === 0,
 );
 
+// --- Untersuchungs-Freigabe (Stufe A/B): mode gewinnt gegen enabled ---------
+const targets = sandboxOptions({ cwd: WT, role: "sub", mode: "targets", extraDomains: ["api.test.example.ch", " ", ""] }) as { sandbox?: Record<string, unknown> };
+const tNet = (targets.sandbox?.network ?? {}) as Record<string, unknown>;
+const tDomains = (tNet.allowedDomains ?? []) as string[];
+check("mode targets → Sandbox bleibt AN (Stufe A ist kein Aus-Schalter)", targets.sandbox?.enabled === true);
+check("mode targets → Ziel-Hosts zusätzlich im Egress", tDomains.includes("api.test.example.ch"));
+check("mode targets → Basis-Allowlist (Paketquellen) bleibt", tDomains.includes("registry.npmjs.org"));
+check("mode targets → leere/Whitespace-Hosts werden gefiltert", tDomains.every((d) => d.trim().length > 0));
+check("mode off → Sandbox aus (Freigang, Stufe B)", Object.keys(sandboxOptions({ cwd: WT, role: "sub", mode: "off" })).length === 0);
+check("mode on schlägt enabled:false (mode ist die präzisere Angabe)", (sandboxOptions({ cwd: WT, role: "sub", mode: "on", enabled: false }) as { sandbox?: unknown }).sandbox !== undefined);
+const noMode = sandboxOptions({ cwd: WT, role: "sub", extraDomains: ["evil.example.com"] }) as { sandbox?: Record<string, unknown> };
+check(
+  "extraDomains OHNE mode targets bleiben wirkungslos (kein stiller Egress)",
+  !(((noMode.sandbox?.network ?? {}) as Record<string, unknown>).allowedDomains as string[]).includes("evil.example.com"),
+);
+
 // --- Schreibpfade -----------------------------------------------------------
 const w = sandboxWritePaths(WT, ROOT);
 check("Worktree ist schreibbar", w.includes(WT));

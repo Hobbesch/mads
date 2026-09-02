@@ -254,6 +254,25 @@ button {
   right: -3px;
 }
 
+/* „Don't Panic" — der einzige rote Rail-Eintrag. Er hält ALLE Streams an, das darf man ihm
+   ansehen. Farbe ist aber nicht der alleinige Träger (doc 10 §8): das Warndreieck-Icon und der
+   Text sagen dasselbe, die Färbung verstärkt nur. Ohne Konflikt bleibt der Eintrag ruhig
+   (normale Textfarbe) — sonst stumpft das Rot ab und warnt nicht mehr, wenn es zählt. */
+.rail-item-wrap.panic .rail-item:not(:disabled) .rail-icon {
+  color: var(--s-red);
+}
+.rail-item-wrap.panic .rail-item:not(:disabled):hover {
+  background: color-mix(in srgb, var(--s-red) 12%, transparent);
+}
+.rail-item-wrap.panic .rail-item:focus-visible {
+  outline-color: var(--s-red);
+}
+/* Sobald tatsächlich ein Konflikt gemeldet ist (Badge vorhanden), auch den Text einfärben. */
+.rail-item-wrap.panic .rail-item:not(:disabled):has(.rail-badge) {
+  color: var(--s-red);
+  font-weight: 600;
+}
+
 .rail-collapse {
   display: flex;
   align-items: center;
@@ -1025,6 +1044,32 @@ button.primary:hover {
 .role-badge.review {
   background: var(--accent-weak);
   color: var(--accent);
+}
+
+/* Sandbox-Betriebsart (Untersuchungs-Freigabe): eine gelockerte Sandbox muss UNÜBERSEHBAR sein —
+   amber für den Untersuchungs-Modus (Sandbox an, Ziele frei), rot für Freigang (Sandbox aus). */
+.sandbox-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.sandbox-badge.targets {
+  background: rgba(255, 159, 10, 0.18);
+  color: #c76e00;
+}
+.sandbox-badge.off {
+  background: rgba(255, 59, 48, 0.16);
+  color: #d0342c;
+}
+.sandbox-select.targets {
+  color: #c76e00;
+}
+.sandbox-select.off {
+  color: #d0342c;
+  font-weight: 600;
 }
 
 /* ── Eingehende PRs (Review-Angebot) ──────────────────────────────────────── */

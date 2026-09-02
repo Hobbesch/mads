@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import type { AgentRole } from "../store";
-import type { PermissionMode, EffortMode, ImageInput } from "../../shared/protocol";
+import type { PermissionMode, EffortMode, ImageInput, SandboxMode } from "../../shared/protocol";
 import { ModelEffortPicker } from "./ModelEffortPicker";
 import { clampEffort, defaultEffortForModel } from "../modelCatalog";
 import { loadNewStreamDraft, saveNewStreamDraft, clearNewStreamDraft, draftHasContent } from "../newStreamDraft";
@@ -16,6 +16,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const defaultEffort = useStore((s) => s.defaultEffort);
   const accounts = useStore((s) => s.accounts);
   const accountUsage = useStore((s) => s.accountUsage);
+  const investigationTargets = useStore((s) => s.investigationTargets);
 
   // Beim Öffnen einen zuvor auto-gespeicherten Entwurf wiederherstellen (überlebt Fehlklick/Neustart).
   const draft = useRef(loadNewStreamDraft()).current;
@@ -33,6 +34,11 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   );
   const [branch, setBranch] = useState(draft?.branch ?? "");
   const [mode, setMode] = useState<PermissionMode>(draft?.mode ?? "auto");
+  // Sandbox-Betriebsart schon beim Start festlegen (Untersuchungs-Freigabe, Stufe A/B) — statt den
+  // frisch gestarteten Stream für den Wechsel gleich wieder neu starten zu müssen. Bewusst NICHT im
+  // Entwurf persistiert (Gegenstück zu „NIE persistiert" in shared/protocol.ts → SandboxMode): eine
+  // gelockerte Sandbox wird nie still aus einem wiederhergestellten Entwurf übernommen.
+  const [sandbox, setSandbox] = useState<SandboxMode>("on");
   const [mock, setMock] = useState(!sdkAvailable || !project);
   // Screenshots zum initialen Prompt — bewusst NICHT im (localStorage-)Entwurf persistiert (Base64
   // würde die Quota sprengen); überlebt also nur, solange der Dialog offen bleibt.
@@ -55,6 +61,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
     setModel(defaultModel);
     setEffort(defaultEffortForModel(defaultModel, defaultEffort));
     setMode("auto");
+    setSandbox("on");
     clearNewStreamDraft();
     setShowRestored(false);
   };
@@ -88,6 +95,9 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
       // `account || undefined`: das überliess die Wahl still dem Sidecar, obwohl das Feld bereits
       // ein konkretes Konto behauptete.
       accountId: account || accounts?.activeId,
+      // createAgent filtert selbst (nur Sub + nicht Mock + abweichend von "on") — hier ungefiltert
+      // durchreichen, damit Anzeige und gesendeter Wert nicht auseinanderlaufen können.
+      sandboxMode: sandbox,
     });
     clearNewStreamDraft(); // Entwurf verbraucht → aufräumen
     onClose();
@@ -295,6 +305,46 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
           <label className="field">
             <span>Branch (leer = automatisch aus Bezeichnung)</span>
             <input value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="mads/login-formular" />
+          </label>
+        )}
+
+        {/* Sandbox-Betriebsart (Untersuchungs-Freigabe): dieselben drei Stufen wie im Inspector,
+            aber schon VOR dem Start wählbar — der Stream beginnt direkt so zu arbeiten. Nur echte
+            Sub-Streams; der Integrator läuft ohnehin ohne Sandbox. */}
+        {role === "sub" && !mock && (
+          <label className="field">
+            <span>Sandbox</span>
+            <select
+              className={`sandbox-select ${sandbox}`}
+              value={sandbox}
+              onChange={(e) => setSandbox(e.target.value as SandboxMode)}
+              title="Sandbox dieses Streams: an (Standard) · Untersuchungs-Modus (Projekt-Ziele im Egress erlaubt, Sandbox bleibt an) · Freigang (Sandbox aus — nur für Untersuchungen auf Test-/Prod-Servern; fällt nach 15 Min. Inaktivität automatisch zurück)."
+            >
+              <option value="on">🔒 Sandbox an</option>
+              <option value="targets" disabled={investigationTargets.length === 0}>
+                🔎 Untersuchung — Ziele frei{investigationTargets.length === 0 ? " (erst Ziele in den Einstellungen anlegen)" : ""}
+              </option>
+              <option value="off">🔓 Sandbox aus (Freigang)</option>
+            </select>
+            {sandbox === "targets" && (
+              <div className="modal-hint">
+                Sandbox bleibt aktiv (Dateisystem + Secrets geschützt) — zusätzlich erreichbar:{" "}
+                {investigationTargets.map((t) => t.host).join(", ")}
+                {investigationTargets.some((t) => t.prod) && (
+                  <>
+                    {" "}
+                    — <strong>enthält Produktions-Ziele.</strong>
+                  </>
+                )}
+              </div>
+            )}
+            {sandbox === "off" && (
+              <div className="modal-hint">
+                <strong>Startet ohne Sandbox:</strong> Egress unbeschränkt, Secret-Ablagen lesbar, Schreiben außerhalb
+                des Worktrees möglich. Geländer: kein Auto-Push/PR im Freigang; nach 15 Min. Inaktivität schaltet mads
+                selbst zurück auf „Sandbox an".
+              </div>
+            )}
           </label>
         )}
 

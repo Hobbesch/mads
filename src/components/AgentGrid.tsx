@@ -48,6 +48,13 @@ function AgentCard({ agent }: { agent: AgentVM }) {
         ) : (
           <span className={`role-badge ${agent.role}`}>{agent.role === "integrator" ? "Integrator" : "Sub"}</span>
         )}
+        {/* Gelockerte Sandbox UNÜBERSEHBAR machen — „temporär offen" darf nie unbemerkt bleiben. */}
+        {agent.role === "sub" && agent.sandboxMode === "off" && (
+          <span className="sandbox-badge off" title="Sandbox AUS (Freigang) — freier Zugriff auf externe Systeme; fällt nach 15 Min. Inaktivität automatisch zurück.">🔓 Sandbox aus</span>
+        )}
+        {agent.role === "sub" && agent.sandboxMode === "targets" && (
+          <span className="sandbox-badge targets" title="Untersuchungs-Modus — Sandbox aktiv, Projekt-Untersuchungsziele im Egress erlaubt.">🔎 Untersuchung</span>
+        )}
       </div>
       {agent.branch && <div className="card-branch">⎇ {agent.branch}</div>}
       <div className="card-step">{agent.currentStep ?? STATUS_META[agent.status].label}</div>
@@ -88,7 +95,7 @@ function AgentCard({ agent }: { agent: AgentVM }) {
       </div>
       {needsInput && <div className="card-flag yellow">● braucht Input{pending ? ` (${pending})` : ""}</div>}
       {unsaved && <div className="card-flag red" title="Uncommittete/untrackte Arbeit oder Commits ohne PR — geht beim Aufräumen verloren">● Arbeit nicht gesichert</div>}
-      {agent.syncBlocked && <div className="card-flag red" title="Auto-Sync wegen Rebase-Konflikt pausiert — Konflikt lösen, dann Sync">⚠︎ Sync blockiert (Konflikt)</div>}
+      {agent.syncBlocked && <div className="card-flag red" title="Auto-Sync wegen Rebase-Konflikt pausiert — über „Konflikt lösen“ in der Seitenleiste auflösen, dann Sync">⚠︎ Sync blockiert (Konflikt)</div>}
       {showPrompt && (
         <div className="card-prompt">
           <div className="card-prompt-label">Auftrag</div>

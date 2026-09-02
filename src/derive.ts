@@ -41,6 +41,33 @@ export function hasGitEscalation(a: AgentVM): boolean {
 }
 
 /**
+ * Eskalations-Codes, die eine ÜBERGREIFENDE Konfliktlösung rechtfertigen — also solche, die ein
+ * einzelner Stream aus seiner Sandbox heraus gar nicht beurteilen kann, weil sie das Verhältnis
+ * zu ANDEREN Streams oder zu main betreffen. Bewusst nicht dabei: `ci_red`, `secret_detected`,
+ * `auth_broken` — die löst man im betroffenen Stream, nicht durch Anhalten aller anderen.
+ */
+const CONFLICT_CODES = new Set(["merge_conflict", "stale_base", "ownership_trespass", "push_rejected"]);
+
+/**
+ * Wie viele Streams stecken in einer Konfliktlage? Speist das Badge des „Konflikt lösen“-Eintrags
+ * in der Activity-Rail. Zählt STREAMS, nicht Meldungen: derselbe Stream, der drei Eskalationen und
+ * ein `syncBlocked` hat, ist EIN Problem — sonst stünde eine zweistellige Zahl an der Rail, wo
+ * zwei Streams betroffen sind (genau das passierte im Boba-Fall, dort feuerte ein einziger
+ * Trespass-Alarm dutzendfach).
+ */
+export function conflictCount(agents: AgentVM[], escalations: { agentId?: string; code: string }[]): number {
+  const ids = new Set<string>();
+  for (const a of agents) {
+    if (a.role !== "sub" || a.live === false || isMergedDone(a)) continue;
+    if (a.syncBlocked || a.pr?.mergeable === "CONFLICTING") ids.add(a.id);
+  }
+  for (const e of escalations) {
+    if (e.agentId && CONFLICT_CODES.has(e.code)) ids.add(e.agentId);
+  }
+  return ids.size;
+}
+
+/**
  * Ungesicherte Arbeit: uncommitted/untracked ODER committet-aber-kein-PR. Solche Arbeit
  * geht beim Stop/Aufräumen verloren → auf der Kachel laut markieren und vor Stop bestätigen.
  */
@@ -186,7 +213,7 @@ export function integrationPlan(agents: AgentVM[], collisions: Collision[]): Int
     if (a.status === "running" || a.status === "starting") {
       waiting.push({ ...base, state: "working", detail: "arbeitet gerade" });
     } else if (a.syncBlocked) {
-      waiting.push({ ...base, state: "conflicting", detail: "Sync-Konflikt → Konflikt lösen" });
+      waiting.push({ ...base, state: "conflicting", detail: "Sync-Konflikt → „Konflikt lösen“ in der Seitenleiste" });
     } else if (a.dirty) {
       waiting.push({ ...base, state: "unsaved", detail: "ungesicherte Arbeit → committen" });
     } else if (a.pr && a.pr.state === "OPEN") {
