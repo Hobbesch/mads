@@ -23,7 +23,11 @@ function AgentCard({ agent }: { agent: AgentVM }) {
   // Zuletzt abgesetzter Auftrag: sichtbar ab dem Absenden bis zum Merge. Danach (isMergedDone) und
   // bei passiv wiederhergestellten Streams ohne lastPrompt bleibt die Kachel prompt-frei.
   const showPrompt = agent.lastPrompt && !isMergedDone(agent);
-  const subCount = Object.keys(agent.subAgents ?? {}).length; // aktive Teil-Agenten (Sub-Agenten dieses Streams)
+  // Aktive Teil-Agenten (Sub-Agenten dieses Streams). Ihre Aufträge stehen im Tooltip und —
+  // wenn es nur einer ist — direkt auf der Kachel: „1 Teil-Agent aktiv" sagt nichts, sein
+  // Auftrag schon.
+  const subs = Object.values(agent.subAgents ?? {}).filter((s) => !s.done);
+  const subCount = subs.length;
   const startDevServer = useStore((s) => s.startDevServer);
   const stopDevServer = useStore((s) => s.stopDevServer);
   const ds = agent.devServer;
@@ -59,8 +63,11 @@ function AgentCard({ agent }: { agent: AgentVM }) {
       {agent.branch && <div className="card-branch">⎇ {agent.branch}</div>}
       <div className="card-step">{agent.currentStep ?? STATUS_META[agent.status].label}</div>
       {subCount > 0 && (
-        <div className="card-subagents" title="Aktive Teil-Agenten (Sub-Agenten, die dieser Stream gerade laufen hat)">
-          ▶ {subCount} Teil-Agent{subCount === 1 ? "" : "en"} aktiv
+        <div
+          className="card-subagents"
+          title={`Teil-Agenten dieses Streams (im Stream-Detail aufklappbar):\n${subs.map((s) => `• ${s.label}${s.currentStep ? ` — ${s.currentStep}` : ""}`).join("\n")}`}
+        >
+          ▶ {subCount === 1 ? subs[0].label : `${subCount} Teil-Agenten aktiv`}
         </div>
       )}
       {badges.length > 0 && (

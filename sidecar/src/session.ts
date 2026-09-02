@@ -920,6 +920,22 @@ export class AgentSession {
                 // Verbrauch gleich beim Sitzungsstart holen: sonst stünde die Anzeige bis zum Ende
                 // des ersten Turns leer — genau dann, wenn man wissen will, ob das Konto noch trägt.
                 void this.reportUsage();
+              } else {
+                // Eigene init eines Teil-Agenten: das einzige Ereignis, das sein Modell nennt
+                // (die Antworten selbst tragen es zwar auch, aber erst nach dem ersten Turn).
+                // Fürs Einblick-Panel: „läuft auf Haiku" ist genau die Info, die erklärt,
+                // warum ein Teil-Agent so viel schneller und billiger arbeitet als der Stream.
+                this.emit({
+                  ...envelope(),
+                  type: "agent_event",
+                  agentId: this.agentId,
+                  event: {
+                    kind: "system",
+                    subtype: "subagent_init",
+                    data: { model: String(m.model ?? "") },
+                    parentToolUseId: (m.parent_tool_use_id as string | null) ?? undefined,
+                  },
+                });
               }
               this.onChange?.();
             } else if (m.subtype === "status" && m.status === "compacting") {
@@ -946,16 +962,18 @@ export class AgentSession {
             // Sub-Agent-Antworten (parent_tool_use_id gesetzt) überspringen — sie laufen legitim auf Haiku.
             if (isMainLoop(m)) this.reconcileActiveModel((m.message as { model?: string })?.model);
             const content = ((m.message as { content?: unknown[] })?.content ?? []) as Array<Record<string, unknown>>;
+            // parent_tool_use_id mitgeben: bei einem Sub-Agenten (Task/Agent-Tool) trägt die Nachricht
+            // die tool_use_id ihres Starters → das Frontend ordnet die Aktivität dem Teil-Agenten zu.
+            // Gilt für ALLE Blöcke der Nachricht, nicht nur tool_use: Text und Denkschritte eines
+            // Teil-Agenten gehören in dessen Einblick-Panel, nicht in den Verlauf des Hauptloops.
+            const parentToolUseId = (m.parent_tool_use_id as string | null) ?? undefined;
             for (const block of content) {
               if (block.type === "text") {
-                this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "assistant_text", text: String(block.text) } });
+                this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "assistant_text", text: String(block.text), parentToolUseId } });
               } else if (block.type === "thinking") {
                 const t = String(block.thinking ?? block.text ?? "");
-                if (t) this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "thinking", text: t } });
+                if (t) this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "thinking", text: t, parentToolUseId } });
               } else if (block.type === "tool_use") {
-                // parent_tool_use_id mitgeben: bei einem Sub-Agenten (Task/Agent-Tool) trägt die Nachricht
-                // die tool_use_id ihres Starters → das Frontend ordnet die Aktivität dem Teil-Agenten zu.
-                const parentToolUseId = (m.parent_tool_use_id as string | null) ?? undefined;
                 this.emit({ ...envelope(), type: "agent_event", agentId: this.agentId, event: { kind: "tool_use", toolUseId: String(block.id), name: String(block.name), input: (block.input ?? {}) as Record<string, unknown>, parentToolUseId } });
                 this.setStatus("running", String(block.name));
               }
@@ -986,6 +1004,9 @@ export class AgentSession {
           }
           case "user": {
             const content = (m.message as { content?: unknown })?.content;
+            // Auch das Ergebnis trägt die Zuordnung: ohne sie wüsste das Frontend zwar, dass ein
+            // Teil-Agent ein Tool startete, aber nicht, ob es geklappt hat.
+            const parentToolUseId = (m.parent_tool_use_id as string | null) ?? undefined;
             if (Array.isArray(content)) {
               for (const block of content as Array<Record<string, unknown>>) {
                 if (block.type === "tool_result") {
@@ -998,6 +1019,7 @@ export class AgentSession {
                       toolUseId: String(block.tool_use_id),
                       ok: !block.is_error,
                       output: cap(toolResultText(block.content)),
+                      parentToolUseId,
                     },
                   });
                 }

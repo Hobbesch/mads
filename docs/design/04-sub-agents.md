@@ -611,6 +611,39 @@ fn open_agent_window(app: &tauri::AppHandle, agent_id: &str, branch: &str) -> ta
 > Caveat). Damit sind Channel-Routing und Capability-Layout für den MVP fixiert
 > ([[01-architecture]] §3.4).
 
+### 7.4 Einblick in Helper-Subagenten („Teil-Agenten")
+
+Gemeint sind hier die **SDK-internen** Subagenten (Task/Agent-Tool, §0 Abgrenzungs-Hinweis) —
+in der UI **Teil-Agenten** genannt —, nicht die Worktree-Streams. Das Panel im Inspector zeigt
+sie je Stream, jede Zeile ist aufklappbar und enthält den **Mitschnitt** des Teil-Agenten:
+Werkzeug-Aufrufe mit Kurz-Argument und Ergebnis (✓/✗), Denkschritte und Äusserungen.
+
+**Zweck ist Nachvollziehbarkeit, nicht Steuerung.** Ein Teil-Agent läuft innerhalb der Session
+seines Streams; von hier aus lässt er sich weder anhalten noch anweisen. Der Mitschnitt
+beantwortet „was tut der gerade, und mit welchen Werkzeugen".
+
+**Datenherkunft.** Alles wird aus dem SDK-Strom abgeleitet, es gibt keine zweite Quelle:
+Nachrichten eines Teil-Agenten tragen `parent_tool_use_id` = die `tool_use_id` des
+Task/Agent-Aufrufs, der ihn startete. Der Sidecar reicht dieses Feld auf **allen** Event-Arten
+durch, die ein Teil-Agent erzeugen kann (`tool_use`, `tool_result`, `assistant_text`,
+`thinking`, `system`). Trug — wie ursprünglich — nur `tool_use` das Feld, liess sich zwar
+zählen, wie viele Teil-Agenten laufen, aber nicht, was sie tun: Ergebnisse blieben
+unzuordenbar, und ihre Antworttexte landeten als vermeintliche Äusserungen des Hauptloops im
+Stream-Verlauf.
+
+Drei Eigenheiten, die das Datenmodell (`src/subAgents.ts`) bewusst abfängt:
+
+| Eigenheit | Verhalten |
+| --- | --- |
+| **Bezeichnung** | `description` des Aufrufs → `subagent_type` → erster Satz des Prompts. Das Label wird **ausserhalb** des Eintrags gemerkt (`subAgentMeta`), sonst verliert ein im Hintergrund gestarteter Teil-Agent seinen Namen (s.u.). Reines „Teil-Agent" ist nur noch der Notnagel. |
+| **Hintergrund-Läufe** | Ein im Hintergrund gestarteter Teil-Agent liefert sein `tool_result` (nur die Agent-ID) **sofort** und arbeitet danach weiter. Sein Eintrag gilt dann als abgeschlossen; spätere Aktivität führt ihn wieder als laufend. |
+| **Abschluss** | Fertige Teil-Agenten werden **stillgesetzt, nicht gelöscht** (`settleAll`/`pruneFinished`, die jüngsten sechs bleiben). Sofortiges Löschen nahm den Mitschnitt genau dann weg, wenn man ihn lesen will. |
+
+Werkzeug-Aufrufe eines Teil-Agenten bleiben zusätzlich in der Stream-Timeline, dort aber mit
+der Marke `▸ <Label>` — ohne sie sähen sie aus wie Aufrufe des Streams selbst. Antworttext und
+Denkschritte stehen **nur** im Mitschnitt; sein Schlussbericht kommt ohnehin als Ergebnis der
+Agent-Karte in der Timeline an.
+
 ---
 
 ## 8. Sicherheit & Permissions pro Sub-Agent

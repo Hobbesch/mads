@@ -43,6 +43,18 @@ import { loadRecentProjects, rememberProject, forgetProject, type RecentProject 
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
 import { notifyOsPermission, dismissOsPermission, notifyOsAuthRelogin } from "./osNotify";
 import { toolCommand } from "./toolText";
+import {
+  subAgentLabel,
+  feedDetail,
+  feedText,
+  pushFeed,
+  markToolResult,
+  pruneFinished,
+  settleAll,
+  shortModel,
+  type SubAgentEntry,
+  type SubAgentFeedItem,
+} from "./subAgents";
 import { blobToBase64, base64ToBytes, extForMime, dirname, makeThumbnail } from "./blob";
 import { openMarkdownWindow } from "./detachWindow";
 
@@ -97,6 +109,8 @@ export type TimelineEvent =
       output?: string;
       ok?: boolean;
       running: boolean;
+      /** Label des Teil-Agenten, der das Werkzeug aufrief (fehlt = der Stream selbst). */
+      viaSubAgent?: string;
     }
   | { id: string; kind: "todos"; todos: TodoItem[] }
   | { id: string; kind: "notice"; tone: NoticeTone; text: string };
@@ -167,9 +181,10 @@ export interface AgentVM {
    *  Gesetzt beim user_text-Event, sichtbar bis zum Merge (isMergedDone) — dann gelöscht. Reine
    *  Laufzeit-Anzeige, NICHT persistiert: passiv wiederhergestellte Streams haben daher keinen. */
   lastPrompt?: string;
-  /** Aktive Teil-Agenten (Sub-Agenten via Task/Agent-Tool), die dieser Stream gerade laufen hat —
-   *  Hintergrund-Agenten-Übersicht. Key = tool_use_id des Task-Aufrufs. Aus dem SDK-Strom abgeleitet
-   *  (parent_tool_use_id), reine Laufzeit-Info: bei Abschluss (tool_result) wird der Eintrag entfernt. */
+  /** Teil-Agenten (Sub-Agenten via Task/Agent-Tool), die dieser Stream laufen hat bzw. hatte —
+   *  Einblick-Panel im Inspector. Key = tool_use_id des Task-Aufrufs. Aus dem SDK-Strom abgeleitet
+   *  (parent_tool_use_id), reine Laufzeit-Info. Abgeschlossene bleiben als `done` nachlesbar,
+   *  bis `pruneFinished` sie ausdünnt. */
   subAgents?: Record<string, SubAgentEntry>;
   /** Gesetzt = dies ist ein READ-ONLY Review-Stream für einen FREMDEN PR (kein KI-Stream): PR-Nummer,
    *  Autor, URL. Die Kachel zeigt statt „Fortsetzen" ein „PR mergen" + „Verwerfen". */
@@ -178,14 +193,7 @@ export interface AgentVM {
   reviewUrl?: string;
 }
 
-/** Ein laufender Teil-Agent (SDK-Sub-Agent) eines Streams — für die Hintergrund-Aktivitäts-Übersicht. */
-export interface SubAgentEntry {
-  id: string; // tool_use_id des startenden Task/Agent-Aufrufs
-  label: string; // Kurzbeschreibung (description bzw. subagent_type aus dem Task-Input)
-  currentStep?: string; // zuletzt vom Teil-Agenten benutztes Tool (= „was tut er gerade")
-  startedAt: number;
-  lastAt: number;
-}
+export type { SubAgentEntry, SubAgentFeedItem } from "./subAgents";
 
 export interface SidecarInfo {
   status: "down" | "starting" | "ready" | "error";
@@ -637,26 +645,80 @@ export const useStore = create<MadsState>((set) => {
     pushEvent(agentId, { id: mkId(), kind: "notice", tone, text });
   }
 
-  // ── Teil-Agenten (Sub-Agenten via Task/Agent-Tool): Hintergrund-Aktivitäts-Übersicht ──
+  // ── Teil-Agenten (Sub-Agenten via Task/Agent-Tool): Einblick-Panel ──
   // Aus dem SDK-Strom abgeleitet: Task-tool_use startet einen, parent_tool_use_id-Aktivität hält ihn
   // aktuell, tool_result auf die Task-id beendet ihn. Rein Laufzeit; sequentiell verarbeitet (kein Race).
-  function upsertSubAgent(agentId: string, subId: string, patch: { label?: string; currentStep?: string }) {
+  //
+  // Das Label lebt bewusst AUSSERHALB des Eintrags: ein im Hintergrund gestarteter Teil-Agent liefert
+  // sein tool_result sofort (nur die Agent-ID) und arbeitet danach weiter. Sein Eintrag ist dann
+  // bereits abgeschlossen, die nächste Aktivität legt ihn neu an — ohne dieses Gedächtnis stünde er
+  // als namenloser „Teil-Agent" da, obwohl der Auftrag beim Start mitgegeben wurde.
+  const subAgentMeta = new Map<string, { label: string; type?: string }>();
+  const SUB_META_CAP = 200;
+  function rememberSubAgent(subId: string, meta: { label: string; type?: string }) {
+    subAgentMeta.set(subId, meta);
+    if (subAgentMeta.size > SUB_META_CAP) {
+      // Map-Iteration ist Einfügereihenfolge → der älteste Eintrag zuerst.
+      const oldest = subAgentMeta.keys().next().value;
+      if (oldest !== undefined) subAgentMeta.delete(oldest);
+    }
+  }
+
+  function upsertSubAgent(
+    agentId: string,
+    subId: string,
+    patch: {
+      label?: string;
+      type?: string;
+      model?: string;
+      currentStep?: string;
+      feed?: Omit<SubAgentFeedItem, "id" | "at">;
+      /** Ergebnis eines Werkzeugs an dessen Mitschnitt-Zeile vermerken. */
+      resultFor?: { toolUseId: string; ok: boolean };
+    },
+  ) {
     const a = useStore.getState().agents[agentId];
     if (!a) return;
     const now = Date.now();
     const cur = a.subAgents ?? {};
     const prev = cur[subId];
-    const entry: SubAgentEntry = prev
-      ? { ...prev, ...(patch.label ? { label: patch.label } : {}), ...(patch.currentStep ? { currentStep: patch.currentStep } : {}), lastAt: now }
-      : { id: subId, label: patch.label ?? "Teil-Agent", currentStep: patch.currentStep, startedAt: now, lastAt: now };
+    const known = subAgentMeta.get(subId);
+    const base: SubAgentEntry = prev ?? {
+      id: subId,
+      label: patch.label ?? known?.label ?? "Teil-Agent",
+      type: patch.type ?? known?.type,
+      toolCount: 0,
+      feed: [],
+      startedAt: now,
+      lastAt: now,
+    };
+    let feed = base.feed;
+    if (patch.feed) feed = pushFeed(feed, { ...patch.feed, id: mkId(), at: now });
+    if (patch.resultFor) feed = markToolResult(feed, patch.resultFor.toolUseId, patch.resultFor.ok);
+    const entry: SubAgentEntry = {
+      ...base,
+      ...(patch.label ? { label: patch.label } : {}),
+      ...(patch.type ? { type: patch.type } : {}),
+      ...(patch.model ? { model: patch.model } : {}),
+      ...(patch.currentStep ? { currentStep: patch.currentStep } : {}),
+      toolCount: base.toolCount + (patch.feed?.kind === "tool" ? 1 : 0),
+      feed,
+      lastAt: now,
+      // Nachzügler-Aktivität eines bereits als „fertig" markierten Teil-Agenten (Hintergrund-Lauf):
+      // er lebt offensichtlich noch → wieder als laufend führen.
+      ...(patch.feed || patch.currentStep ? { done: false, endedAt: undefined } : {}),
+    };
     patchAgent(agentId, { subAgents: { ...cur, [subId]: entry } });
   }
-  function removeSubAgent(agentId: string, subId: string) {
+
+  /** Abschluss: Eintrag NICHT löschen, sondern als erledigt markieren und ausdünnen — nur so
+   *  bleibt nachlesbar, was der Teil-Agent getan hat. */
+  function finishSubAgent(agentId: string, subId: string, ok: boolean) {
     const a = useStore.getState().agents[agentId];
     if (!a?.subAgents || !(subId in a.subAgents)) return;
-    const next = { ...a.subAgents };
-    delete next[subId];
-    patchAgent(agentId, { subAgents: next });
+    const now = Date.now();
+    const entry: SubAgentEntry = { ...a.subAgents[subId], done: true, ok, endedAt: now, lastAt: now, currentStep: undefined };
+    patchAgent(agentId, { subAgents: pruneFinished({ ...a.subAgents, [subId]: entry }) });
   }
 
   function appendDevLog(agentId: string, line: DevLogLine) {
@@ -835,9 +897,10 @@ export const useStore = create<MadsState>((set) => {
           if (!a) return {};
           const active = msg.status === "running" || msg.status === "starting";
           const workStartedAt = active ? (a.workStartedAt ?? Date.now()) : undefined;
-          // Terminaler Status (fertig/Fehler) → keine Teil-Agenten mehr aktiv (fängt den Rand-Fall ab,
-          // dass ein Stream endet, während ein Sub-Agent noch als „laufend" gemerkt war).
-          const subAgents = msg.status === "done" || msg.status === "error" ? undefined : a.subAgents;
+          // Terminaler Status (fertig/Fehler) → keiner läuft mehr (fängt den Rand-Fall ab, dass ein
+          // Stream endet, während ein Teil-Agent noch als „laufend" gemerkt war). Stillsetzen statt
+          // löschen: der Mitschnitt bleibt nachlesbar, gerade nach dem Lauf will man ihn ansehen.
+          const subAgents = msg.status === "done" || msg.status === "error" ? settleAll(a.subAgents) : a.subAgents;
           // Konto: der Sidecar meldet das REAL laufende (er hat den Prozess gestartet) — es gewinnt
           // immer gegen den lokalen Stand. Eine optimistisch gesetzte Auswahl, die im Sidecar gar
           // nicht angekommen ist, wird hier also wieder eingefangen statt still weiterzuleben.
@@ -1112,19 +1175,38 @@ export const useStore = create<MadsState>((set) => {
           // Die automatische Resume-Anweisung (continuation) ist KEIN Nutzer-Auftrag → nicht übernehmen.
           if (ev.text.trim() && !ev.continuation) patchAgent(msg.agentId, { lastPrompt: ev.text.trim() });
         } else if (ev.kind === "assistant_text" || ev.kind === "assistant_delta") {
-          if (ev.text.trim()) pushEvent(msg.agentId, { id: mkId(), kind: "assistant", text: ev.text });
+          // Äusserung eines Teil-Agenten gehört in SEINEN Mitschnitt, nicht in den Stream-Verlauf:
+          // dort stand sie bisher ununterscheidbar neben den Sätzen des Hauptloops. Verloren geht
+          // nichts — sein Schlussbericht kommt ohnehin als Ergebnis der Agent-Karte an.
+          if (ev.parentToolUseId) {
+            const detail = feedText(ev.text);
+            if (detail) upsertSubAgent(msg.agentId, ev.parentToolUseId, { feed: { kind: "text", detail } });
+          } else if (ev.text.trim()) {
+            pushEvent(msg.agentId, { id: mkId(), kind: "assistant", text: ev.text });
+          }
         } else if (ev.kind === "thinking") {
-          pushEvent(msg.agentId, { id: mkId(), kind: "thinking", text: ev.text });
+          if (ev.parentToolUseId) {
+            const detail = feedText(ev.text);
+            if (detail) upsertSubAgent(msg.agentId, ev.parentToolUseId, { feed: { kind: "thinking", detail } });
+          } else {
+            pushEvent(msg.agentId, { id: mkId(), kind: "thinking", text: ev.text });
+          }
+        } else if (ev.kind === "system" && ev.subtype === "subagent_init") {
+          // Eigene Sitzung des Teil-Agenten — trägt sein (oft schnelleres) Modell.
+          const model = typeof ev.data?.model === "string" ? shortModel(ev.data.model) : undefined;
+          if (ev.parentToolUseId && model) upsertSubAgent(msg.agentId, ev.parentToolUseId, { model });
         } else if (ev.kind === "tool_use") {
-          // Hintergrund-Agenten-Übersicht: Aktivität eines Teil-Agenten (parent_tool_use_id) hält seinen
-          // „aktuellen Schritt" aktuell; ein Task/Agent-tool_use startet einen neuen Teil-Agenten.
-          if (ev.parentToolUseId) upsertSubAgent(msg.agentId, ev.parentToolUseId, { currentStep: ev.name });
+          // Einblick-Panel: Aktivität eines Teil-Agenten (parent_tool_use_id) hält seinen „aktuellen
+          // Schritt" aktuell und wandert in seinen Mitschnitt; ein Task/Agent-tool_use startet einen.
+          if (ev.parentToolUseId)
+            upsertSubAgent(msg.agentId, ev.parentToolUseId, {
+              currentStep: ev.name,
+              feed: { kind: "tool", name: ev.name, detail: feedDetail(ev.name, ev.input), toolUseId: ev.toolUseId },
+            });
           if (ev.name === "Task" || ev.name === "Agent") {
-            const label =
-              typeof ev.input?.description === "string" ? ev.input.description
-              : typeof ev.input?.subagent_type === "string" ? ev.input.subagent_type
-              : "Teil-Agent";
-            upsertSubAgent(msg.agentId, ev.toolUseId, { label });
+            const meta = subAgentLabel(ev.input);
+            rememberSubAgent(ev.toolUseId, meta);
+            upsertSubAgent(msg.agentId, ev.toolUseId, meta);
           }
           if (ev.name === "TodoWrite") {
             const todos = ((ev.input?.todos as TodoItem[]) ?? []).map((t) => ({
@@ -1149,11 +1231,19 @@ export const useStore = create<MadsState>((set) => {
               description: typeof ev.input?.description === "string" ? ev.input.description : undefined,
               command: toolCommand(ev.input ?? {}),
               running: true,
+              // Wer hat das aufgerufen? Ohne die Marke sieht ein Werkzeug-Aufruf eines Teil-Agenten
+              // in der Timeline genauso aus wie einer des Streams selbst.
+              viaSubAgent: ev.parentToolUseId
+                ? (useStore.getState().agents[msg.agentId]?.subAgents?.[ev.parentToolUseId]?.label ?? "Teil-Agent")
+                : undefined,
             });
           }
         } else if (ev.kind === "tool_result") {
           completeTool(msg.agentId, ev.toolUseId, ev.output ?? ev.summary, ev.ok);
-          removeSubAgent(msg.agentId, ev.toolUseId); // war es der Abschluss eines Teil-Agenten? → aus der Übersicht nehmen
+          // Ergebnis eines Werkzeugs, das ein Teil-Agent aufrief → an seiner Mitschnitt-Zeile vermerken.
+          if (ev.parentToolUseId)
+            upsertSubAgent(msg.agentId, ev.parentToolUseId, { resultFor: { toolUseId: ev.toolUseId, ok: ev.ok } });
+          finishSubAgent(msg.agentId, ev.toolUseId, ev.ok); // war es der Abschluss eines Teil-Agenten?
         }
         break;
       }

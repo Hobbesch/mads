@@ -10,6 +10,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { saveNewStreamDraft, loadNewStreamDraft, draftHasContent } from "../newStreamDraft";
 import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
+import { SubAgentPanel } from "./SubAgentPanel";
 import { ModelEffortPicker } from "./ModelEffortPicker";
 import { UsageMeter } from "./UsageMeter";
 import { modelLabel } from "../modelCatalog";
@@ -943,20 +944,7 @@ export function Inspector() {
         </div>
       )}
 
-      {Object.keys(agent.subAgents ?? {}).length > 0 && (
-        <div className="subagents-panel">
-          <div className="subagents-title">▶ Teil-Agenten · {Object.keys(agent.subAgents ?? {}).length} aktiv</div>
-          {Object.values(agent.subAgents ?? {})
-            .sort((a, b) => a.startedAt - b.startedAt)
-            .map((sa) => (
-              <div key={sa.id} className="subagent-row">
-                <span className="subagent-dot" title="läuft" />
-                <span className="subagent-label">{sa.label}</span>
-                {sa.currentStep && <span className="subagent-step">{sa.currentStep}</span>}
-              </div>
-            ))}
-        </div>
-      )}
+      <SubAgentPanel agent={agent} />
 
       <div className="timeline-wrap">
         <MessageTimeline agentId={selectedId} />

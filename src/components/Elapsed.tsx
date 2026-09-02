@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 
-/** "8s", "1m 04s", "1h 02m" — kompakte, mitlaufende Laufzeit. */
-function fmt(ms: number): string {
+/** "8s", "1m 04s", "1h 02m" — kompakte Dauer. Exportiert für abgeschlossene (nicht mehr
+ *  tickende) Zeitspannen, die dieselbe Schreibweise brauchen wie die laufende Anzeige. */
+export function formatDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   if (total < 60) return `${total}s`;
   const m = Math.floor(total / 60);
@@ -22,5 +23,5 @@ export function Elapsed({ since, className }: { since: number; className?: strin
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
-  return <span className={className}>{fmt(now - since)}</span>;
+  return <span className={className}>{formatDuration(now - since)}</span>;
 }

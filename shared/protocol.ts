@@ -694,19 +694,23 @@ export interface SidecarReadyMsg extends BaseMsg {
   buildStale: boolean;
 }
 
+// parentToolUseId (auf allen Event-Arten, die ein Teil-Agent erzeugen kann): gesetzt, wenn das
+// Event aus einem SUB-AGENTEN (Task/Agent-Tool) stammt — dann ist es die tool_use_id des
+// Task-Aufrufs, der ihn startete. Erlaubt dem Frontend, die Aktivität dem richtigen Teil-Agenten
+// zuzuordnen (Einblick-Panel im Inspector). null/fehlt = Hauptloop.
+// Ursprünglich trug nur `tool_use` das Feld; damit liess sich zwar zählen, WIE VIELE Teil-Agenten
+// laufen, aber nicht, was sie tun: Ergebnis (ok/Fehler), Antworttext und Denkschritte kamen ohne
+// Zuordnung an und landeten als vermeintliche Äusserungen des Hauptloops in der Timeline.
 export type AgentEvent =
-  | { kind: "assistant_text"; text: string }
-  | { kind: "assistant_delta"; text: string }
-  | { kind: "thinking"; text: string }
+  | { kind: "assistant_text"; text: string; parentToolUseId?: string }
+  | { kind: "assistant_delta"; text: string; parentToolUseId?: string }
+  | { kind: "thinking"; text: string; parentToolUseId?: string }
   // Vom Menschen eingegebene Anweisung (Prompt). Der Sidecar emittiert sie als Event, damit sie
   // auf ALLEN Clients (Mac + Remote) im Verlauf erscheint — nicht nur dort, wo sie getippt wurde.
   | { kind: "user_text"; text: string; attachments?: TimelineAttachment[]; continuation?: boolean }
-  // parentToolUseId: gesetzt, wenn dieser tool_use aus einem SUB-AGENTEN (Task/Agent-Tool) stammt —
-  // dann ist es die tool_use_id des Task-Aufrufs, der ihn startete. Erlaubt dem Frontend, die Aktivität
-  // dem richtigen Teil-Agenten zuzuordnen (Hintergrund-Agenten-Übersicht). null/fehlt = Hauptloop.
   | { kind: "tool_use"; toolUseId: string; name: string; input: Record<string, unknown>; parentToolUseId?: string }
-  | { kind: "tool_result"; toolUseId: string; ok: boolean; summary?: string; output?: string }
-  | { kind: "system"; subtype: string; data?: Record<string, unknown> };
+  | { kind: "tool_result"; toolUseId: string; ok: boolean; summary?: string; output?: string; parentToolUseId?: string }
+  | { kind: "system"; subtype: string; data?: Record<string, unknown>; parentToolUseId?: string };
 
 export interface AgentEventMsg extends BaseMsg {
   type: "agent_event";

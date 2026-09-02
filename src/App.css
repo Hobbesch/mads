@@ -1130,7 +1130,7 @@ button.primary:hover {
   font-size: 11px;
   color: var(--text-faint);
 }
-/* Teil-Agenten-Panel im Inspector (Hintergrund-Agenten-Übersicht). */
+/* Teil-Agenten-Panel im Inspector: Übersicht + aufklappbarer Mitschnitt je Teil-Agent. */
 .subagents-panel {
   margin: 8px 12px 0;
   padding: 8px 10px;
@@ -1141,6 +1141,12 @@ button.primary:hover {
   flex-direction: column;
   gap: 5px;
 }
+.subagents-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
 .subagents-title {
   font-size: 11px;
   font-weight: 700;
@@ -1148,11 +1154,68 @@ button.primary:hover {
   color: var(--accent);
   text-transform: uppercase;
 }
+.subagents-finished {
+  font-weight: 600;
+  color: var(--text-faint);
+}
+.subagents-toggle-all {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.subagents-toggle-all:hover {
+  color: var(--text);
+}
+.subagent {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.subagent.open {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+/* Zeilen-Kopf ist ein Knopf (Aufklappen) — als Zeile gestylt, nicht als Schaltfläche. */
 .subagent-row {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 3px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.subagent-row:hover {
+  background: var(--panel);
+}
+.subagent.open > .subagent-row:hover {
+  background: var(--panel-2);
+}
+.subagent-caret {
+  font-size: 11px;
+  line-height: 1;
+  width: 9px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  transition: transform 0.12s ease;
+}
+.subagent-row:hover .subagent-caret {
+  color: var(--text);
+}
+.subagent-caret.open {
+  transform: rotate(90deg);
 }
 .subagent-dot {
   width: 8px;
@@ -1160,10 +1223,19 @@ button.primary:hover {
   flex-shrink: 0;
   border-radius: 50%;
   background: var(--accent);
+}
+.subagent-dot.running {
   animation: pulse 1.4s ease-in-out infinite;
 }
+.subagent-dot.done {
+  background: var(--text-faint);
+}
+.subagent-dot.failed {
+  background: var(--s-red);
+}
 @media (prefers-reduced-motion: reduce) {
-  .subagent-dot { animation: none; }
+  .subagent-dot.running { animation: none; }
+  .subagent-caret { transition: none; }
 }
 .subagent-label {
   font-size: 12px;
@@ -1173,6 +1245,21 @@ button.primary:hover {
   white-space: nowrap;
   flex: 1;
 }
+.subagent-type,
+.subagent-model {
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+.subagent.open .subagent-type,
+.subagent.open .subagent-model {
+  background: var(--accent-weak);
+}
 .subagent-step {
   font-family: var(--mono);
   font-size: 11px;
@@ -1181,6 +1268,75 @@ button.primary:hover {
   padding: 1px 6px;
   border-radius: 5px;
   background: var(--panel);
+}
+.subagent.open .subagent-step {
+  background: var(--accent-weak);
+}
+.subagent-meta {
+  font-size: 10px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+/* Mitschnitt: was der Teil-Agent tatsächlich tut — Werkzeuge, Denkschritte, Äusserungen. */
+.subagent-feed {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px 8px 6px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.subagent-feed.empty {
+  padding: 2px 8px 6px 22px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.subagent-feed-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.sf-name {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text);
+  flex-shrink: 0;
+}
+.sf-detail {
+  font-family: var(--mono);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.sf-mark {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.sf-mark.err {
+  color: var(--s-red);
+}
+.sf-kind {
+  font-size: 10px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  font-style: italic;
+}
+.sf-text {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.subagent-feed-line.thinking .sf-text {
+  font-style: italic;
+  color: var(--text-faint);
 }
 
 /* Aktive Teil-Agenten (Sub-Agenten) — dezenter Akzent-Hinweis auf der Kachel. */
@@ -1572,6 +1728,17 @@ button.primary:hover {
 .tl-tool-desc {
   color: var(--text-dim);
   font-size: 13px;
+}
+/* Marke „stammt von einem Teil-Agenten" — sonst sieht dessen Werkzeug-Aufruf in der Timeline
+   genauso aus wie einer des Streams selbst. */
+.tl-tool-via {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-weak);
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
 }
 .tl-io {
   display: flex;

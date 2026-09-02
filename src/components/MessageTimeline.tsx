@@ -32,6 +32,11 @@ function ToolEvent({ ev }: { ev: Extract<TimelineEvent, { kind: "tool" }> }) {
         <div className="tl-tool-head">
           <span className="tl-tool-name">{ev.name}</span>
           {ev.description && <span className="tl-tool-desc">{ev.description}</span>}
+          {ev.viaSubAgent && (
+            <span className="tl-tool-via" title={`Aufgerufen vom Teil-Agenten „${ev.viaSubAgent}", nicht vom Stream selbst`}>
+              ▸ {ev.viaSubAgent}
+            </span>
+          )}
         </div>
         {ev.command && (
           <div className="tl-io">
