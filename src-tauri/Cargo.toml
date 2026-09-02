@@ -37,7 +37,7 @@ cpal = "0.18.1"
 # Wir bringen unser eigenes self-signed Zert (TOFU-Pinning) → KEINE webpki-/native-roots nötig
 # (das sind Client-Features); der Server nutzt tokio-rustls direkt als Acceptor.
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 tokio-rustls = "0.26"
 rustls = "0.23"
 rustls-pki-types = "1"

@@ -418,6 +418,7 @@ export default function App() {
             const hasGit = rc.mainFastForwarded > 0 || rc.cleaned.length > 0 || rc.residue.length > 0 || rc.mainBehind > 0;
             const seed = rc.seedGenerated ?? 0;
             const relocated = rc.relocated ?? [];
+            const adopted = rc.adopted ?? [];
             return (
               <div className={`reconcile-banner${rc.mainBehind > 0 ? " warn" : ""}`}>
                 <span className="reconcile-text">
@@ -444,6 +445,8 @@ export default function App() {
                     `${hasGit ? " · " : ""}📦 ${seed} lokale Config-Datei(en) erkannt → werden in neue Streams kopiert (.mads/worktree-seed)`}
                   {relocated.length > 0 &&
                     `${hasGit || seed > 0 ? " · " : ""}🔀 ${relocated.length} Stream(s) von einem anderen Rechner wiederhergestellt (Worktree neu angelegt): ${relocated.join(", ")}`}
+                  {adopted.length > 0 &&
+                    `${hasGit || seed > 0 || relocated.length > 0 ? " · " : ""}⬇︎ ${adopted.length} aktive(r) Branch(es) von GitHub übernommen — lokaler Worktree angelegt, bereit zum Weiterarbeiten: ${adopted.join(", ")}`}
                 </span>
                 <button
                   className="banner-close"
