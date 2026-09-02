@@ -3,7 +3,7 @@
  * und welche Effort-Stufen jedes Modell unterstützt. Genutzt von der linken Navigation (globaler
  * Default), dem New-Stream-Dialog und dem Inspector (pro-Stream-Umschaltung).
  *
- * Effort-Fakten (Stand claude-api-Skill): `xhigh` gibt es erst ab Fable 5 / Opus 4.7+ / Sonnet 5;
+ * Effort-Fakten (Stand claude-api-Skill): `xhigh` gibt es erst ab Fable 5/5.1 / Opus 4.7+ / Sonnet 5;
  * Haiku 4.5 kennt KEINEN Effort-Parameter; Sonnet 4.6 kann bis `high` (kein xhigh → kein Ultracode).
  * „Ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung (SDK-Session-Flag `ultracode`).
  */
@@ -23,8 +23,9 @@ const FULL: EffortMode[] = ["low", "medium", "high", "xhigh", "ultracode"];
 
 // Aktuelle Modell-Riege. Reihenfolge = Anzeige im Dropdown.
 export const MODELS: ModelOption[] = [
-  { id: "claude-fable-5", label: "Fable 5", hint: "Anthropics fähigstes Modell — anspruchsvollste, lang laufende Agenten-Arbeit (teuerste Stufe: $10/$50 pro Mio.)", effort: FULL },
-  { id: "claude-opus-5", label: "Opus 5", hint: "Stärkster fürs agentische Coding — Standard/Empfehlung für den Integrator; halb so teuer wie Fable 5 ($5/$25)", effort: FULL },
+  { id: "claude-fable-5-1", label: "Fable 5.1", hint: "Anthropics fähigstes Modell — Nachfolger von Fable 5, anspruchsvollste, lang laufende Agenten-Arbeit (teuerste Stufe: $10/$50 pro Mio.)", effort: FULL },
+  { id: "claude-fable-5", label: "Fable 5", hint: "Vorgänger-Fable (gleicher Preis wie Fable 5.1: $10/$50)", effort: FULL },
+  { id: "claude-opus-5", label: "Opus 5", hint: "Stärkster fürs agentische Coding — Standard/Empfehlung für den Integrator; halb so teuer wie Fable 5.1 ($5/$25)", effort: FULL },
   {
     id: "opusplan",
     label: "Opus+Plan",

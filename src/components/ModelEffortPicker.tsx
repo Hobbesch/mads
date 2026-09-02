@@ -4,8 +4,8 @@ import { MODELS, EFFORT_LABEL, EFFORT_HINT, effortLevelsFor, modelLabel } from "
 /**
  * Modell- + Effort-Wähler. Wiederverwendet für den GLOBALEN Default (linke Navigation) und die
  * PRO-STREAM-Umschaltung (Inspector). Der Effort-Regler passt sich dem Modell an: Modelle ohne
- * Effort (Haiku) zeigen keinen Regler; Sonnet 4.6 nur bis „High"; Fable 5 / Opus 4.8 / Sonnet 5
- * bis „Ultracode" (= xhigh + Workflow-Orchestrierung).
+ * Effort (Haiku) zeigen keinen Regler; Sonnet 4.6 nur bis „High"; Fable 5.1 / Fable 5 / Opus 5 /
+ * Opus 4.8 / Sonnet 5 bis „Ultracode" (= xhigh + Workflow-Orchestrierung).
  */
 export function ModelEffortPicker({
   model,
