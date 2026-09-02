@@ -14,7 +14,7 @@ import { loadApprovedKinds, saveApprovedKinds, loadApprovedTools, saveApprovedTo
 import { killProcessesInWorktree } from "./worktree-procs.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
-import { autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
+import { adoptRemoteBranch, autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverAdoptableBranches, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
 import { attributesArgs } from "./gitAttributes.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } from "./devserver.js";
@@ -1486,6 +1486,44 @@ export class Orchestrator {
       log(`[orchestrator] Worktree-Discovery fehlgeschlagen: ${String(e)}`);
     }
 
+    // 2b) DRITTE Quelle: aktive Branches auf origin, die hier KEINE lokale Spur haben.
+    //     Registry (`.mads/agents.json`) und Worktrees sind beide maschinen-lokal — ein Stream, der
+    //     auf einem ZWEITEN Mac angelegt und gepusht wurde, war hier bis dahin unsichtbar (weder
+    //     Kachel noch Worktree), obwohl der Branch auf GitHub liegt. Er wird jetzt automatisch als
+    //     Worktree ausgecheckt und als fortsetzbarer Stream angeboten. Die Claude-Session bleibt auf
+    //     dem anderen Rechner (Transcripts sind lokal) → sessionId bewusst leer = frischer Start im
+    //     bestehenden Branch; `lastPrompt` bleibt leer, damit NICHTS automatisch losläuft.
+    const adopted: string[] = [];
+    try {
+      const taken = new Set<string>();
+      for (const e of registry) if (e.branch) taken.add(e.branch);
+      for (const c of candidates) if (c.branch) taken.add(c.branch);
+      for (const cand of await discoverAdoptableBranches(repoRoot, defaultBranch, taken)) {
+        if (seen.has(cand.agentId) || this.pool.has(cand.agentId)) continue;
+        const res = await adoptRemoteBranch(repoRoot, cand.agentId, cand.branch);
+        if (!res.ok) {
+          log(`[orchestrator] adopt: ${cand.branch} konnte nicht übernommen werden: ${res.error}`);
+          continue;
+        }
+        const label = cand.branch.replace(/^mads\//, "");
+        candidates.push({
+          agentId: cand.agentId,
+          label,
+          role: "sub",
+          branch: cand.branch,
+          worktreePath: res.path,
+          status: "queued",
+          mock: false,
+          updatedAt: Date.now(),
+        });
+        seen.add(cand.agentId);
+        adopted.push(label);
+        log(`[orchestrator] adopt: ${cand.branch} (+${cand.ahead} über ${defaultBranch}) → ${res.path}`);
+      }
+    } catch (e) {
+      log(`[orchestrator] Remote-Branch-Übernahme fehlgeschlagen: ${String(e)}`);
+    }
+
     // 3) Jeden Kandidaten gegen GitHub einordnen.
     const offer: ResumableAgent[] = [];
     const cleaned: string[] = [];
@@ -1571,10 +1609,10 @@ export class Orchestrator {
     const mainBehind = ff.blocked ? ff.behind : 0;
     const mainBlocked = ff.blocked;
     if (offer.length > 0) this.emit({ ...envelope(), type: "resumable_agents", agents: offer });
-    if (mainFastForwarded > 0 || mainBehind > 0 || cleaned.length > 0 || residue.length > 0 || seedGenerated > 0 || relocated.length > 0) {
-      this.emit({ ...envelope(), type: "reconcile_summary", mainFastForwarded, mainBehind, mainBlocked, cleaned, residue, seedGenerated, relocated });
+    if (mainFastForwarded > 0 || mainBehind > 0 || cleaned.length > 0 || residue.length > 0 || seedGenerated > 0 || relocated.length > 0 || adopted.length > 0) {
+      this.emit({ ...envelope(), type: "reconcile_summary", mainFastForwarded, mainBehind, mainBlocked, cleaned, residue, seedGenerated, relocated, adopted });
     }
-    log(`[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length} seed=${seedGenerated} relocated=${relocated.length}`);
+    log(`[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length} seed=${seedGenerated} relocated=${relocated.length} adopted=${adopted.length}`);
     await this.hydrateReviewStreams(); // persistierte Review-Streams (fremde PRs) als Kacheln wiederherstellen
   }
 

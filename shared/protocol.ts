@@ -1098,6 +1098,15 @@ export interface ReconcileSummaryMsg extends BaseMsg {
    * Subs beim Öffnen still aus dem Grid; jetzt sind sie zurück + der Nutzer sieht, dass es passiert ist.
    */
   relocated?: string[];
+  /**
+   * Cross-Machine-Fortsetzung: Branches, die auf origin AKTIV sind (ungemergt über <default>, nicht
+   * von einem Bot und nicht nachweislich einem fremden GitHub-Account zugeordnet), für die es hier
+   * aber weder Registry-Eintrag noch Worktree gab — typisch: auf dem ZWEITEN Mac angelegt. Sie wurden
+   * beim Öffnen automatisch als lokale Worktrees ausgecheckt und stehen als Streams bereit — Labels.
+   * `.mads/agents.json` ist gitignored und damit maschinen-lokal; ohne diesen Schritt ist ein nur auf
+   * origin existierender Branch für mads unsichtbar (die Ursache der „mein Stream fehlt"-Lücke).
+   */
+  adopted?: string[];
 }
 
 /** Laufzeit-Kollisionen zwischen aktiven Agenten (leeres Array = aufgeräumt). */
