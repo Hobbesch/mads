@@ -1518,7 +1518,11 @@ export class Orchestrator {
         });
         seen.add(cand.agentId);
         adopted.push(label);
-        log(`[orchestrator] adopt: ${cand.branch} (+${cand.ahead} über ${defaultBranch}) → ${res.path}`);
+        const ageD = Math.max(0, Math.round((Date.now() / 1000 - cand.lastCommitAt) / 86_400));
+        const partial = cand.unique < cand.ahead ? `, davon ${cand.unique} noch nicht in ${defaultBranch}` : "";
+        log(
+          `[orchestrator] adopt: ${cand.branch} (+${cand.ahead} über ${defaultBranch}${partial}, letzter Commit vor ${ageD} Tag(en)) → ${res.path}`,
+        );
       }
     } catch (e) {
       log(`[orchestrator] Remote-Branch-Übernahme fehlgeschlagen: ${String(e)}`);

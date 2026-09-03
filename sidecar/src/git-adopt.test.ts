@@ -46,8 +46,15 @@ function setGh(mode: null | { login: string; author: string; type: string }): vo
 }
 
 async function main(): Promise<void> {
-  const { agentIdForBranch, looksLikeBotAuthor, discoverAdoptableBranches, adoptRemoteBranch, worktreePathFor } =
-    await import("./git.js");
+  const {
+    agentIdForBranch,
+    looksLikeBotAuthor,
+    discoverAdoptableBranches,
+    adoptRemoteBranch,
+    worktreePathFor,
+    adoptMaxAgeDays,
+    ADOPT_MAX_AGE_DAYS,
+  } = await import("./git.js");
 
   // ── reine Funktionen ──────────────────────────────────────────────────────
   check("agentIdForBranch ist stabil", agentIdForBranch("feat/x") === agentIdForBranch("feat/x"));
@@ -74,6 +81,17 @@ async function main(): Promise<void> {
     writeFileSync(join(seed, file), `${file}\n`);
     sg("add", "-A");
     sg("commit", "-qm", `work on ${branch}`, `--author=${author}`);
+  };
+
+  /** Wie commitOn, aber mit gesetztem Autor- UND Committer-Datum (for-each-ref liest letzteres). */
+  const commitOnAt = (branch: string, file: string, author: string, daysAgo: number, content?: string): void => {
+    sg("checkout", "-q", "-B", branch, "main");
+    writeFileSync(join(seed, file), content ?? `${file}\n`);
+    sg("add", "-A");
+    const when = new Date(Date.now() - daysAgo * 86_400_000).toISOString();
+    execFileSync("git", ["-C", seed, "commit", "-qm", `work on ${branch}`, `--author=${author}`, `--date=${when}`], {
+      env: { ...process.env, GIT_COMMITTER_DATE: when },
+    });
   };
 
   writeFileSync(join(seed, "readme.md"), "hi\n");
@@ -151,6 +169,68 @@ async function main(): Promise<void> {
   // ── nicht existierender Branch → sauberer Fehler statt Absturz ────────────
   const bad = await adoptRemoteBranch(repo, "adopted-nope", "feat/does-not-exist");
   check("adopt: unbekannter Branch → ok=false", bad.ok === false);
+
+  // ── Altersgrenze: alte Branches sind Archiv, kein laufender Stream ────────
+  // Regression: die Übernahme legte Branches vom Februar/März als Streams an, obwohl main bis
+  // August weiterlief. Ab jetzt entscheidet das Committer-Datum der Spitze.
+  check("Altersgrenze: Default ist ADOPT_MAX_AGE_DAYS", adoptMaxAgeDays() === ADOPT_MAX_AGE_DAYS);
+  process.env.MADS_ADOPT_MAX_AGE_DAYS = "90";
+  check("Altersgrenze: Env-Override wird gelesen", adoptMaxAgeDays() === 90);
+  process.env.MADS_ADOPT_MAX_AGE_DAYS = "off";
+  check("Altersgrenze: off schaltet den Filter ab", adoptMaxAgeDays() === Infinity);
+  process.env.MADS_ADOPT_MAX_AGE_DAYS = "quatsch";
+  check("Altersgrenze: Müll fällt auf den Default zurück", adoptMaxAgeDays() === ADOPT_MAX_AGE_DAYS);
+  delete process.env.MADS_ADOPT_MAX_AGE_DAYS;
+
+  const SQUASHED = "die eine Änderung\n";
+  commitOnAt("codex/ancient", "ancient.txt", HUMAN, 200); // ein halbes Jahr alt
+  // codex/squashed: genau ein Commit, dessen Patch gleich auch (mit anderer ID) in main landet.
+  commitOnAt("codex/squashed", "squashed.txt", HUMAN, 1, SQUASHED);
+  // Teil-Treffer: ein Commit ist patch-gleich mit main, der zweite ist echte, offene Arbeit.
+  sg("checkout", "-q", "-B", "codex/partial", "main");
+  writeFileSync(join(seed, "squashed.txt"), SQUASHED);
+  sg("add", "-A");
+  sg("commit", "-qm", "same patch as main", `--author=${HUMAN}`);
+  writeFileSync(join(seed, "extra.txt"), "offen\n");
+  sg("add", "-A");
+  sg("commit", "-qm", "still open work", `--author=${HUMAN}`);
+  sg("checkout", "-q", "main");
+  // Der Squash-Merge nach main: gleicher Patch, NEUE Commit-ID — rev-list sieht die Branches
+  // danach weiter als „ahead", nur die Patch-ID entlarvt sie als erledigt.
+  writeFileSync(join(seed, "squashed.txt"), SQUASHED);
+  sg("add", "-A");
+  sg("commit", "-qm", "feat: squashed work (#42)", `--author=${HUMAN}`);
+  sg("push", "-q", "origin", "--all");
+  execFileSync("git", ["-C", repo, "fetch", "-q", "origin", "--prune"]);
+
+  const busy = new Set(["feat/mine", "feat/taken"]);
+  const fresh = await discoverAdoptableBranches(repo, "main", busy);
+  const freshNames = fresh.map((f) => f.branch).sort();
+  check("alter Branch (200 Tage) wird ausgeschlossen", !freshNames.includes("codex/ancient"));
+  const aheadOfSquashed = execFileSync(
+    "git",
+    ["-C", repo, "rev-list", "--count", "origin/main..origin/codex/squashed"],
+    { encoding: "utf8" },
+  ).trim();
+  check("Vorbedingung: squash-gemergter Branch zählt weiter als ahead", parseInt(aheadOfSquashed, 10) > 0);
+  check("squash-gemergter Branch wird per Patch-ID ausgeschlossen", !freshNames.includes("codex/squashed"));
+  check("Branch mit echter Restarbeit bleibt übernehmbar", freshNames.includes("codex/partial"));
+  const partial = fresh.find((f) => f.branch === "codex/partial");
+  check("unique zählt nur die noch nicht gemergten Patches", partial?.unique === 1 && (partial?.ahead ?? 0) === 2);
+  check("lastCommitAt wird mitgeliefert", (partial?.lastCommitAt ?? 0) > 0);
+
+  const wide = await discoverAdoptableBranches(repo, "main", busy, { maxAgeDays: 365 });
+  const wideNames = wide.map((w) => w.branch).sort();
+  check("angehobene Altersgrenze holt den alten Branch zurück", wideNames.includes("codex/ancient"));
+  check("Patch-ID-Ausschluss gilt unabhängig vom Alter", !wideNames.includes("codex/squashed"));
+
+  process.env.MADS_ADOPT_MAX_AGE_DAYS = "365";
+  const viaEnv = await discoverAdoptableBranches(repo, "main", busy);
+  delete process.env.MADS_ADOPT_MAX_AGE_DAYS;
+  check("Env-Override wirkt auf die Auswahl", viaEnv.some((v) => v.branch === "codex/ancient"));
+
+  const capped = await discoverAdoptableBranches(repo, "main", busy, { maxAgeDays: 365, max: 1 });
+  check("max begrenzt die Anzahl", capped.length === 1);
 
   console.log(`${passed} passed, ${failed} failed`);
   if (failed > 0) throw new Error(`${failed} adopt test(s) failed`);
