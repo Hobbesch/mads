@@ -183,6 +183,16 @@ export function deliver(paths: MaildirPaths, env: PeerEnvelope): void {
   renameSync(tmp, join(paths.outNew, name)); // atomar — nie halb gelesen
 }
 
+/** Nur ZÄHLEN, was im Eingang liegt. `status()` läuft mehrfach pro Tick — die Nachrichten dafür
+ *  jedes Mal zu lesen und zu parsen wäre bei einer langen Offline-Warteschlange sinnlose Arbeit. */
+export function inboxCount(paths: MaildirPaths): number {
+  try {
+    return readdirSync(paths.inNew).filter((n) => n.endsWith(".json")).length;
+  } catch {
+    return 0;
+  }
+}
+
 /** Unverarbeitete Nachrichten (sortiert nach Zustellzeit) einsammeln. */
 export function readInbox(paths: MaildirPaths): Array<{ file: string; env: PeerEnvelope }> {
   let names: string[];
@@ -321,7 +331,7 @@ export class LinkManager {
     await this.setupChannel();
     await this.refreshOwnContract();
     await this.tick();
-    this.beat = setInterval(() => void this.heartbeat(), PRESENCE_BEAT_MS);
+    if (this.config) this.beat = setInterval(() => void this.heartbeat(), PRESENCE_BEAT_MS);
     this.emitStatus();
   }
 
@@ -476,7 +486,7 @@ export class LinkManager {
         drift: isDrift({ peerFp: this.peerPresence?.contractFp, ackedFp: this.peerAckedFp, threads: this.threads }),
       },
       threads: this.threads,
-      queued: this.paths ? readInbox(this.paths).length : 0,
+      queued: this.paths ? inboxCount(this.paths) : 0,
       hint,
       suggestions: this.suggestions,
     };
@@ -583,8 +593,12 @@ export class LinkManager {
     this.ownFp = fp;
     if (prevFp === undefined || fp === prevFp || !mainSha) return;
 
-    // Erklärt ein offener Thread diesen Stand? Dann ist er gelandet — sonst ist es Drift.
-    const explaining = this.threads.find((t) => t.origin === "local" && isOpenThread(t) && t.state !== "open");
+    // Erklärt ein laufender Thread diesen Stand? Dann ist er gelandet — sonst ist es Drift.
+    // Bewusst NUR „in Arbeit"/„vorgeschlagen": ein bereits als `landed` markierter Thread hat sein
+    // `done` schon gesendet (onIntegrated) — er würde hier sonst bei jedem Poll ein zweites schicken.
+    const explaining = this.threads.find(
+      (t) => t.origin === "local" && (t.state === "in_progress" || t.state === "proposed"),
+    );
     if (explaining) {
       this.apply(explaining.id, { kind: "landed", sha: mainSha });
       const updated = this.thread(explaining.id)!;
