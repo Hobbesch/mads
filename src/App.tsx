@@ -44,6 +44,13 @@ export default function App() {
   const project = useStore((s) => s.project);
   const projectLocked = useStore((s) => s.projectLocked);
   const authReloginNeeded = useStore((s) => s.authReloginNeeded);
+  // Konto des gescheiterten Streams (sonst das aktive) — der Banner benennt es, damit klar ist,
+  // WELCHE Anmeldung der Knopf erneuert. Nach einem Kontowechsel ist das nicht mehr selbstverständlich.
+  const authReloginAccount = useStore((s) => {
+    const id = s.authReloginAccountId ?? s.accounts?.activeId;
+    const p = s.accounts?.profiles.find((x) => x.id === id);
+    return p ? (p.email ? `${p.label} · ${p.email}` : p.label) : undefined;
+  });
   const pollProject = useStore((s) => s.pollProject);
   const resumables = useStore((s) => s.resumables);
   const resumeAgent = useStore((s) => s.resumeAgent);
@@ -374,12 +381,13 @@ export default function App() {
         {authReloginNeeded && (
           <div className="escalation-banner">
             <span className="escalation-text">
-              ✖ Authentifizierung fehlgeschlagen. Oft nur vorübergehend — sende den betroffenen Stream
-              einfach erneut. Bleibt es, ist dein Claude-Login abgelaufen: hier neu anmelden (kein Neustart nötig).
+              ✖ Authentifizierung fehlgeschlagen{authReloginAccount ? ` (${authReloginAccount})` : ""}. Oft nur
+              vorübergehend — sende den betroffenen Stream einfach erneut. Bleibt es, ist der Claude-Login dieses
+              Kontos abgelaufen: hier neu anmelden (kein Neustart nötig).
             </span>
             <button
               className="banner-action"
-              title="Öffnet ein Terminal mit dem Befehl claude auth login (Browser-OAuth). mads sieht deinen Token nie."
+              title={`Öffnet ein Terminal mit dem Browser-Login für ${authReloginAccount ?? "das aktive Konto"} — mads setzt dabei das Config-Verzeichnis dieses Kontos und sieht deinen Token nie.`}
               onClick={() => void useStore.getState().reloginClaude()}
             >
               Bei Claude neu anmelden

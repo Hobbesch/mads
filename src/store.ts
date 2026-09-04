@@ -328,6 +328,9 @@ export interface MadsState {
   /** Maschinenweiter Auth-Ausfall (authentication_failed/oauth_org_not_allowed): zeigt den
    *  „Bei Claude neu anmelden"-Banner. Dedupliziert (ein Banner/eine OS-Meldung pro Episode). */
   authReloginNeeded: boolean;
+  /** Konto-Profil-ID des Streams, dessen Auth scheiterte — der Re-Login muss GENAU dieses Konto
+   *  anmelden (`CLAUDE_CONFIG_DIR` je Konto). Fehlt sie, gilt das aktive Konto der Registry. */
+  authReloginAccountId?: string;
   resumables: ResumableAgent[];
   /** Eingehende fremde PRs (Bots gefiltert), die mads zum read-only Review anbietet. */
   incomingPrs: IncomingPr[];
@@ -443,10 +446,11 @@ export interface MadsState {
   dismissEscalations: () => void;
   /** Auth-Banner schließen (setzt authReloginNeeded zurück). */
   dismissAuthRelogin: () => void;
-  /** Öffnet ein Terminal mit `claude auth login` (Browser-OAuth). mads berührt den Token nie. */
-  reloginClaude: () => Promise<void>;
-  /** `claude auth status` in der Login-Shell → reiner Status-Text (kein Secret). */
-  checkAuthStatus: () => Promise<string>;
+  /** Öffnet ein Terminal mit `claude auth login` für ein BESTIMMTES Konto (Profil-ID; fehlt sie:
+   *  das gescheiterte bzw. aktive Konto). mads berührt den Token nie. */
+  reloginClaude: (accountId?: string) => Promise<void>;
+  /** `claude auth status` für dasselbe Konto → reiner Status-Text (kein Secret). */
+  checkAuthStatus: (accountId?: string) => Promise<string>;
   setDraft: (agentId: string, text: string) => void;
   setDraftImages: (agentId: string, images: ImageInput[]) => void;
   setDraftFiles: (agentId: string, files: AttachedFile[]) => void;
@@ -892,6 +896,7 @@ export const useStore = create<MadsState>((set) => {
                   permissions: [],
                   escalations: [],
                   authReloginNeeded: false,
+                  authReloginAccountId: undefined,
                   collisions: [],
                   panic: { active: false, stoppedAgentIds: [] },
                   editsByFile: {},
@@ -1365,7 +1370,11 @@ export const useStore = create<MadsState>((set) => {
         // stream-spezifische Notice unten bleibt zusätzlich erhalten.
         if (msg.code === "authentication_failed" || msg.code === "oauth_org_not_allowed") {
           if (!useStore.getState().authReloginNeeded) {
-            set({ authReloginNeeded: true });
+            // Konto des betroffenen Streams mitnehmen: der Re-Login meldet sonst das AKTIVE Konto
+            // an, während der Stream unter einem anderen `CLAUDE_CONFIG_DIR` läuft — genau der
+            // Umweg, der den Knopf nach einem Kontowechsel wirkungslos machte.
+            const failedAccountId = msg.agentId ? useStore.getState().agents[msg.agentId]?.accountId : undefined;
+            set({ authReloginNeeded: true, authReloginAccountId: failedAccountId });
             void notifyOsAuthRelogin();
           }
         }
@@ -1454,6 +1463,7 @@ export const useStore = create<MadsState>((set) => {
     permissions: [],
     escalations: [],
     authReloginNeeded: false,
+    authReloginAccountId: undefined,
     resumables: [],
     incomingPrs: [],
     reconcileSummary: undefined,
@@ -1664,17 +1674,41 @@ export const useStore = create<MadsState>((set) => {
     },
 
     dismissEscalations: () => set({ escalations: [] }),
-    dismissAuthRelogin: () => set({ authReloginNeeded: false }),
-    reloginClaude: async () => {
-      // Öffnet Terminal.app mit `claude auth login`. Best effort — Fehler nur loggen (kein
-      // Stream-Kontext für einen Notice). Den Token schreibt die CLI selbst in den Keychain.
+    dismissAuthRelogin: () => set({ authReloginNeeded: false, authReloginAccountId: undefined }),
+    reloginClaude: async (accountId) => {
+      // Öffnet Terminal.app mit `claude auth login` für GENAU ein Konto. Übergeben wird nur die
+      // Profil-ID — das Config-Verzeichnis schlägt der Core selbst in `~/.mads/accounts.json`
+      // nach (kein Pfad aus dem Frontend, also kein Kommando-Injektions-Weg). Ohne ID: das
+      // gescheiterte Konto, sonst das aktive. Den Token schreibt die CLI selbst in den Keychain.
+      const id = accountId ?? useStore.getState().authReloginAccountId;
       try {
-        await invoke("claude_relogin");
+        const target = (await invoke("claude_relogin", { accountId: id })) as { label: string; email?: string };
+        set((s) => ({
+          debugLog: [...s.debugLog.slice(-400), `[auth] Re-Login-Terminal für „${target.label}" (${target.email ?? "keine E-Mail hinterlegt"})`],
+        }));
       } catch (e) {
+        // Sichtbar machen statt nur zu loggen: sonst passiert auf den Klick GAR NICHTS (der
+        // häufigste Fall ist ein hand-editierter, unbrauchbarer `configDir` in der Registry).
         console.warn("[mads] claude_relogin fehlgeschlagen:", e);
+        set((s) => ({
+          escalations: [
+            ...s.escalations.filter((x) => x.code !== "relogin_failed"),
+            { ...envelope(), type: "error", scope: "sidecar", code: "relogin_failed", message: String(e), recoverable: true },
+          ],
+        }));
       }
     },
-    checkAuthStatus: async () => (await invoke("claude_auth_status")) as string,
+    checkAuthStatus: async (accountId) => {
+      const id = accountId ?? useStore.getState().authReloginAccountId;
+      const res = (await invoke("claude_auth_status", { accountId: id })) as {
+        account: { label: string; configDir: string; email?: string };
+        text: string;
+      };
+      // Konto MITAUSGEBEN: der Status ist pro Config-Verzeichnis verschieden — ohne diese Zeile
+      // sähe ein „loggedIn: true" des Standardkontos aus wie eine Freigabe für das zweite.
+      const who = res.account.email ? `${res.account.label} · ${res.account.email}` : res.account.label;
+      return `Konto: ${who}\n${res.account.configDir}\n\n${res.text}`;
+    },
 
     setDraft: (agentId, text) => set((s) => ({ drafts: { ...s.drafts, [agentId]: text } })),
     setDraftImages: (agentId, images) => set((s) => ({ draftImages: { ...s.draftImages, [agentId]: images } })),

@@ -174,6 +174,33 @@ und sucht dann einen Eintrag, den es für das Standardkonto gar nicht gibt. Veri
 (Löschen statt Weglassen: so wirkt auch eine vom Sidecar geerbte Variable nicht hinein).
 Der Regressionstest dazu steht in `agentEnv.test.ts`.
 
+## Re-Login gilt pro Konto (2026-09-04)
+
+Der Knopf „Bei Claude neu anmelden" (Banner + Einstellungen) rief bis dahin fest verdrahtet
+`claude auth login` **ohne** `CLAUDE_CONFIG_DIR` auf. Das meldet immer nur das *Standardkonto* an.
+Nach einem Kontowechsel blieb der Stream deshalb auf `authentication_failed` stehen, egal wie oft
+man den Knopf drückte — die einzige Abhilfe war der Umweg über das Terminal
+(`CLAUDE_CONFIG_DIR=~/… claude auth login`). Dasselbe galt für „Status prüfen": es zeigte den
+Zustand des Standardkontos und damit ein `loggedIn: true`, das für den betroffenen Stream nichts
+aussagte.
+
+Jetzt (`src-tauri/src/claude_auth.rs`):
+
+* Der Banner merkt sich das Konto des Streams, dessen Auth scheiterte (`authReloginAccountId`,
+  gefüttert aus `StatusUpdateMsg.accountId` — der Sidecar besitzt die Wahrheit), benennt es im
+  Text und meldet **genau dieses** Konto an. Ein Klick, kein Umweg.
+* Die Einstellungen zeigen bei mehr als einem Profil eine Kontowahl; Anmeldung **und** Status
+  gelten immer für das gewählte Konto, und der Status-Text nennt Label, E-Mail und Verzeichnis.
+* Für das Standardkonto bleibt die Variable **abwesend** (siehe Falle oben), für jedes andere
+  Konto werden zusätzlich die Auth-Übersteuerer im Terminal entfernt — dieselbe Regel wie in
+  `accountAgentEnv()`, sonst meldete ein gesetzter API-Key im Login ins falsche Konto.
+
+Sicherheitsgrenze: das Frontend übergibt nur die Profil-**ID**, nie einen Pfad. Das Verzeichnis
+kommt aus der Registry und muss `shell_safe_path()` bestehen (absolut, keine Quotes/`$`/Backticks/
+Zeilenumbrüche/`..`), bevor es ins AppleScript-`do script` interpoliert wird — sonst Fehlermeldung
+statt Kommando. `claude auth status` braucht gar keine Interpolation: das Konto steuert dort die
+Prozess-Env. Regressionstests: `claude_auth.rs` → `mod tests`.
+
 ## Auth-Übersteuerer
 
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` haben Vorrang vor dem
