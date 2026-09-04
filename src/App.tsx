@@ -446,7 +446,7 @@ export default function App() {
                   {relocated.length > 0 &&
                     `${hasGit || seed > 0 ? " · " : ""}🔀 ${relocated.length} Stream(s) von einem anderen Rechner wiederhergestellt (Worktree neu angelegt): ${relocated.join(", ")}`}
                   {adopted.length > 0 &&
-                    `${hasGit || seed > 0 || relocated.length > 0 ? " · " : ""}⬇︎ ${adopted.length} aktive(r) Branch(es) von GitHub übernommen — lokaler Worktree angelegt, bereit zum Weiterarbeiten: ${adopted.join(", ")}`}
+                    `${hasGit || seed > 0 || relocated.length > 0 ? " · " : ""}⬇︎ ${adopted.length} zuletzt aktive(r) Branch(es) von GitHub übernommen — lokaler Worktree angelegt, bereit zum Weiterarbeiten: ${adopted.join(", ")}`}
                 </span>
                 <button
                   className="banner-close"

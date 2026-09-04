@@ -269,10 +269,44 @@ async function classifyBranchTip(
 export interface AdoptableBranch {
   branch: string;
   agentId: string;
-  /** Commits über origin/<default>. Immer > 0 — sonst steckt der Branch bereits vollständig in <default>. */
+  /** Commits über origin/<default> (rev-list). Immer > 0 — sonst steckt der Branch bereits vollständig in <default>. */
   ahead: number;
+  /**
+   * Davon die Commits, deren Patch NICHT schon in <default> liegt (`git cherry`). Nach einem
+   * Squash-/Rebase-Merge ist `ahead` > 0, aber `unique` == 0 — solche Branches werden gar nicht
+   * erst angeboten. Fällt `git cherry` aus, gilt konservativ `unique === ahead`.
+   */
+  unique: number;
+  /** Committer-Datum der Spitze (unix-Sekunden) — Grundlage der Altersgrenze. */
+  lastCommitAt: number;
   /** Betreff des Spitzen-Commits — als Stream-Label sprechender als der nackte Branch-Name. */
   subject: string;
+}
+
+/**
+ * Altersgrenze (Tage) für die Übernahme, gemessen am Committer-Datum der Branch-Spitze.
+ * Ein Branch, an dem seit Monaten niemand gearbeitet hat, ist kein laufender Stream, sondern
+ * Archiv — beim Projekt-Öffnen ungefragt einen Worktree dafür anzulegen war der beobachtete
+ * Fehler (drei Branches vom Februar/März in einem Repo, dessen <default> bis August weiterlief).
+ * 30 Tage decken „die Arbeit von gestern" inklusive Ferien ab.
+ * Notfall-Schalter: `MADS_ADOPT_MAX_AGE_DAYS=<n>`; `0|off|false|no` schaltet den Filter ab.
+ */
+export const ADOPT_MAX_AGE_DAYS = 30;
+
+/** Effektive Altersgrenze inkl. Env-Override. `Infinity` = kein Altersfilter. */
+export function adoptMaxAgeDays(): number {
+  const raw = (process.env.MADS_ADOPT_MAX_AGE_DAYS ?? "").trim();
+  if (!raw) return ADOPT_MAX_AGE_DAYS;
+  if (/^(0|off|false|no)$/i.test(raw)) return Infinity;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : ADOPT_MAX_AGE_DAYS;
+}
+
+export interface DiscoverAdoptOptions {
+  /** Höchstzahl übernommener Branches pro Abgleich. */
+  max?: number;
+  /** Altersgrenze in Tagen; `Infinity` = kein Filter. Default: {@link adoptMaxAgeDays}. */
+  maxAgeDays?: number;
 }
 
 /**
@@ -280,13 +314,24 @@ export interface AdoptableBranch {
  * `taken` = bereits durch Registry/Worktrees/Pool abgedeckte Branch-Namen (die dürfen NICHT erneut
  * übernommen werden, sonst entstünde ein zweiter Worktree auf demselben Branch).
  * Setzt einen frischen `git fetch --prune` voraus (offerResumable macht den ohnehin).
+ *
+ * Ausschluss-Kriterien in dieser Reihenfolge (billig vor teuer, lokal vor Netz):
+ * Name/`taken` → Alter → `rev-list`-Ahead → `git cherry` (Patch-IDs) → GitHub-Autor.
+ * Jeder Ausschluss geht mit Begründung ins Log — „mads hat meinen Branch nicht angeboten"
+ * muss nachvollziehbar bleiben.
  */
 export async function discoverAdoptableBranches(
   repoRoot: string,
   defaultBranch: string,
   taken: Set<string>,
-  max = 8,
+  opts: DiscoverAdoptOptions = {},
 ): Promise<AdoptableBranch[]> {
+  const max = opts.max ?? 8;
+  const maxAgeDays = opts.maxAgeDays ?? adoptMaxAgeDays();
+  const maxAgeSec = Number.isFinite(maxAgeDays) ? Math.max(0, maxAgeDays) * 86_400 : Infinity;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const ageDays = (when: number) => Math.max(0, Math.round((nowSec - when) / 86_400));
+  const stale: string[] = [];
   const listed = await git(
     ["-C", repoRoot, "for-each-ref", "--format=%(refname:short)%09%(committerdate:unix)", "refs/remotes/origin"],
     repoRoot,
@@ -300,13 +345,28 @@ export async function discoverAdoptableBranches(
     if (!branch || branch === "HEAD" || branch === defaultBranch) continue;
     if (branch.startsWith("mads-review/")) continue; // Review-Branch fremder PRs — kein eigener Stream
     if (taken.has(branch)) continue;
-    rows.push({ branch, when: parseInt(when, 10) || 0 });
+    const at = parseInt(when, 10) || 0;
+    // Altersfilter zuerst: er kostet nichts (das Datum steht schon in der for-each-ref-Zeile) und
+    // hält teure Prüfungen (cherry, gh api) von den Karteileichen fern.
+    if (nowSec - at > maxAgeSec) {
+      stale.push(`${branch} (${ageDays(at)} d)`);
+      continue;
+    }
+    rows.push({ branch, when: at });
+  }
+  // Sammel-Zeile statt N Einzel-Zeilen: in gewachsenen Repos sind Dutzende Branches alt.
+  if (stale.length > 0) {
+    const head = stale.slice(0, 5).join(", ");
+    log(
+      `[git] adopt: ${stale.length} Branch(es) übersprungen (letzter Commit älter als ${maxAgeDays} Tage): ${head}` +
+        (stale.length > 5 ? ` … (+${stale.length - 5} weitere)` : ""),
+    );
   }
   if (rows.length === 0) return [];
   rows.sort((a, b) => b.when - a.when); // jüngste zuerst — am ehesten „die Arbeit von gestern"
   const myLogin = await githubLogin(repoRoot);
   const out: AdoptableBranch[] = [];
-  for (const { branch } of rows) {
+  for (const { branch, when } of rows) {
     if (out.length >= max) break;
     const ahead = await run(
       "git",
@@ -315,6 +375,23 @@ export async function discoverAdoptableBranches(
     );
     const n = ahead.code === 0 ? parseInt(ahead.stdout.trim() || "0", 10) : 0;
     if (n <= 0) continue; // vollständig in <default> → erledigt, kein aktiver Stream
+    // `rev-list` oben sieht nur direkte Enthaltenheit. Squash- und Rebase-Merges schreiben NEUE
+    // Commit-IDs — der Branch zählt danach weiter als „ahead", obwohl seine Änderungen längst in
+    // <default> stecken (genau so entstanden zwei der drei Geister-Streams). `git cherry` vergleicht
+    // über Patch-IDs statt Commit-IDs: `-` = äquivalenter Patch ist in <default> vorhanden, `+` = nicht.
+    const cherry = await run("git", ["-C", repoRoot, "cherry", `origin/${defaultBranch}`, `origin/${branch}`], repoRoot);
+    const marks = cherry.code === 0 ? cherry.stdout.split("\n").map((l) => l.trim()).filter(Boolean) : [];
+    const unique = marks.length > 0 ? marks.filter((l) => l.startsWith("+")).length : n;
+    // Nur ausschließen, wenn cherry auch tatsächlich geurteilt hat. Leere Ausgabe heißt NICHT
+    // „erledigt": cherry überspringt Merge-Commits, und bei Fehlern (code != 0) wissen wir nichts.
+    // Fail-open wie beim Autor-Check — ein Falsch-Positiv kostet einen löschbaren Worktree,
+    // ein Falsch-Negativ den Stream.
+    if (marks.length > 0 && unique === 0) {
+      log(
+        `[git] adopt: ${branch} übersprungen (${marks.length} Commit(s) liegen patch-gleich in ${defaultBranch} — squash-/rebase-gemergt)`,
+      );
+      continue;
+    }
     const tip = await run("git", ["-C", repoRoot, "log", "-1", "--format=%H%x09%an%x09%ae%x09%s", `origin/${branch}`], repoRoot);
     if (tip.code !== 0) continue;
     const [sha = "", name = "", email = "", subject = ""] = tip.stdout.trim().split("\t");
@@ -323,7 +400,7 @@ export async function discoverAdoptableBranches(
       log(`[git] adopt: ${branch} übersprungen (${owner === "bot" ? "Bot-Autor" : "fremder GitHub-Account"})`);
       continue;
     }
-    out.push({ branch, agentId: agentIdForBranch(branch), ahead: n, subject });
+    out.push({ branch, agentId: agentIdForBranch(branch), ahead: n, unique, lastCommitAt: when, subject });
   }
   return out;
 }
