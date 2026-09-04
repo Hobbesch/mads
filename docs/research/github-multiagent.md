@@ -537,4 +537,4 @@ Members: read*.
 - Conditional HTTP requests + Octokit hooks (ETag-Polling): <https://armel.soro.io/leveraging-conditional-http-requests-and-octokit-hooks-to-avoid-hitting-rate-limits-against-the-github-rest-api/>
 - GitHub Docs — Dealing with non-fast-forward errors: <https://docs.github.com/en/get-started/using-git/dealing-with-non-fast-forward-errors>
 - PyGithub + Rulesets/Merge-Queue (Referenz für programmatisches Setup): <https://medium.com/@python-javascript-php-html-css/use-rulesets-and-branch-protection-rules-with-pygithub-to-enable-github-merge-queue-266939788215>
-- Interne Referenz (Basis dieses Dokuments): `/Users/alessandromedici/Documents/coding/mads/docs/research/_paix-multi-agent-reference.md`
+- Interne Referenz (Basis dieses Dokuments): `/Users/amedici/coding/mads/docs/research/_paix-multi-agent-reference.md`
