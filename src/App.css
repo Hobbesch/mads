@@ -4550,3 +4550,263 @@ body.col-resizing .tree-resizer {
   color: #fff;
   border-color: transparent;
 }
+
+/* ============================================================================
+   Projekt-Verbund (docs/design/12-project-link.md §9)
+   Pille in der Titelleiste, Einstellungs-Abschnitt, Verbund-Bereich im
+   Integrator-Inspector mit einer Karte je Abgleich-Thread.
+   ============================================================================ */
+
+/* ---- Pille ---- */
+button.pill.link {
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+button.pill.link:hover {
+  filter: brightness(1.08);
+}
+.pill.link.ok {
+  background: rgba(48, 209, 88, 0.16);
+  color: #28a745;
+}
+.pill.link.warn {
+  background: rgba(255, 176, 32, 0.18);
+  color: #b9791b;
+}
+.pill.link.off {
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--text-dim);
+}
+.pill-badge {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* ---- Einstellungen ---- */
+.settings-sub-label {
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.link-state {
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(120, 120, 128, 0.12);
+  color: var(--text-dim);
+}
+.link-state.active {
+  background: rgba(48, 209, 88, 0.14);
+  color: #28a745;
+}
+.link-state.pending {
+  background: rgba(255, 176, 32, 0.16);
+  color: #b9791b;
+}
+.link-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+button.link-chip {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.link-chip:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* ---- Verbund-Bereich im Inspector ---- */
+.link-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.link-tab-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.link-tab-title {
+  font-size: 12px;
+  font-weight: 700;
+}
+.link-tab-state {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--text-dim);
+}
+.link-tab-state.active {
+  background: rgba(48, 209, 88, 0.16);
+  color: #28a745;
+}
+.link-tab-facts {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.link-tab-facts strong {
+  color: var(--text);
+}
+.link-drift {
+  color: #b9791b;
+}
+.link-devserver {
+  font-family: var(--mono);
+  font-size: 10px;
+  margin-right: 6px;
+}
+.link-tab-hint {
+  color: #b9791b;
+}
+.link-tab-empty {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.link-tab-composer,
+.peer-card-reply {
+  display: flex;
+  gap: 6px;
+}
+.link-tab-composer input,
+.peer-card-reply input {
+  flex: 1;
+  font-size: 12px;
+}
+.link-tab-closed {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ---- Karte je Thread ---- */
+.peer-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.peer-card.escalated,
+.peer-card.breaking {
+  border-color: rgba(255, 176, 32, 0.7);
+}
+.peer-card.done,
+.peer-card.declined {
+  opacity: 0.62;
+}
+.peer-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.peer-card-dir {
+  font-weight: 700;
+  color: var(--accent);
+}
+.peer-card-title {
+  font-size: 12px;
+  font-weight: 650;
+  flex: 1;
+}
+.peer-card-state {
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.peer-card-meta,
+.peer-card-files {
+  font-size: 10px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  word-break: break-word;
+}
+.peer-card-warn {
+  font-size: 11px;
+  line-height: 1.45;
+  color: #b9791b;
+  background: rgba(255, 176, 32, 0.14);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+.peer-card-brief summary,
+button.peer-card-link {
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+}
+.peer-card-brief pre,
+.peer-card-diff pre {
+  margin: 6px 0 0;
+  padding: 7px 9px;
+  max-height: 260px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(120, 120, 128, 0.1);
+  border-radius: 6px;
+}
+.peer-card-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.peer-card-who {
+  font-weight: 650;
+  margin-right: 5px;
+  color: var(--text-faint);
+}
+.peer-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.peer-card-actions button {
+  font-size: 11px;
+  padding: 3px 9px;
+}

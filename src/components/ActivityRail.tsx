@@ -3,6 +3,7 @@ import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useStore } from "../store";
 import { TOOLBAR_ITEMS, type ToolbarItem } from "../toolbarItems";
 import { ActivityRailItem } from "./ActivityRailItem";
+import { pendingThreads } from "../../shared/link";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RecentProjectsPopover } from "./RecentProjectsPopover";
 import { ModelEffortPicker } from "./ModelEffortPicker";
@@ -27,6 +28,8 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
   const defaultEffort = useStore((s) => s.defaultEffort);
   const setDefaultModel = useStore((s) => s.setDefaultModel);
   const setDefaultEffort = useStore((s) => s.setDefaultEffort);
+  const link = useStore((s) => s.link);
+  const peerWaiting = link ? pendingThreads(link.threads).length : 0;
   const accounts = useStore((s) => s.accounts);
   const accountUsage = useStore((s) => s.accountUsage);
   const setDefaultAccount = useStore((s) => s.setDefaultAccount);
@@ -56,7 +59,10 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
   );
 
   function badgeFor(item: ToolbarItem): number | "dot" | undefined {
-    if (item.id === "streams") return escalationsLen || undefined;
+    // „Streams" trägt zusätzlich die offenen Verbund-Anfragen: sie warten im Inspector des
+    // Integrators und wären sonst unsichtbar, solange man in einer anderen Ansicht arbeitet
+    // (Off-Dashboard-Awareness, docs/design/12-project-link.md §9).
+    if (item.id === "streams") return escalationsLen + peerWaiting || undefined;
     if (item.id === "changes") return collisionsLen || undefined;
     // Im Panic-Zustand zeigt der Eintrag die Freigabe — dann ist die Konfliktzahl irreführend,
     // stattdessen ein Punkt als „hier ist noch etwas offen"-Marker.

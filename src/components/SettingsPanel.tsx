@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { RemotePairing } from "./RemotePairing";
+import { LinkSettings } from "./LinkSettings";
 import type { InvestigationTarget } from "../../shared/protocol";
 
 /**
@@ -95,6 +96,7 @@ export function SettingsPanel() {
           )}
         </div>
         <InvestigationTargetsEditor />
+        <LinkSettings />
         <RemotePairing />
         {/* TODO(Post-MVP): Permission-Defaults, Modell-Auswahl, Update-Kanal (doc 10 §10). */}
       </div>

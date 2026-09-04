@@ -27,7 +27,7 @@ export function ActivityRailItem({
   const hasCountBadge = badge !== undefined && badge !== "dot";
 
   // aria-label: Badge eingebettet, damit VoiceOver es auch kollabiert ansagt (§8).
-  const BADGE_NOUN: Record<string, string> = { streams: "Eskalationen", changes: "Kollisionen", panic: "Streams in Konflikt" };
+  const BADGE_NOUN: Record<string, string> = { streams: "Eskalationen und Verbund-Anfragen", changes: "Kollisionen", panic: "Streams in Konflikt" };
   const labelWithBadge = hasCountBadge
     ? `${item.label} (${badge} ${BADGE_NOUN[item.id] ?? "Hinweise"})`
     : item.label;

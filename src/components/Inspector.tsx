@@ -11,6 +11,7 @@ import { saveNewStreamDraft, loadNewStreamDraft, draftHasContent } from "../newS
 import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
 import { SubAgentPanel } from "./SubAgentPanel";
+import { LinkTab } from "./LinkTab";
 import { ModelEffortPicker } from "./ModelEffortPicker";
 import { UsageMeter } from "./UsageMeter";
 import { modelLabel } from "../modelCatalog";
@@ -943,6 +944,9 @@ export function Inspector() {
           ))}
         </div>
       )}
+
+      {/* Projekt-Verbund: NUR beim Integrator — er ist der einzige Peer-Ansprechpartner (L3). */}
+      {agent.role === "integrator" && <LinkTab />}
 
       <SubAgentPanel agent={agent} />
 

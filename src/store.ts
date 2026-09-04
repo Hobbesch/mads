@@ -36,6 +36,8 @@ import type {
   UsageWindow,
   SandboxMode,
   InvestigationTarget,
+  LinkStatusMsg,
+  ProjectLinkConfig,
 } from "../shared/protocol";
 import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultEffortForModel } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
@@ -346,6 +348,13 @@ export interface MadsState {
   /** Untersuchungsziele des Projekts (Sandbox-Stufe A) — Spiegel von `.mads/targets.json`,
    *  gemeldet via targets_update; Persistenz macht der Sidecar. */
   investigationTargets: InvestigationTarget[];
+  /**
+   * Projekt-Verbund (docs/design/12-project-link.md): Zustand der Kopplung mit dem zweiten Repo
+   * in seiner eigenen mads-Instanz. REINER Spiegel von `link_status` — der Sidecar besitzt
+   * Konfiguration, Threads und Fingerprints; hier wird nur gerendert und Absicht gesendet.
+   * undefined = noch keine Meldung (dann bleibt die Verbund-Pille unsichtbar).
+   */
+  link?: LinkStatusMsg;
   // ── Spracheingabe (lokales Whisper) ──
   whisper: WhisperVM;
   dictation: DictationVM;
@@ -427,7 +436,8 @@ export interface MadsState {
     accountId?: string;
     /** Sandbox-Betriebsart schon beim Start (New-Stream-Dialog) — nur echte Sub-Streams. */
     sandboxMode?: SandboxMode;
-  }) => Promise<void>;
+    /** liefert die agentId des angelegten Streams (z. B. für die Verbund-Thread-Zuordnung). */
+  }) => Promise<string>;
   selectAgent: (id: string) => void;
   requestNewStream: () => void;
   dismissEscalations: () => void;
@@ -456,6 +466,20 @@ export interface MadsState {
   setSandboxMode: (id: string, mode: SandboxMode) => Promise<void>;
   /** Untersuchungsziele des Projekts ersetzen — der Sidecar validiert, persistiert und spiegelt. */
   saveInvestigationTargets: (targets: InvestigationTarget[]) => Promise<void>;
+  // ── Projekt-Verbund ──
+  /** Verbund anlegen/ändern (Settings-Panel). Der Sidecar schreibt `.mads/link.json`. */
+  configureLink: (config: ProjectLinkConfig) => Promise<void>;
+  /** Verbund lösen (Threads bleiben als Audit erhalten). */
+  removeLink: () => Promise<void>;
+  /** Nativer Ordner-Picker für den Haupt-Checkout der Gegenseite (liefert den Pfad oder null). */
+  pickPeerRepo: () => Promise<string | null>;
+  /** Dem Menschen einen direkten Draht zur Gegenseite geben (neue Anfrage oder Antwort im Thread). */
+  peerSend: (text: string, threadId?: string, title?: string) => Promise<void>;
+  /** Karten-Aktion auf einem Verbund-Thread (ablehnen, erledigt, Drift akzeptieren). */
+  peerThreadAction: (threadId: string, action: "decline" | "resolve" | "accept_drift", reason?: string) => Promise<void>;
+  /** [Starten]: Abgleich-Stream über den NORMALEN createAgent-Pfad anlegen und dem Sidecar
+   *  melden, wer den Thread ab jetzt bearbeitet. Streams entstehen nur hier — nie im Sidecar. */
+  startPeerThread: (threadId: string) => Promise<void>;
   sendInput: (id: string, text: string, images?: ImageInput[]) => Promise<void>;
   setPermissionMode: (id: string, mode: PermissionMode) => Promise<void>;
   setAutopilot: (id: string, level: AutopilotLevel) => Promise<void>;
@@ -1076,6 +1100,41 @@ export const useStore = create<MadsState>((set) => {
         set({ investigationTargets: msg.targets });
         break;
 
+      // ── Projekt-Verbund (docs/design/12-project-link.md) ──
+      case "link_status":
+        // Vollständiger Spiegel (Pille, Verbund-Tab, Einstellungen). Idempotent und
+        // snapshot-fähig: ersetzt lokal alles, nie teilweise gemerged.
+        set({ link: msg });
+        break;
+
+      case "peer_message": {
+        // Eingehende Nachricht der Gegenseite → sichtbar im Verlauf des Integrators, damit die
+        // Koordination im Chat nachvollziehbar bleibt (nicht nur als Karte). Der Sidecar hat sie
+        // dem Agenten bereits als markierte Anweisung zugestellt.
+        const m = msg.msg;
+        const head = `⇄ ${msg.from.slug}`;
+        const body =
+          m.kind === "contract_change"
+            ? `Contract-Änderung${m.breaking ? " (BREAKING)" : ""}: ${m.title}`
+            : m.kind === "request"
+              ? `Anfrage: ${m.title}`
+              : m.kind === "reply"
+                ? `Antwort: ${m.text.slice(0, 200)}`
+                : m.kind === "done"
+                  ? "Gegenseite meldet: erledigt"
+                  : "Kontakt";
+        notice(msg.agentId, m.kind === "done" ? "info" : "accent", `${head} — ${body}`);
+        break;
+      }
+
+      case "peer_proposal": {
+        notice(msg.agentId, "accent", `⇄ Abgleich-Vorschlag „${msg.label}" (Thread ${msg.threadId})`);
+        // Autopilot: der Sidecar hat entschieden, dass sofort gestartet wird — ausgeführt wird es
+        // hier, weil Streams ausschließlich über createAgent entstehen (Kachel, Modell, Konto).
+        if (msg.autostart) void useStore.getState().startPeerThread(msg.threadId);
+        break;
+      }
+
       case "model_active":
         // Doppel-Check: das REAL gelaufene Modell (Grundwahrheit aus den SDK-Nachrichten). Die
         // Anzeige richtet sich hiernach, nicht nach dem Picker-Wunsch — so kann ein stiller
@@ -1396,6 +1455,7 @@ export const useStore = create<MadsState>((set) => {
     panic: { active: false, stoppedAgentIds: [] },
     prompts: [],
     investigationTargets: [],
+    link: undefined,
     whisper: { installed: false, checked: false, downloading: false, progress: 0 },
     dictation: { recording: false, transcribing: false },
     autonomy: { autoSync: true, collisionScan: true },
@@ -1576,6 +1636,7 @@ export const useStore = create<MadsState>((set) => {
             ? { cwd: project.repoRoot }
             : {}),
       });
+      return id;
     },
 
     requestNewStream: () => set({ newStreamRequested: true }),
@@ -1726,6 +1787,30 @@ export const useStore = create<MadsState>((set) => {
     },
     saveInvestigationTargets: async (targets) => {
       await sendHost({ ...envelope(), type: "targets_save", targets });
+    },
+
+    // ── Projekt-Verbund: reine Absichts-Sender; die Wahrheit kommt als link_status zurück ──
+    configureLink: async (config) => {
+      await sendHost({ ...envelope(), type: "link_configure", config });
+    },
+    removeLink: async () => {
+      await sendHost({ ...envelope(), type: "link_remove" });
+    },
+    pickPeerRepo: () => pickFolder("Repo der Gegenseite wählen"),
+    peerSend: async (text, threadId, title) => {
+      await sendHost({ ...envelope(), type: "peer_send", text, threadId, title });
+    },
+    peerThreadAction: async (threadId, action, reason) => {
+      await sendHost({ ...envelope(), type: "peer_thread_action", threadId, action, reason });
+    },
+    startPeerThread: async (threadId) => {
+      const st = useStore.getState();
+      const t = st.link?.threads.find((x) => x.id === threadId);
+      if (!t || t.ownerAgentId) return; // unbekannt oder längst in Arbeit → kein zweiter Stream
+      const label = t.proposal?.label?.trim() || t.title;
+      const brief = t.proposal?.brief?.trim() || t.suggestedBrief || t.title;
+      const agentId = await st.createAgent({ label, prompt: brief, role: "sub", mock: false });
+      await sendHost({ ...envelope(), type: "peer_thread_action", threadId, action: "start", agentId, label });
     },
 
     sendInput: async (id, text, images) => {

@@ -300,6 +300,8 @@ export class LinkManager {
   private chain: Promise<void> = Promise.resolve();
   /** Version-Mismatch nur EINMAL je Episode eskalieren (kein Dauerfeuer im Poll). */
   private versionWarned = false;
+  /** Auto-Detect-Vorschläge — einmal je Projekt berechnet (ein `git ls-files`), nicht je Tick. */
+  private suggestions: string[] = [];
 
   constructor(deps: LinkDeps) {
     this.deps = deps;
@@ -315,6 +317,7 @@ export class LinkManager {
     this.threads = loadThreads(project.repoRoot);
     this.peerAckedFp = this.threads.find((t) => t.state === "done")?.contractFp;
     this.versionWarned = false;
+    this.suggestions = await this.suggestPatterns();
     await this.setupChannel();
     await this.refreshOwnContract();
     await this.tick();
@@ -475,6 +478,7 @@ export class LinkManager {
       threads: this.threads,
       queued: this.paths ? readInbox(this.paths).length : 0,
       hint,
+      suggestions: this.suggestions,
     };
   }
 

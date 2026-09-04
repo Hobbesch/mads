@@ -17,6 +17,7 @@ import { ParallelDialog } from "./components/ParallelDialog";
 import { SaveToast } from "./components/SaveToast";
 import { StalenessBanner } from "./components/StalenessBanner";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { LinkPill } from "./components/LinkPill";
 import "./App.css";
 
 /** Status, die einen aktiven Stream markieren — vor dem Schließen des Hauptfensters wird davor gewarnt. */
@@ -280,6 +281,7 @@ export default function App() {
           <div className="titlebar-right">
             {/* Versions-Pille entfernt (redundant — Version/Commit stehen in „Über mads"). */}
             {project && <span className="pill repo">{project.owner}/{project.repo}</span>}
+            <LinkPill />
             <span className={`pill ${sidecar.status}`}>
               {sidecar.status === "ready"
                 ? sidecar.sdkAvailable

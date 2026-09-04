@@ -1430,6 +1430,9 @@ export interface LinkStatusMsg extends BaseMsg {
   queued: number;
   /** Grund, weshalb der Link (noch) nicht aktiv ist — für den Hinweis im Settings-Panel. */
   hint?: string;
+  /** Auto-Detect-Vorschläge für `provides.patterns` (einmal je Projekt-Öffnen aus den
+   *  getrackten Pfaden abgeleitet) — Starthilfe im Einstellungs-Panel, nie automatisch gesetzt. */
+  suggestions?: string[];
 }
 
 /** Eine EINGEGANGENE Peer-Nachricht für Timeline/Karte. Trägt die `agentId` des Integrators
