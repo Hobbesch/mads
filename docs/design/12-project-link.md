@@ -582,6 +582,14 @@ bestehende Code eine klarere Antwort hatte:
    die gerade eingetroffene Nachricht wäre bis zum nächsten Poll liegen geblieben (im IO-Test als
    Flake sichtbar geworden). Jetzt hängen sich Zyklen an eine Promise-Kette an.
 
+4. **Gleichnamige Verzeichnisse blockieren den Verbund nicht.** Die Kanal-Richtungen heißen
+   `to-<slug>/` nach dem Verzeichnisnamen. Zwei **verschiedene** Repos dürfen aber denselben
+   Namen tragen (`~/work/acme/api` ⇄ `~/work/beta/api`) — dann bekommen beide Namen einen kurzen,
+   stabilen Hash ihres Pfades angehängt (`channelSlugs`). Beide Instanzen kennen beide Pfade und
+   rechnen dasselbe Ergebnis aus, der Kanal bleibt symmetrisch. Ein Repo mit sich selbst zu
+   koppeln bleibt abgelehnt — das ist der einzige Fall, in dem die Konfiguration wirklich
+   widersinnig ist.
+
 Zusätzlich trägt jeder Peer-Thread ein `suggestedBrief`: einen vom Sidecar vorbereiteten Auftrag,
 damit **[Starten]** auch auf Stufe `manual` (ohne LLM-Proposal) sofort funktioniert und die
 Ableitung an *einer* Stelle lebt statt doppelt im Frontend.

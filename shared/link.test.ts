@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import {
   LOOP_GUARD_MAX_HOPS,
   capDiff,
+  channelSlugs,
   contractFingerprint,
   contractFpInput,
   filterContractDelta,
@@ -223,6 +224,19 @@ function mk(overrides: Partial<LinkThread> = {}): LinkThread {
   );
   check("linkId ist kurz und stabil", linkIdFor("/a", "/b", sha256).length === 12);
   check("Slug ist dateisystem-sicher", slugFor("/Users/me/coding/shop server/") === "shop-server");
+
+  // Zwei VERSCHIEDENE Repos dürfen gleich heißen — der Kanal muss beide Richtungen trotzdem
+  // unterscheiden können, ohne dass jemand ein Verzeichnis umbenennt.
+  const plain = channelSlugs("/Users/me/coding/shop-server", "/Users/me/coding/shop-app", sha256);
+  check("unterschiedliche Namen bleiben unverändert", plain.own === "shop-server" && plain.peer === "shop-app");
+  const clash = channelSlugs("/Users/me/work/acme/api", "/Users/me/work/beta/api", sha256);
+  check("gleichnamige Repos bekommen eindeutige Kanal-Namen", clash.own !== clash.peer);
+  check("Kanal-Namen behalten den erkennbaren Repo-Namen", clash.own.startsWith("api-") && clash.peer.startsWith("api-"));
+  const mirror = channelSlugs("/Users/me/work/beta/api", "/Users/me/work/acme/api", sha256);
+  check(
+    "beide Instanzen berechnen dieselben Kanal-Namen (symmetrisch)",
+    mirror.own === clash.peer && mirror.peer === clash.own,
+  );
 
   check("Konfiguration ohne Peer wird verworfen", normalizeLinkConfig({ v: 1, provides: { patterns: [] } }) === undefined);
   const norm = normalizeLinkConfig({

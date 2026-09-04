@@ -385,6 +385,23 @@ export function slugFor(repoRoot: string): string {
   return base.replace(/[^A-Za-z0-9._-]/g, "-") || "repo";
 }
 
+/**
+ * Die beiden Kanal-Namen eines Verbunds (`to-<slug>/`) und die Presence-Dateinamen.
+ *
+ * Normalfall: die Verzeichnisnamen der beiden Repos. Zwei VERSCHIEDENE Repos können aber sehr
+ * wohl gleich heißen (`~/work/acme/api` und `~/work/beta/api`) — dann wären die beiden
+ * Richtungen des Kanals nicht unterscheidbar und beide Seiten schrieben in denselben
+ * Briefkasten. Deshalb in diesem Fall beide Namen mit einem kurzen, stabilen Hash ihres Pfades
+ * eindeutig machen. Beide Instanzen kennen beide Pfade und berechnen dasselbe Ergebnis — der
+ * Kanal bleibt also symmetrisch, ohne dass jemand ein Verzeichnis umbenennen muss.
+ */
+export function channelSlugs(ownRepoRoot: string, peerRepoRoot: string, sha256: Sha256): { own: string; peer: string } {
+  const own = slugFor(ownRepoRoot);
+  const peer = slugFor(peerRepoRoot);
+  if (own !== peer) return { own, peer };
+  return { own: `${own}-${sha256(ownRepoRoot).slice(0, 6)}`, peer: `${peer}-${sha256(peerRepoRoot).slice(0, 6)}` };
+}
+
 /** Contract-Deklaration einer Seite normalisieren (leere/doppelte Muster raus). */
 export function normalizePatterns(patterns: string[]): string[] {
   return [...new Set(patterns.map((p) => p.trim()).filter(Boolean))];

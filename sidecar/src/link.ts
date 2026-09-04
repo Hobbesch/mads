@@ -36,6 +36,7 @@ import {
   PRESENCE_BEAT_MS,
   capBrief,
   capDiff,
+  channelSlugs,
   contractFingerprint,
   describeDelta,
   filterContractDelta,
@@ -349,22 +350,11 @@ export class LinkManager {
   /** Maildir + Presence-Watch herstellen (nur bei konfiguriertem Verbund). */
   private async setupChannel(): Promise<void> {
     if (!this.project || !this.config) return;
-    this.ownSlug = slugFor(this.project.repoRoot);
-    this.peerSlug = slugFor(this.config.peer.repoRoot);
-    if (this.ownSlug === this.peerSlug) {
-      // Zwei gleichnamige Ordner: die Kanal-Richtungen wären nicht unterscheidbar. Lieber
-      // sichtbar ablehnen als still in denselben Briefkasten schreiben.
-      this.deps.emit({
-        ...envelope(),
-        type: "error",
-        scope: "sidecar",
-        code: "peer_version_mismatch",
-        message: `Verbund nicht möglich: beide Repos heißen „${this.ownSlug}". Die Kanal-Richtungen wären nicht unterscheidbar — eines der Verzeichnisse umbenennen.`,
-        recoverable: true,
-      });
-      this.config = undefined;
-      return;
-    }
+    // Kanal-Namen: normal die Verzeichnisnamen, bei Gleichnamigkeit mit kurzem Pfad-Hash
+    // eindeutig gemacht (zwei VERSCHIEDENE Repos dürfen gleich heißen, siehe channelSlugs).
+    const slugs = channelSlugs(this.project.repoRoot, this.config.peer.repoRoot, sha256);
+    this.ownSlug = slugs.own;
+    this.peerSlug = slugs.peer;
     this.linkId = linkIdFor(this.project.repoRoot, this.config.peer.repoRoot, sha256);
     this.paths = ensureMaildir(this.linkId, this.ownSlug, this.peerSlug);
     await this.heartbeat();
