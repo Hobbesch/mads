@@ -1370,7 +1370,13 @@ export const useStore = create<MadsState>((set) => {
           }
         }
         let removedGhost = false;
-        if (msg.agentId && (msg.code === "main_edited" || msg.code === "main_deploy_dirty")) {
+        // Verbund-HINWEISE sind keine Stream-Fehler: „die Gegenseite ist noch nicht gelandet" und
+        // „drüben hat sich der Contract bewegt" verlangen eine Entscheidung, sagen aber nichts über
+        // die Gesundheit dieses Streams. Ohne diesen Zweig stünde der Integrator nach einer
+        // harmlosen Reihenfolge-Warnung dauerhaft auf „Eskalation".
+        if (msg.agentId && (msg.code === "peer_land_order" || msg.code === "peer_contract_drift")) {
+          notice(msg.agentId, "warn", `⇄ ${msg.message}`);
+        } else if (msg.agentId && (msg.code === "main_edited" || msg.code === "main_deploy_dirty")) {
           // Proaktiver Hinweis (kein Fehler-Status): main-Dirt → auslagern ODER (nach Deploy) als Release
           // committen. Status bleibt unberührt; die Aktionen bietet der Inspector an, solange main dirty ist.
           // Deploy-Fall merken: der geführte nextStep hebt dann „Als Release committen" als Primäraktion
