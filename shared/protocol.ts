@@ -103,6 +103,10 @@ export type HostMessage =
   | RequestAccountsMsg
   | SetSandboxModeMsg
   | TargetsSaveMsg
+  | LinkConfigureMsg
+  | LinkRemoveMsg
+  | PeerSendMsg
+  | PeerThreadActionMsg
   | ShutdownMsg;
 
 /**
@@ -603,6 +607,9 @@ export type SidecarMessage =
   | AccountUsageMsg
   | RateLimitNoticeMsg
   | ModelActiveMsg
+  | LinkStatusMsg
+  | PeerMessageMsg
+  | PeerProposalMsg
   | TargetsUpdateMsg;
 
 /**
@@ -1161,6 +1168,11 @@ export type EscalationKind =
   | "main_edited" // Integrator hat main direkt geändert → in Sub-Stream auslagern (proaktiver Hinweis)
   | "main_deploy_dirty" // main-Dirt stammt aus einem gerade gelaufenen Deploy → „Als Release committen" anbieten
   | "foreign_edit" // Worktree änderte sich, während der Agent ruhte → Autopilot committet nicht blind mit
+  // ── Projekt-Verbund (docs/design/12-project-link.md §6.3) ──
+  | "peer_contract_drift" // Gegenseite hat den Contract geändert, ohne dass ein Thread es erklärt
+  | "peer_loop_guard" // Ping-Pong zwischen den Instanzen (hops ≥ Schwelle) → Mensch entscheidet
+  | "peer_version_mismatch" // Gegenseite spricht eine andere LINK_VERSION → nur hello wird verarbeitet
+  | "peer_land_order" // Consumer will mergen, obwohl die Provider-Seite noch nicht gelandet ist (Warnung)
   | "max_budget";
 
 export interface SidecarErrorMsg extends BaseMsg {
@@ -1212,6 +1224,219 @@ export interface CoordinationArtifact {
 export interface ChangedRegion {
   path: string;
   symbols: string[];
+}
+
+// ============================================================================
+// Projekt-Verbund: zwei mads-Instanzen, zwei Repos, ein Contract
+// (docs/design/12-project-link.md)
+//
+// Zwei fachlich gekoppelte Repos (z. B. Server + App) laufen in je EINER eigenen
+// mads-Instanz. Beide Integratoren koordinieren sich über einen deklarierten
+// CONTRACT (die Dateien, die die Schnittstelle bilden), ein mechanisches
+// Drift-Gate (Fingerprint) und einen Peer-Kanal (Maildir unter ~/.mads/links/).
+//
+// Kern-Disziplin (§8.3): Peer-Nachrichten sind DATEN, keine Autorität. Nichts im
+// Kanal kann eine HostMessage auslösen — der Kanal kennt nur PeerMessage-Kinds.
+// ============================================================================
+
+/** Version des Verbund-Protokolls. Weicht sie zwischen den Instanzen ab, werden nur
+ *  `hello`/Presence verarbeitet (inhaltliche Nachrichten nicht) — §5.4. */
+export const LINK_VERSION = 1 as const;
+
+/** Kompatibilitätsregel für Contract-Änderungen (§4.5). */
+export type ContractCompat =
+  /** Expand/Contract: Neues additiv ergänzen, Altes bleibt bis der Consumer nachgezogen hat. */
+  | "additive"
+  /** Breaking Changes erlaubt — Landing-Reihenfolge Provider → Consumer wird zur roten Warnung. */
+  | "lockstep";
+
+/** Verbund-Konfiguration eines Repos. Lokal in `<repoRoot>/.mads/link.json` (OE-54). */
+export interface ProjectLinkConfig {
+  v: 1;
+  peer: { repoRoot: string; label?: string };
+  /** Glob-Muster der eigenen Contract-Dateien (Semantik wie `OwnershipRule.path`).
+   *  Leer = reiner Consumer; nicht leer = Provider; beide Seiten nicht leer = bidirektional. */
+  provides: { patterns: string[]; compat?: ContractCompat };
+  /** Dispatch-Stufe für Peer-Anfragen (§7.6). Default: "assisted" (OE-55). */
+  autopilot?: AutopilotLevel;
+  /** P3 (noch nicht implementiert): Verbund-Gate-Kommando auf der Consumer-Seite. */
+  gate?: { command: string; env?: Record<string, string> };
+}
+
+/** Die Contract-Änderung eines Branches/Stands: welche Contract-Dateien wie geändert wurden. */
+export interface ContractDelta {
+  baseSha: string;
+  headSha: string;
+  files: string[];
+  regions: ChangedRegion[];
+  /** Roh-Diff, gekappt bei 64 KB (OE-58) — nur Text, wird NIE angewendet, nur gezeigt. */
+  diff?: string;
+  truncated?: boolean;
+}
+
+export type LinkThreadState =
+  | "open" // Anfrage liegt vor, noch nichts entschieden
+  | "proposed" // Integrator hat Label/Brief entworfen (Karte sichtbar)
+  | "in_progress" // Abgleich-Sub-Stream läuft (ownerAgentId gesetzt)
+  | "landed" // Änderung DIESER Seite ist auf main
+  | "done" // beide Seiten fertig (ackedFp fortgeschrieben)
+  | "declined" // Mensch/Integrator hat abgelehnt (mit Begründung an den Peer)
+  | "escalated"; // Loop-Guard, Version-Mismatch, offene Frage an den Menschen
+
+/** Ein Abgleich-Vorgang zwischen den beiden Instanzen — das Cross-Repo-Gegenstück
+ *  zum `CoordinationArtifact`. Persistiert in `<repoRoot>/.mads/link-threads.json`. */
+export interface LinkThread {
+  id: string;
+  /** "local" = hier entstanden; "peer" = von der Gegenseite angestoßen. */
+  origin: "local" | "peer";
+  kind: "contract_change" | "request";
+  title: string;
+  state: LinkThreadState;
+  /** Lokaler Stream, der den Thread bearbeitet (Folge-Nachrichten routen dorthin). */
+  ownerAgentId?: string;
+  /** Stream der Gegenseite (informativ). */
+  peerAgentId?: string;
+  /** Branch, aus dem dieser Thread entstand (ein Thread pro Branch, §11). */
+  branch?: string;
+  prUrl?: string;
+  /** Fingerprint, den dieser Thread „erklärt" (Drift-Regel, §4.2). */
+  contractFp?: string;
+  /** Der zuletzt übermittelte/empfangene Delta dieses Threads (für die Karte). */
+  delta?: ContractDelta;
+  breaking?: boolean;
+  /** Ping-Pong-Zähler: jede Folge-Nachricht erhöht ihn; ab LOOP_GUARD_MAX_HOPS kein Auto-Dispatch. */
+  hops: number;
+  causedBy?: string;
+  /** Vorschlag des Integrators (Label + Brief), auf den [Starten] wartet. */
+  proposal?: { label: string; brief: string };
+  /** Gegenseite hat gemeldet, dass ihre Änderung gelandet ist. */
+  peerLanded?: boolean;
+  landedSha?: string;
+  createdAt: number;
+  updatedAt: number;
+  log: Array<{ ts: number; who: "local" | "peer" | "human"; text: string }>;
+}
+
+/** Presence einer Instanz (Heartbeat unter `~/.mads/links/<linkId>/presence/<slug>.json`, §5.2). */
+export interface LinkPresence {
+  pid: number;
+  ts: number;
+  slug: string;
+  repoRoot: string;
+  owner?: string;
+  repo?: string;
+  defaultBranch?: string;
+  mainSha?: string;
+  contractFp?: string;
+  provides: string[];
+  compat: ContractCompat;
+  /** Wen DIESE Seite als Gegenseite konfiguriert hat — Grundlage des gegenseitigen
+   *  Einverständnisses (§5.3): ein Link ist erst aktiv, wenn beide einander nennen. */
+  peerRepoRoot?: string;
+  devServers?: Array<{ agentId: string; branch?: string; url: string; ready: boolean }>;
+  protocolVersion: number;
+  linkVersion: number;
+  buildCommit?: string;
+}
+
+/** Presence + abgeleitete Sicht für die Oberfläche. */
+export interface PresenceView extends LinkPresence {
+  online: boolean;
+}
+
+/** Nachrichten zwischen den beiden Instanzen (§6.2). Bewusst eine EIGENE, kleine Union —
+ *  sie überschneidet sich NICHT mit HostMessage: der Peer kann keine Freigabe erteilen,
+ *  nichts mergen und keinen Permission-Modus setzen. */
+export type PeerMessage =
+  | { kind: "hello" }
+  | {
+      kind: "contract_change";
+      threadId: string;
+      title: string;
+      summary: string;
+      delta: ContractDelta;
+      breaking: boolean;
+      migration?: string;
+      source: { agentId: string; branch?: string; prUrl?: string; landed: boolean };
+      devServer?: { url: string; ready: boolean };
+      causedBy?: string;
+    }
+  | { kind: "request"; threadId: string; title: string; brief: string; fromHuman: boolean; causedBy?: string }
+  | { kind: "reply"; threadId: string; text: string; state?: "ack" | "question" | "answer" | "declined" }
+  | { kind: "done"; threadId: string; landedSha?: string; prUrl?: string; contractFp?: string };
+
+/** Umschlag einer Peer-Nachricht auf der Platte (eine Datei = eine Nachricht, §5.5). */
+export interface PeerEnvelope {
+  v: number;
+  id: string;
+  ts: number;
+  linkId: string;
+  linkVersion: number;
+  from: { slug: string; repoRoot: string; pid: number };
+  msg: PeerMessage;
+}
+
+// ─── Frontend ↔ Sidecar ───────────────────────────────────────────────────────
+
+/** Verbund anlegen/ändern (Settings-Panel). Der Sidecar persistiert `.mads/link.json`. */
+export interface LinkConfigureMsg extends BaseMsg {
+  type: "link_configure";
+  config: ProjectLinkConfig;
+}
+/** Verbund lösen. Threads bleiben als Audit erhalten. */
+export interface LinkRemoveMsg extends BaseMsg {
+  type: "link_remove";
+}
+/** Der MENSCH schreibt der Gegenseite (neuer `request` bzw. `reply` auf einem Thread). */
+export interface PeerSendMsg extends BaseMsg {
+  type: "peer_send";
+  text: string;
+  threadId?: string;
+  title?: string;
+}
+/** Karten-Aktion auf einem Thread. `start` startet das Proposal als Sub-Stream. */
+export interface PeerThreadActionMsg extends BaseMsg {
+  type: "peer_thread_action";
+  threadId: string;
+  action: "start" | "decline" | "resolve" | "accept_drift";
+  reason?: string;
+  /** Nur für `start`: vom Menschen bearbeitetes Label/Brief (sonst gilt das Proposal). */
+  label?: string;
+  brief?: string;
+}
+
+/** Zustand des Verbunds — vollständige Spiegelung für Pill, Tab und Settings.
+ *  Re-Emit bei `request_snapshot` (idempotent, ersetzt lokal alles). */
+export interface LinkStatusMsg extends BaseMsg {
+  type: "link_status";
+  state: "none" | "pending" | "active" | "peer_offline";
+  config?: ProjectLinkConfig;
+  peer?: PresenceView;
+  contract: { ownFp?: string; peerFp?: string; peerAckedFp?: string; drift: boolean };
+  threads: LinkThread[];
+  /** Unverarbeitete Nachrichten im eigenen Eingang (Gegenseite war offline / noch pending). */
+  queued: number;
+  /** Grund, weshalb der Link (noch) nicht aktiv ist — für den Hinweis im Settings-Panel. */
+  hint?: string;
+}
+
+/** Eine EINGEGANGENE Peer-Nachricht für Timeline/Karte. Trägt die `agentId` des Integrators
+ *  (Routing-Regel §6.3: der Verbund ist Integrator-Sache). */
+export interface PeerMessageMsg extends BaseMsg {
+  type: "peer_message";
+  agentId: string;
+  threadId: string;
+  msg: PeerMessage;
+  from: { slug: string; repoRoot: string };
+}
+
+/** Entwurf des Integrators für einen Abgleich-Stream → Karte mit [Starten] [Bearbeiten] [Ablehnen]. */
+export interface PeerProposalMsg extends BaseMsg {
+  type: "peer_proposal";
+  agentId: string;
+  threadId: string;
+  label: string;
+  brief: string;
 }
 
 // ============================================================================

@@ -12,7 +12,7 @@
     "release:mac": "bash scripts/build-signed.sh",
     "sidecar:build": "npm --prefix sidecar run build",
     "sidecar:install": "npm --prefix sidecar install",
-    "test": "npm run test:ownership && npm run test:merge && npm run test:secrets && npm run test:collision && npm run test:safe && npm run test:autopilot && npm run test:adr && npm run test:hygiene && npm run test:persist && npm run test:outsource && npm run test:livepreview && npm run test:editops && npm run test:md && npm run test:ioredact && npm run test:agentenv && npm run test:accounts && npm run test:derive && npm run test:subagents && npm run test:conflictcount && npm run test:reclaim && npm run test:relocate && npm run test:adopt && npm run test:lease && npm run test:perms && npm run test:sandbox && npm run test:wtprocs && npm run test:devdep && npm run test:release",
+    "test": "npm run test:ownership && npm run test:merge && npm run test:secrets && npm run test:collision && npm run test:safe && npm run test:autopilot && npm run test:adr && npm run test:hygiene && npm run test:persist && npm run test:outsource && npm run test:livepreview && npm run test:editops && npm run test:md && npm run test:ioredact && npm run test:agentenv && npm run test:accounts && npm run test:derive && npm run test:subagents && npm run test:conflictcount && npm run test:reclaim && npm run test:relocate && npm run test:adopt && npm run test:lease && npm run test:perms && npm run test:sandbox && npm run test:wtprocs && npm run test:devdep && npm run test:release && npm run test:link && npm run test:linkio",
     "test:relocate": "esbuild sidecar/src/git-relocate.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/relocate.test.mjs && node node_modules/.cache/relocate.test.mjs",
     "test:adopt": "esbuild sidecar/src/git-adopt.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/adopt.test.mjs && node node_modules/.cache/adopt.test.mjs",
     "test:lease": "esbuild sidecar/src/git-lease.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/lease.test.mjs && node node_modules/.cache/lease.test.mjs",
@@ -40,7 +40,9 @@
     "test:md": "esbuild src/mdPipeline.smoke.test.tsx --bundle --platform=node --format=esm --jsx=automatic --packages=external --outfile=node_modules/.cache/md.smoke.test.mjs && node node_modules/.cache/md.smoke.test.mjs",
     "test:sandbox": "esbuild sidecar/src/sandbox.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/sandbox.test.mjs && node node_modules/.cache/sandbox.test.mjs",
     "test:wtprocs": "esbuild sidecar/src/worktree-procs.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/wtprocs.test.mjs && node node_modules/.cache/wtprocs.test.mjs",
-    "test:devdep": "esbuild sidecar/src/devserver-dep.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/devdep.test.mjs && node node_modules/.cache/devdep.test.mjs"
+    "test:devdep": "esbuild sidecar/src/devserver-dep.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/devdep.test.mjs && node node_modules/.cache/devdep.test.mjs",
+    "test:link": "esbuild shared/link.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/link.test.mjs && node node_modules/.cache/link.test.mjs",
+    "test:linkio": "esbuild sidecar/src/link.test.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/linkio.test.mjs && node node_modules/.cache/linkio.test.mjs"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "^6.2.5",
