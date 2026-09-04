@@ -12,6 +12,7 @@ import { agentColor } from "../agentColor";
 import { MessageTimeline } from "./MessageTimeline";
 import { SubAgentPanel } from "./SubAgentPanel";
 import { LinkTab } from "./LinkTab";
+import { landOrderWarning } from "../../shared/link";
 import { ModelEffortPicker } from "./ModelEffortPicker";
 import { UsageMeter } from "./UsageMeter";
 import { modelLabel } from "../modelCatalog";
@@ -68,6 +69,7 @@ export function Inspector() {
   const setStreamAccount = useStore((s) => s.setStreamAccount);
   const setSandboxMode = useStore((s) => s.setSandboxMode);
   const investigationTargets = useStore((s) => s.investigationTargets);
+  const link = useStore((s) => s.link);
   const accounts = useStore((s) => s.accounts);
   const accountUsage = useStore((s) => s.accountUsage);
   const defaultModel = useStore((s) => s.defaultModel);
@@ -207,6 +209,12 @@ export function Inspector() {
   // Passiv wiederhergestellt (nicht im Pool): nur Verlauf ansehen; Git-Aktionen erst nach
   // „Fortsetzen" (oder durch Senden einer Nachricht, das den Stream lazy aktiviert).
   const live = agent.live !== false;
+  // Projekt-Verbund, Landing-Reihenfolge (docs/design/12-project-link.md §7.4): Ein Client, der
+  // einen Endpoint ruft, den es drüben noch nicht gibt, ist zur LAUFZEIT kaputt — auch wenn beide
+  // PRs für sich grün sind. Deshalb hier eine sichtbare Warnung, bewusst KEIN Hard-Block (OE-56):
+  // der Mensch bleibt souverän. Bei `lockstep` ist die Reihenfolge zwingend, also rot.
+  const landOrder = link ? landOrderWarning(link.threads, link.config?.provides.compat ?? "additive") : undefined;
+
   // Merge ist irreversibel & außen-wirksam (landet auf dem geteilten main) → bestätigen.
   const askMerge = (keep: boolean) =>
     setConfirm({
@@ -223,6 +231,15 @@ export function Inspector() {
               ? "Branch + Stream bleiben erhalten (auf main zurückgesetzt) — du arbeitest direkt weiter."
               : "Danach werden Worktree + Branch aufgeräumt und der Stream beendet — für diesen Stream ist dann Schluss."}
           </p>
+          {landOrder && (
+            <p className={landOrder.severe ? "modal-hint danger" : "modal-hint"}>
+              <strong>Verbund:</strong> Die Gegenseite hat ihre Contract-Änderung „{landOrder.thread.title}" noch
+              nicht auf <code>main</code>.{" "}
+              {landOrder.severe
+                ? "Bei lockstep muss sie ZUERST landen — sonst läuft dieser Stand gegen eine Schnittstelle, die es dort noch nicht gibt."
+                : "Bei additiver Kompatibilität ist das meist unkritisch, prüfe es aber kurz."}
+            </p>
+          )}
         </>
       ),
       confirmLabel: keep ? "Mergen & weiterarbeiten" : "Integrieren & beenden",

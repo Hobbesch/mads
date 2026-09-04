@@ -31,7 +31,7 @@ mads **operationalisiert** die Invarianten des Multi-Agent-Leitfadens
 
 ---
 
-## Die zehn Design-Dokumente
+## Die Design-Dokumente
 
 | # | Dokument | In einem Satz |
 |---|---|---|
@@ -45,6 +45,8 @@ mads **operationalisiert** die Invarianten des Multi-Agent-Leitfadens
 | 08 | [Markdown-Editor](./08-markdown-editor.md) | In-App-Lese-/Schreiboberfläche für `.md` (Design-Docs, README, Koordinations-Artefakte): GitHub-Style-Render (`react-markdown`-Pipeline) + CodeMirror-6-Quell-Editor (Preview/Edit/Split), Bild-Paste, Wikilink-Auflösung — alles FS-Zugriff über die Core-Commands aus [[07-file-explorer]]. |
 | 09 | [Change-Overview](./09-change-overview.md) | Toggle-bare Live-Diff-Panes: öffnet für jede gerade editierte Datei automatisch eine `@codemirror/merge`-Pane (Additions grün, Löschungen rot), rein aus dem `tool_use`-Payload derivierbar (zero-read, `editsByFile`-Slice); Kollisions-/Trespass-Overlay aus [[06-ownership-and-coordination]]. |
 | 10 | [Navigations-Toolbar](./10-navigation-toolbar.md) | Die äußerste Activity-Rail links als einziger Umschalter des aktivitäts-spezifischen Primary-Panels (`activeView`/`ToolbarItem`-Registry); **löst die persistente Stream-Sidebar auf** (das `AgentGrid` ist die Stream-Liste) und definiert den verbindlichen LAYOUT-CONTRACT für 02/07/09; reine UI-Zustands-Auswahl ohne Backend-Bedarf. |
+| 11 | [Härtung: Lehren aus dem Parallel-Betrieb](./11-hardening-lessons.md) | Post-Mortem eines realen Betriebstags mit parallelen Sub-Agenten auf einem Kundenrepo: zehn Vorfälle, auf sieben Fehlerklassen abstrahiert, gegen den nativen Fähigkeitsstand von Claude Code gestellt und in eine priorisierte Härtungs-Roadmap überführt. |
+| 12 | [Projekt-Verbund](./12-project-link.md) | Zwei fachlich gekoppelte Repos in je eigener mads-Instanz koordinieren sich über einen deklarierten **Contract**, einen Maildir-**Peer-Kanal** und ein mechanisches **Drift-Gate**; die Gegenseite zieht als gewöhnlicher Sub-Stream nach, gemergt wird weiterhin nur pro Repo vom Integrator. |
 
 **Recherche-Inputs** (normative bzw. technische Quellen, referenziert von allen Docs):
 
@@ -58,7 +60,7 @@ mads **operationalisiert** die Invarianten des Multi-Agent-Leitfadens
 > **Verlinkung:** Die Docs verweisen untereinander mit `[[wikilink]]`s auf die tatsächlichen
 > Dateinamen — Design-Docs als `[[01-architecture]]`…`[[06-ownership-and-coordination]]` sowie
 > `[[07-file-explorer]]`, `[[08-markdown-editor]]`, `[[09-change-overview]]`,
-> `[[10-navigation-toolbar]]`; Recherche-Inputs als
+> `[[10-navigation-toolbar]]`, `[[11-hardening-lessons]]`, `[[12-project-link]]`; Recherche-Inputs als
 > `[[claude-code-capabilities]]`, `[[tauri2-stack]]`, `[[sidecar-orchestration]]`,
 > `[[github-multiagent]]`, `[[macos-design]]`, `[[_paix-multi-agent-reference]]`.
 

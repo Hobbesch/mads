@@ -2652,6 +2652,11 @@ button.primary:hover {
   padding: 8px 10px;
   line-height: 1.4;
 }
+/* Verbund, lockstep: die Landing-Reihenfolge ist dort zwingend → deutlicher als eine Warnung. */
+.modal-hint.danger {
+  color: #d33b30;
+  background: rgba(255, 69, 58, 0.14);
+}
 /* Wiederhergestellter Entwurf: neutraler (info) statt warnend, mit Inline-„Verwerfen". */
 .modal-hint.draft-restored {
   color: var(--text-muted, #7a8699);

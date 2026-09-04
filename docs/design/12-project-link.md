@@ -1,8 +1,17 @@
 # 12 — Projekt-Verbund: zwei mads-Instanzen, zwei Repos, ein Contract
 
-> **Status:** Konzept / Entwurf (2026-09-04). Erweitert das Integrator-Modell **über
-> Repo-Grenzen hinweg**, ohne eine der fünf Kern-Invarianten (CLAUDE.md) anzutasten.
+> **Status:** **P0–P2 umgesetzt** (2026-09-04); P3 (Verbund-Gate) und P4 (Cross-Machine) offen.
+> Erweitert das Integrator-Modell **über Repo-Grenzen hinweg**, ohne eine der fünf
+> Kern-Invarianten (CLAUDE.md) anzutasten.
 > Prosa deutsch, Code-/Protokoll-Begriffe englisch (wie im übrigen mads-Code).
+>
+> **Wo der Code lebt:** `shared/link.ts` (reine Logik) · `sidecar/src/link.ts` (LinkManager:
+> Maildir, Presence, Fingerprint, Threads) · `sidecar/src/session.ts` (`peer_*`-MCP-Tools,
+> `linkContext()`) · `sidecar/src/orchestrator.ts` (Lebenszyklus-Hooks, Gate-Delta, Landing-Warnung)
+> · `src/components/Link*.tsx` + `PeerCard.tsx` + Store-Slice `link`.
+> **Tests:** `shared/link.test.ts` (`npm run test:link`), `sidecar/src/link.test.ts`
+> (`npm run test:linkio`, zwei Manager + echtes Maildir), `scripts/link-smoke.mjs`
+> (zwei echte Sidecar-Prozesse über NDJSON — manuell).
 
 ---
 
@@ -541,16 +550,41 @@ zusammen". Dafür das **Verbund-Gate**, gefahren auf der Consumer-Seite:
 
 | Phase | Ziel | Deliverables | Dateien |
 |---|---|---|---|
-| **P0 — Link & Presence** | Zwei Instanzen sehen sich. | `ProjectLinkConfig`, Maildir + Presence, `link_status`, Pill, Settings-Panel (Peer wählen), gegenseitiges Einverständnis. | `shared/protocol.ts`, `shared/link.ts` (+ `link.test.ts` im `npm run test:*`-Muster), `sidecar/src/link.ts`, `orchestrator.ts` (Hooks), `src/store.ts`, `LinkSettings.tsx`, `LinkPill.tsx` |
-| **P1 — Contract & Abgleich** | Kern-Flow §7.1. | `provides.patterns` + Auto-Detect, `contractFp`, `ContractDelta` im Gate, Threads, `contract_change`/`request`/`reply`/`done`, Peer-Karten, `peer_proposal` + [Starten], MCP-Tools `peer_*`, `linkContext()`. | `gate.ts`, `session.ts`, `LinkTab.tsx`, `PeerCard.tsx` |
-| **P2 — Autonomie** | §7.2/§7.3/§7.4. | Autopilot-Dispatch mit Loop-Guard, Routing von Folge-Nachrichten an `ownerAgentId`, Drift-Sicherheitsnetz, `peer_land_order`-Warnung, Dev-Server-URLs in Presence, `compat`-Prompt-Regel. | `orchestrator.ts`, `session.ts` |
-| **P3 — Verbund-Gate** | §10. | `devserver_ensure`, `link.gate`, `gate_result` auf beide Seiten, Pill „Verbund grün". | `devserver.ts`, `link.ts` |
-| **P4 — Cross-Machine** | Zwei Macs. | `PeerMessage` über einen `peer`-Kanal der Remote-Bridge (Pairing wie iOS, Rolle „peer" mit Allowlist nur für `PeerMessage`), Maildir bleibt der Same-Host-Pfad. | `bridge.rs`, `link.ts` |
+| **P0 ✅ umgesetzt — Link & Presence** | Zwei Instanzen sehen sich. | `ProjectLinkConfig`, Maildir + Presence, `link_status`, Pill, Settings-Panel (Peer wählen), gegenseitiges Einverständnis. | `shared/protocol.ts`, `shared/link.ts` (+ `link.test.ts` im `npm run test:*`-Muster), `sidecar/src/link.ts`, `orchestrator.ts` (Hooks), `src/store.ts`, `LinkSettings.tsx`, `LinkPill.tsx` |
+| **P1 ✅ umgesetzt — Contract & Abgleich** | Kern-Flow §7.1. | `provides.patterns` + Auto-Detect, `contractFp`, `ContractDelta` im Gate, Threads, `contract_change`/`request`/`reply`/`done`, Peer-Karten, `peer_proposal` + [Starten], MCP-Tools `peer_*`, `linkContext()`. | `gate.ts`, `session.ts`, `LinkTab.tsx`, `PeerCard.tsx` |
+| **P2 ✅ umgesetzt — Autonomie** | §7.2/§7.3/§7.4. | Autopilot-Dispatch mit Loop-Guard, Routing von Folge-Nachrichten an `ownerAgentId`, Drift-Sicherheitsnetz, `peer_land_order`-Warnung, Dev-Server-URLs in Presence, `compat`-Prompt-Regel. | `orchestrator.ts`, `session.ts` |
+| **P3 ⏳ offen — Verbund-Gate** | §10. | `devserver_ensure`, `link.gate`, `gate_result` auf beide Seiten, Pill „Verbund grün". | `devserver.ts`, `link.ts` |
+| **P4 ⏳ offen — Cross-Machine** | Zwei Macs. | `PeerMessage` über einen `peer`-Kanal der Remote-Bridge (Pairing wie iOS, Rolle „peer" mit Allowlist nur für `PeerMessage`), Maildir bleibt der Same-Host-Pfad. | `bridge.rs`, `link.ts` |
 
 Test-Strategie: `shared/link.test.ts` (Fingerprint-Determinismus, Pattern-Filter, Thread-Reducer,
 Loop-Guard, Drift-Regel) ohne IO; `sidecar/src/link.test.ts` mit temporärem Maildir (zwei
 `LinkManager` im selben Prozess, Round-Trip inkl. Offline-Queue); Frontend-Reducer-Tests im
 Stil von `derive.*.test.ts`.
+
+---
+
+## 12a. Abweichungen der Umsetzung vom Entwurf
+
+Drei Stellen wurden beim Bauen bewusst anders gelöst als hier skizziert — jeweils, weil der
+bestehende Code eine klarere Antwort hatte:
+
+1. **Streams entstehen weiterhin nur im Frontend.** Der Entwurf ließ offen, wer bei `autopilot`
+   den Abgleich-Stream anlegt. Umgesetzt: *immer* der `createAgent`-Pfad des Frontends — nur dort
+   entstehen Kachel, Modell-, Effort- und Konto-Wahl. Der Sidecar entscheidet lediglich, **ob**
+   sofort gestartet wird, und sagt es über `peer_proposal.autostart`; das Frontend meldet die
+   `agentId` per `peer_thread_action { action: "start", agentId }` zurück. Damit gibt es genau
+   einen Weg, auf dem Streams entstehen, statt zweier, die auseinanderlaufen können.
+2. **`contractFingerprint` bekommt die Hash-Funktion injiziert.** `shared/` wird vom Frontend-`tsc`
+   mitgeprüft; ein `node:crypto`-Import dort würde nicht typprüfen. Der Sidecar reicht die
+   Implementierung durch, die Logik bleibt pur und ohne IO testbar.
+3. **Ticks werden serialisiert, nicht verworfen.** `fs.watch` und der Orchestrator-Poll lösen beide
+   `link.tick()` aus. Ein simpler „läuft schon"-Guard hätte den zweiten Aufruf still verworfen —
+   die gerade eingetroffene Nachricht wäre bis zum nächsten Poll liegen geblieben (im IO-Test als
+   Flake sichtbar geworden). Jetzt hängen sich Zyklen an eine Promise-Kette an.
+
+Zusätzlich trägt jeder Peer-Thread ein `suggestedBrief`: einen vom Sidecar vorbereiteten Auftrag,
+damit **[Starten]** auch auf Stufe `manual` (ohne LLM-Proposal) sofort funktioniert und die
+Ableitung an *einer* Stelle lebt statt doppelt im Frontend.
 
 ---
 

@@ -1236,6 +1236,27 @@ export class Orchestrator {
       return;
     }
 
+    // Projekt-Verbund, Landing-Reihenfolge (docs/design/12-project-link.md §7.4): Warnung, KEIN
+    // Hard-Block (OE-56) — der Mensch hat im Dialog bereits entschieden. Sie geht hier trotzdem in
+    // den Verlauf, damit sie auch auf Remote-Clients und im Protokoll auftaucht, wenn ein Merge
+    // landet, obwohl die Gegenseite ihre Contract-Änderung noch nicht auf main hat.
+    const landOrder = this.link.landOrderWarning();
+    if (landOrder) {
+      this.emit({
+        ...envelope(),
+        type: "error",
+        agentId,
+        scope: "agent",
+        code: "peer_land_order",
+        message:
+          `Verbund: „${landOrder.title}" ist auf der Gegenseite noch nicht gelandet. ` +
+          (landOrder.severe
+            ? "Bei lockstep muss sie ZUERST landen — dieser Stand läuft sonst gegen eine Schnittstelle, die es dort noch nicht gibt."
+            : "Bei additiver Kompatibilität meist unkritisch — im Auge behalten."),
+        recoverable: true,
+      });
+    }
+
     const res = await mergePr(s.repoRoot, s.branch, method);
     if (!res.ok) {
       this.emitMergeResult(agentId, false, [res.error], pr?.number);
