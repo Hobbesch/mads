@@ -397,6 +397,15 @@ export class DevServerRun {
     return this.procs.filter((p) => p.child?.pid == null).map((p) => p.spec.name);
   }
 
+  /**
+   * Kompakte Sicht für den Projekt-Verbund: welcher Stream, welche URL, wirklich bereit?
+   * Die Gegenseite testet gegen diese URL, während der PR hier noch offen ist — deshalb zählt
+   * `ready` (bewiesen), nicht bloß „Prozess läuft".
+   */
+  describe(): { agentId: string; url?: string; ready: boolean } {
+    return { agentId: this.agentId, url: this.primaryUrl(), ready: this.liveAllReady() };
+  }
+
   private emitStatus(message?: string): void {
     // Läuft nur noch ein TEIL der Services, das aber ungesagt, wirkt der grüne „läuft"-Zustand wie
     // „alles gut" — und der Nutzer sucht den Fehler in seinem Code statt am toten Service. Deshalb

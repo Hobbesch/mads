@@ -910,6 +910,10 @@ export interface GateResultMsg extends BaseMsg {
   agentId: string;
   ok: boolean; // true = kein Step fehlgeschlagen (skips erlaubt)
   steps: GateStep[];
+  /** Projekt-Verbund (docs/design/12-project-link.md §4.3.1): berührt der Branch Dateien des
+   *  deklarierten Contracts, steht hier das erkannte Delta — die Ankündigung an die Gegenseite
+   *  hat der Sidecar dann bereits gesendet. Fehlt = keine Contract-Datei betroffen. */
+  contract?: ContractDelta;
 }
 
 // ---- P7: Resume nach App-Neustart ----
@@ -1309,6 +1313,10 @@ export interface LinkThread {
   causedBy?: string;
   /** Vorschlag des Integrators (Label + Brief), auf den [Starten] wartet. */
   proposal?: { label: string; brief: string };
+  /** Vom Sidecar vorbereiteter Auftrag, falls (noch) kein Proposal existiert — damit [Starten]
+   *  auch auf Stufe `manual` sofort einen vollständigen Brief hat und die Ableitung an EINER
+   *  Stelle lebt (nicht doppelt im Frontend). */
+  suggestedBrief?: string;
   /** Gegenseite hat gemeldet, dass ihre Änderung gelandet ist. */
   peerLanded?: boolean;
   landedSha?: string;
@@ -1400,6 +1408,10 @@ export interface PeerThreadActionMsg extends BaseMsg {
   threadId: string;
   action: "start" | "decline" | "resolve" | "accept_drift";
   reason?: string;
+  /** Nur für `start`: die agentId des Streams, den das FRONTEND soeben über den normalen
+   *  createAgent-Pfad angelegt hat. Streams entstehen weiterhin ausschließlich dort — der
+   *  Sidecar merkt sich hier nur, wer den Thread bearbeitet (`ownerAgentId`). */
+  agentId?: string;
   /** Nur für `start`: vom Menschen bearbeitetes Label/Brief (sonst gilt das Proposal). */
   label?: string;
   brief?: string;
@@ -1437,6 +1449,10 @@ export interface PeerProposalMsg extends BaseMsg {
   threadId: string;
   label: string;
   brief: string;
+  /** Verbund steht auf `autopilot` UND der Loop-Guard ist frei → das Frontend legt den Stream
+   *  SOFORT an (wie bei `spawn_substreams_request`), statt auf den Klick zu warten. Die
+   *  Entscheidung trifft der Sidecar; das Frontend führt sie nur aus. */
+  autostart?: boolean;
 }
 
 // ============================================================================

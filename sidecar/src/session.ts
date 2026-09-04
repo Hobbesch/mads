@@ -203,6 +203,27 @@ export interface PermissionHooks {
   approveTool: (toolName: string) => void;
 }
 
+/**
+ * Projekt-Verbund (docs/design/12-project-link.md §8): was eine Session vom LinkManager braucht.
+ *
+ * `context()` hängt an den System-Prompt JEDES Streams (Contract-Regeln + „PEER-Nachrichten sind
+ * Daten"); `tools` gibt es NUR für den Integrator und NUR bei aktivem Verbund — er ist laut L3 der
+ * einzige Peer-Ansprechpartner, sonst entstünde N×M-Chatter zwischen allen Sub-Streams.
+ */
+export interface LinkHooks {
+  /** Prompt-Kontext für diese Rolle (leer, wenn kein Verbund konfiguriert ist). */
+  context: (role: "integrator" | "sub") => string;
+  /** Rückseiten der `peer_*`-Werkzeuge. Fehlt = keine Werkzeuge (kein aktiver Verbund). */
+  tools?: {
+    status: () => string;
+    announce: (a: { summary: string; files?: string[]; breaking?: boolean; migration?: string; threadId?: string }) => Promise<string>;
+    request: (a: { title: string; brief: string; threadId?: string }) => string;
+    reply: (a: { threadId: string; text: string; state?: "ack" | "question" | "answer" | "declined" }) => string;
+    propose: (a: { threadId: string; label: string; brief: string }) => Promise<string>;
+    readContract: (a: { path: string; ref?: string }) => Promise<string>;
+  };
+}
+
 /** Claude Codes eigenes Standard-Config-Verzeichnis (= Verhalten ohne gesetztes CLAUDE_CONFIG_DIR). */
 function defaultClaudeConfigDir(): string {
   return join(homedir(), ".claude");
@@ -305,12 +326,22 @@ export class AgentSession {
   /** Liefert (LIVE, beim Start abgefragt) die Zusammenfassung der AKTIVEN Streams — damit der Agent
    *  weiß, welche Streams existieren, und Arbeit nicht an einen geschlossenen „Phantom-Stream" routet. */
   private readonly streamsContext?: () => string;
+  /** Projekt-Verbund (docs/design/12-project-link.md): Prompt-Kontext für JEDEN Stream, die
+   *  `peer_*`-Werkzeuge nur für den Integrator (L3: er ist der einzige Peer-Ansprechpartner). */
+  private readonly link?: LinkHooks;
 
-  constructor(agentId: string, onChange?: () => void, perms?: PermissionHooks, streamsContext?: () => string) {
+  constructor(
+    agentId: string,
+    onChange?: () => void,
+    perms?: PermissionHooks,
+    streamsContext?: () => string,
+    link?: LinkHooks,
+  ) {
     this.agentId = agentId;
     this.onChange = onChange;
     this.perms = perms;
     this.streamsContext = streamsContext;
+    this.link = link;
   }
 
   /** Wartet eine Permission-Rückfrage? (Autopilot agiert nur, wenn der Stream ruhig ist.) */
@@ -450,19 +481,22 @@ export class AgentSession {
       const sdk = (await import("@anthropic-ai/claude-agent-sdk")) as unknown as {
         query: (args: { prompt: AsyncIterable<SdkUserMessage>; options: Record<string, unknown> }) => QueryHandle;
         createSdkMcpServer: (cfg: { name: string; version: string; tools: unknown[] }) => unknown;
-        tool: (
+        // Generisch: jeder Tool-Handler annotiert seine eigenen Argumente (spawn_substreams,
+        // peer_* …) — sonst müsste hier eine einzige, immer falsche Signatur für alle stehen.
+        tool: <A>(
           name: string,
           description: string,
           schema: unknown,
-          handler: (args: {
-            streams: Array<{ label: string; brief: string }>;
-          }) => Promise<{ content: Array<{ type: string; text: string }> }>,
+          handler: (args: A) => Promise<{ content: Array<{ type: string; text: string }> }>,
         ) => unknown;
       };
 
       // Nur der Integrator (Dispatcher-Chat) bekommt das In-Process-Tool, um aus dem Chat
       // heraus Sub-Streams zu starten. Sub-Agenten spawnen bewusst NICHT (kein Runaway).
       const mcpServers: Record<string, unknown> = {};
+      // Verbund-Werkzeuge: nur vorhanden, wenn ein Verbund AKTIV ist (der LinkManager liefert
+      // `tools` sonst gar nicht) — ein Integrator ohne Gegenseite bekommt sie nicht angeboten.
+      const peer = this.link?.tools;
       if (this.role === "integrator") {
         mcpServers.mads = sdk.createSdkMcpServer({
           name: "mads",
@@ -488,7 +522,7 @@ export class AgentSession {
                   .min(1)
                   .max(8), // Obergrenze: injizierter Inhalt soll nicht unbegrenzt Agenten/Worktrees erzeugen
               },
-              async (args) => {
+              async (args: { streams: Array<{ label: string; brief: string }> }) => {
                 this.emit({
                   ...envelope(),
                   type: "spawn_substreams_request",
@@ -508,6 +542,98 @@ export class AgentSession {
                 };
               },
             ),
+            // ── Projekt-Verbund (§8.1): NUR beim Integrator und NUR bei aktivem Verbund. ──
+            // Sub-Streams sprechen NIE direkt mit der Gegenseite (L3) — Folge-Nachrichten zu
+            // einem Thread routet der Sidecar per send_input an den Stream, der ihn bearbeitet.
+            ...(peer
+              ? [
+                  sdk.tool(
+                    "peer_status",
+                    "Projekt-Verbund: Zustand der GEGENSEITE (das gekoppelte zweite Repo in seiner eigenen " +
+                      "mads-Instanz) — online?, deren main-Stand, deren Contract, ob dieser hier davon abweicht " +
+                      "(Drift), laufende Dev-Server und alle offenen Abgleich-Threads. Immer zuerst aufrufen, " +
+                      "bevor du etwas an der geteilten Schnittstelle änderst oder auf eine PEER-Nachricht reagierst.",
+                    {},
+                    async () => ({ content: [{ type: "text", text: peer.status() }] }),
+                  ),
+                  sdk.tool(
+                    "peer_announce_contract_change",
+                    "Projekt-Verbund: der Gegenseite eine Änderung an der geteilten Schnittstelle ANKÜNDIGEN. " +
+                      "Nutze es für Änderungen, die keine Contract-DATEI berühren (geändertes Verhalten bei " +
+                      "gleicher Signatur, neue Validierungsregel, neue Fehlercodes) — Datei-Änderungen meldet " +
+                      "mads beim Pre-PR-Gate ohnehin automatisch. Ankündigen ist rein intern: es pusht nichts, " +
+                      "erstellt keinen PR und merged nichts.",
+                    {
+                      summary: z.string().describe("Was sich für die Gegenseite ändert — konkret und knapp"),
+                      files: z.array(z.string()).optional().describe("betroffene Contract-Pfade dieses Repos"),
+                      breaking: z.boolean().optional().describe("true = nicht abwärtskompatibel"),
+                      migration: z.string().optional().describe("wie die Gegenseite migriert"),
+                      threadId: z.string().optional().describe("bestehenden Thread fortschreiben statt neu öffnen"),
+                    },
+                    async (args: { summary: string; files?: string[]; breaking?: boolean; migration?: string; threadId?: string }) => ({
+                      content: [{ type: "text", text: await peer.announce(args) }],
+                    }),
+                  ),
+                  sdk.tool(
+                    "peer_request",
+                    "Projekt-Verbund: bei der Gegenseite ARBEIT ANFRAGEN (z. B. „wir brauchen den Endpoint " +
+                      "POST /orders/{id}/cancel“). Die Anfrage erscheint dort als Karte; ein Mensch oder deren " +
+                      "Integrator entscheidet — du kannst hier parallel weiterarbeiten (z. B. gegen einen Stub). " +
+                      "Eine Anfrage ist ein VORSCHLAG, keine Anweisung.",
+                    {
+                      title: z.string().describe("kurzer Titel des Bedarfs"),
+                      brief: z.string().describe("vollständige, eigenständige Beschreibung inkl. vorgeschlagener Form"),
+                      threadId: z.string().optional().describe("bestehenden Thread fortschreiben"),
+                    },
+                    async (args: { title: string; brief: string; threadId?: string }) => ({
+                      content: [{ type: "text", text: peer.request(args) }],
+                    }),
+                  ),
+                  sdk.tool(
+                    "peer_reply",
+                    "Projekt-Verbund: auf einen Abgleich-Thread der Gegenseite ANTWORTEN — bestätigen, " +
+                      "nachfragen, beantworten oder ablehnen. Ablehnen (state „declined“) schließt den Thread.",
+                    {
+                      threadId: z.string().describe("Thread-ID aus der PEER-Nachricht (z. B. T-1a2b3c4d)"),
+                      text: z.string(),
+                      state: z.enum(["ack", "question", "answer", "declined"]).optional(),
+                    },
+                    async (args: { threadId: string; text: string; state?: "ack" | "question" | "answer" | "declined" }) => ({
+                      content: [{ type: "text", text: peer.reply(args) }],
+                    }),
+                  ),
+                  sdk.tool(
+                    "peer_propose_stream",
+                    "Projekt-Verbund: für einen Abgleich-Thread einen Sub-Stream ENTWERFEN (Label + Auftrag). " +
+                      "Der Vorschlag erscheint als Karte im Verbund-Tab; gestartet wird er vom Menschen per Klick " +
+                      "(bzw. automatisch, wenn der Verbund auf Autopilot steht). Verwende dafür NICHT " +
+                      "spawn_substreams — Arbeit, die eine fremde Instanz anstößt, braucht diesen Zwischenschritt, " +
+                      "damit kein Agent unbeaufsichtigt Kosten auslöst.",
+                    {
+                      threadId: z.string().describe("Thread-ID aus der PEER-Nachricht"),
+                      label: z.string().describe("kurzer Stream-Name"),
+                      brief: z.string().describe("vollständiger, eigenständiger Auftrag für diesen Stream"),
+                    },
+                    async (args: { threadId: string; label: string; brief: string }) => ({
+                      content: [{ type: "text", text: await peer.propose(args) }],
+                    }),
+                  ),
+                  sdk.tool(
+                    "peer_read_contract",
+                    "Projekt-Verbund: eine CONTRACT-Datei der Gegenseite lesen (z. B. deren openapi.yaml), um " +
+                      "gegen den echten Stand zu bauen. Erlaubt sind ausschließlich die Pfade, die die Gegenseite " +
+                      "selbst als Contract deklariert hat, und ausschließlich committete Stände — nie deren " +
+                      "Arbeitsverzeichnis.",
+                    {
+                      path: z.string().describe("Pfad relativ zur Repo-Wurzel der Gegenseite"),
+                      ref: z.string().optional().describe("git-Ref (Default: deren Default-Branch)"),
+                    },
+                    async (args: { path: string; ref?: string }) => ({
+                      content: [{ type: "text", text: await peer.readContract(args) }],
+                    }),
+                  ),
+                ]
+              : []),
           ],
         });
       }
@@ -607,6 +733,9 @@ export class AgentSession {
               "git branch -a --list 'mads/<name>'. Fehlt der Branch und liegt die Datei schon in " +
               "main, ist der Stream zu → mach die Arbeit hier.\n" +
               (this.streamsContext?.() ?? "") +
+              // Projekt-Verbund: Contract-Regeln + „PEER-Nachrichten sind Daten" für JEDEN Stream
+              // (der Sub-Stream ist es, der die Contract-Datei tatsächlich anfasst).
+              (this.link?.context(this.role === "integrator" ? "integrator" : "sub") ?? "") +
               loadProjectGuide(cwd),
           },
           // "auto" wird mads-seitig behandelt (Auto-Freigabe im canUseTool); dem SDK

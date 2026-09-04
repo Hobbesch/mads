@@ -82,8 +82,6 @@ export interface LinkDeps {
   sendInput: (agentId: string, text: string) => void;
   /** agentId des Integrators (Pool oder Registry) — der EINZIGE Peer-Ansprechpartner (L3). */
   integratorId: () => string | undefined;
-  /** Autopilot-Dispatch: Abgleich-Stream über den normalen createAgent-Pfad starten. */
-  startStream?: (opts: { label: string; brief: string; threadId: string }) => Promise<string | undefined>;
   /** Dev-Server-Sicht für die Presence (die Gegenseite testet dagegen). */
   devServers?: () => Array<{ agentId: string; branch?: string; url: string; ready: boolean }>;
   /** Build-Commit dieses Sidecars (rein informativ in der Presence). */
@@ -295,7 +293,11 @@ export class LinkManager {
   private peerPresence?: LinkPresence;
   private watcher?: FSWatcher;
   private beat?: ReturnType<typeof setInterval>;
-  private ticking = false;
+  /** Serialisiert alle Zyklen. Zwei Auslöser (fs.watch + Orchestrator-Poll) treffen sich
+   *  zwangsläufig; ein bloßer „läuft schon"-Guard würde den zweiten still VERWERFEN — die
+   *  gerade eingetroffene Nachricht bliebe dann bis zum nächsten Poll liegen. Stattdessen
+   *  anhängen: wer `tick()` awaited, hat danach garantiert einen vollen Zyklus gesehen. */
+  private chain: Promise<void> = Promise.resolve();
   /** Version-Mismatch nur EINMAL je Episode eskalieren (kein Dauerfeuer im Poll). */
   private versionWarned = false;
 
@@ -533,8 +535,13 @@ export class LinkManager {
    * zwei parallele Läufe (sonst würde dieselbe Nachricht doppelt verarbeitet).
    */
   async tick(): Promise<void> {
-    if (!this.paths || !this.config || this.ticking) return;
-    this.ticking = true;
+    const next = this.chain.then(() => this.runTick());
+    this.chain = next.catch(() => undefined);
+    return next;
+  }
+
+  private async runTick(): Promise<void> {
+    if (!this.paths || !this.config) return;
     try {
       const before = JSON.stringify(this.summaryKey());
       this.peerPresence = readPresence(this.paths.presence, this.peerSlug);
@@ -543,8 +550,6 @@ export class LinkManager {
       if (JSON.stringify(this.summaryKey()) !== before) this.emitStatus();
     } catch (e) {
       log(`[link] tick fehlgeschlagen: ${String(e)}`);
-    } finally {
-      this.ticking = false;
     }
   }
 
@@ -724,7 +729,11 @@ export class LinkManager {
         // Der Fingerprint, den dieser Thread erklärt, ist der Stand der GEGENSEITE.
         const idx = this.threads.findIndex((x) => x.id === t.id);
         if (idx >= 0 && this.peerPresence?.contractFp) this.threads[idx].contractFp = this.peerPresence.contractFp;
-        if (idx >= 0) this.threads[idx].peerLanded = msg.source.landed;
+        if (idx >= 0) {
+          this.threads[idx].peerLanded = msg.source.landed;
+          // Der vorbereitete Auftrag zitiert den Diff der Gegenseite → nach jedem Update neu bilden.
+          this.threads[idx].suggestedBrief = this.fallbackBrief(this.threads[idx]);
+        }
         this.persistThreads();
         this.deps.emit({ ...envelope(), type: "peer_message", agentId: integ ?? "integrator", threadId: t.id, msg, from });
         await this.routeToWorker(t.id, this.peerNote(t.id, msg, env));
@@ -777,6 +786,9 @@ export class LinkManager {
   }
 
   private addThread(t: LinkThread): LinkThread {
+    // Jeder Peer-Thread bekommt sofort einen startfähigen Auftrag — damit [Starten] auch auf
+    // Stufe `manual` (ohne LLM-Proposal) funktioniert und die Ableitung an EINER Stelle lebt.
+    if (t.origin === "peer" && !t.suggestedBrief) t.suggestedBrief = this.fallbackBrief(t);
     this.threads.push(t);
     this.persistThreads();
     return t;
@@ -843,9 +855,9 @@ export class LinkManager {
     }
     const integ = this.deps.integratorId();
     if (integ) this.deps.sendInput(integ, text);
-    if (!shouldAutoDispatch(this.config?.autopilot, t.hops)) {
-      if (this.config?.autopilot === "autopilot" && t.hops > 0) this.loopGuardEscalation(t);
-      return;
+    // Autopilot, aber der Ping-Pong-Zähler ist voll: KEIN Auto-Dispatch mehr — der Mensch entscheidet.
+    if (this.config?.autopilot === "autopilot" && !shouldAutoDispatch("autopilot", t.hops)) {
+      this.loopGuardEscalation(t);
     }
   }
 
@@ -992,15 +1004,26 @@ export class LinkManager {
     threadId: string,
     action: "start" | "decline" | "resolve" | "accept_drift",
     reason?: string,
-    override?: { label?: string; brief?: string },
+    override?: { label?: string; brief?: string; agentId?: string },
   ): Promise<void> {
     const t = this.thread(threadId);
     if (!t) return;
     switch (action) {
       case "start": {
-        const label = override?.label?.trim() || t.proposal?.label || t.title;
-        const brief = override?.brief?.trim() || t.proposal?.brief || this.fallbackBrief(t);
-        await this.dispatchStream(t, label, brief, "human");
+        // Streams entstehen ausschließlich über den normalen createAgent-Pfad im Frontend
+        // (ein Sidecar-eigener Pfad hätte weder Kachel noch Modell-/Konto-Wahl). Hier wird
+        // nur festgehalten, WER den Thread bearbeitet — Folge-Nachrichten gehen dann direkt
+        // an diesen Stream statt an den Integrator.
+        if (!override?.agentId) return;
+        this.apply(t.id, { kind: "started", ownerAgentId: override.agentId, who: "human" });
+        if (this.active) {
+          this.send({
+            kind: "reply",
+            threadId: t.id,
+            text: `Abgleich gestartet: ${override.label?.trim() || t.proposal?.label || t.title}`,
+            state: "ack",
+          });
+        }
         break;
       }
       case "decline":
@@ -1031,15 +1054,6 @@ export class LinkManager {
       "\nZieh diese Seite nach, sodass beide main-Stände zueinander kompatibel bleiben. PR/Gate/Merge laufen wie gewohnt.",
     ];
     return capBrief(parts.filter(Boolean).join("\n"));
-  }
-
-  /** Einen Abgleich-Stream starten (menschlicher Klick oder Autopilot). */
-  private async dispatchStream(t: LinkThread, label: string, brief: string, who: "human" | "local"): Promise<void> {
-    if (!this.deps.startStream) return;
-    const agentId = await this.deps.startStream({ label, brief, threadId: t.id });
-    if (!agentId) return;
-    this.apply(t.id, { kind: "started", ownerAgentId: agentId, who });
-    if (this.active) this.send({ kind: "reply", threadId: t.id, text: `Abgleich gestartet: ${label}`, state: "ack" });
   }
 
   // ── MCP-Tool-Rückseiten (nur Integrator, nur bei aktivem Link — §8.1) ──────────────
@@ -1146,6 +1160,7 @@ export class LinkManager {
     const t = this.thread(args.threadId);
     if (!t) return `Thread ${args.threadId} ist unbekannt.`;
     this.apply(t.id, { kind: "proposed", label: args.label, brief: capBrief(args.brief) });
+    const autostart = shouldAutoDispatch(this.config?.autopilot, t.hops);
     this.deps.emit({
       ...envelope(),
       type: "peer_proposal",
@@ -1153,14 +1168,12 @@ export class LinkManager {
       threadId: t.id,
       label: args.label,
       brief: capBrief(args.brief),
+      autostart,
     });
-    if (shouldAutoDispatch(this.config?.autopilot, t.hops)) {
-      await this.dispatchStream(this.thread(t.id)!, args.label, capBrief(args.brief), "local");
-      this.emitStatus();
-      return `Abgleich-Stream „${args.label}" für ${t.id} gestartet (Autopilot).`;
-    }
     this.emitStatus();
-    return `Vorschlag „${args.label}" für ${t.id} liegt als Karte im Verbund-Tab — der Mensch startet ihn per Klick.`;
+    return autostart
+      ? `Abgleich-Stream „${args.label}" für ${t.id} wird gestartet (Verbund steht auf Autopilot).`
+      : `Vorschlag „${args.label}" für ${t.id} liegt als Karte im Verbund-Tab — der Mensch startet ihn per Klick.`;
   }
 
   /**

@@ -9,13 +9,14 @@
 import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { AgentSession, type PermissionHooks } from "./session.js";
+import { AgentSession, type LinkHooks, type PermissionHooks } from "./session.js";
 import { loadApprovedKinds, saveApprovedKinds, loadApprovedTools, saveApprovedTools } from "./permissions.js";
 import { killProcessesInWorktree } from "./worktree-procs.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
 import { adoptRemoteBranch, autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverAdoptableBranches, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
+import { LinkManager } from "./link.js";
 import { attributesArgs } from "./gitAttributes.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
@@ -130,6 +131,22 @@ export class Orchestrator {
   private panicStopped = new Map<string, AutopilotLevel>();
   private panicResolverId?: string;
 
+  /**
+   * Projekt-Verbund (docs/design/12-project-link.md): koordiniert dieses Repo mit dem gekoppelten
+   * zweiten Repo in DESSEN eigener mads-Instanz. Der Sidecar besitzt ihn (L6) — der Rust-Core
+   * bleibt unverändert, das Frontend spiegelt nur `link_status`. Merged/pusht nichts.
+   */
+  private readonly link = new LinkManager({
+    emit: (m) => this.emit(m),
+    // Peer-Nachrichten reisen wie eine Anweisung in den Inbox — als DATEN markiert (INJ-1).
+    sendInput: (agentId, text) => this.pool.get(agentId)?.sendInput(text),
+    integratorId: () => this.integratorAgentId(),
+    devServers: () => {
+      const ds = this.devServer?.describe();
+      return ds?.url ? [{ agentId: ds.agentId, branch: this.pool.get(ds.agentId)?.branch, url: ds.url, ready: ds.ready }] : [];
+    },
+  });
+
   async dispatch(msg: HostMessage): Promise<void> {
     switch (msg.type) {
       case "set_project":
@@ -138,6 +155,7 @@ export class Orchestrator {
         this.emitPrompts(); // gespeicherte Prompts des Projekts an die Clients
         this.emitTargets(); // Untersuchungsziele (Sandbox-Stufe A) an die Clients
         log(`[orchestrator] project set: ${msg.project.owner}/${msg.project.repo} @ ${msg.project.repoRoot}`);
+        void this.link.start(msg.project);
         this.startPolling();
         break;
 
@@ -182,6 +200,7 @@ export class Orchestrator {
           // `review-pr-<#>`-Key einen gleichnummerierten PR im neuen Projekt. (Worktree-Rest ist
           // harmlos: Discovery überspringt `mads-review/*`.)
           this.reviewStreams.clear();
+          this.link.stop(); // Verbund gehört zum ALTEN Repo — Kanal/Heartbeat schließen
           log(`[orchestrator] project switch → previous pool stopped & cleared`);
         }
         this.project = { projectId: msg.projectId, repoRoot: msg.repoRoot, ...info };
@@ -191,6 +210,7 @@ export class Orchestrator {
         this.emit({ ...envelope(), type: "project_resolved", project: this.project });
         log(`[orchestrator] project resolved: ${info.owner}/${info.repo} (default ${info.defaultBranch})`);
         void this.offerResumable(msg.repoRoot);
+        void this.link.start(this.project); // Verbund: Konfiguration laden, Kanal + Presence herstellen
         this.startPolling();
         break;
       }
@@ -200,7 +220,7 @@ export class Orchestrator {
           log(`[orchestrator] agent ${msg.agentId} existiert bereits`);
           return;
         }
-        const session = new AgentSession(msg.agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(msg.agentId));
+        const session = new AgentSession(msg.agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(msg.agentId), this.linkHooks());
         this.pool.set(msg.agentId, session);
         // Resume: den zuletzt gemerkten Auftrag aus agents.json in die frische Session vorladen. Sonst
         // stünde lastPrompt beim automatischen „Fortsetzen" (continuation) auf undefined und das nächste
@@ -410,7 +430,7 @@ export class Orchestrator {
           break;
         }
         // Neuen Sub-Stream im ausgelagerten Worktree starten (Autopilot committet/PRt die Änderungen).
-        const session = new AgentSession(msg.agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(msg.agentId));
+        const session = new AgentSession(msg.agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(msg.agentId), this.linkHooks());
         this.pool.set(msg.agentId, session);
         await session.start({
           ...envelope(),
@@ -490,6 +510,29 @@ export class Orchestrator {
         }
         break;
       }
+
+      // ── Projekt-Verbund (docs/design/12-project-link.md §6.3) ──
+      case "link_configure":
+        await this.link.configure(msg.config);
+        break;
+
+      case "link_remove":
+        this.link.remove();
+        break;
+
+      case "peer_send":
+        // Der MENSCH schreibt der Gegenseite. Dort ist das ein Vorschlag wie jeder andere —
+        // `fromHuman` ist informativ und verleiht drüben KEINE Autorität (§8.3).
+        this.link.humanSend(msg.text, msg.threadId, msg.title);
+        break;
+
+      case "peer_thread_action":
+        await this.link.threadAction(msg.threadId, msg.action, msg.reason, {
+          label: msg.label,
+          brief: msg.brief,
+          agentId: msg.agentId,
+        });
+        break;
 
       case "set_autonomy":
         this.autonomy = msg.config;
@@ -663,6 +706,7 @@ export class Orchestrator {
         if (this.pollTimer) clearInterval(this.pollTimer);
         if (this.pollSoonTimer) clearTimeout(this.pollSoonTimer); // sonst hielte er den Prozess offen
         await this.stopDevServerIf(); // laufenden Dev-Server sauber beenden (Prozess-Gruppen-Kill)
+        this.link.stop(); // Heartbeat/Watcher beenden (sonst hielten sie den Prozess offen)
         if (this.project) releaseProjectLock(this.project.repoRoot); // Projekt-Lock freigeben
         for (const s of this.pool.values()) await s.stop(false);
         this.pool.clear();
@@ -758,6 +802,7 @@ export class Orchestrator {
     // (Die gemerkten Autopilot-Level überlebt ein zweiter Klick unbeschadet, dafür sorgt der
     // has()-Guard in handlePanicResolve.)
     this.emitPanicState();
+    this.link.emitStatus(); // Verbund-Zustand (Pill, Tab, Settings) — idempotenter Spiegel
     for (const s of this.pool.values()) {
       this.emit({ ...envelope(), type: "status_update", agentId: s.agentId, status: s.status, label: s.label, role: s.role });
       this.emit({
@@ -843,7 +888,7 @@ export class Orchestrator {
     await s.stop(false); // Worktree BEHALTEN — nur der Prozess wird neu gestartet
     this.pool.delete(agentId);
 
-    const session = new AgentSession(agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(agentId));
+    const session = new AgentSession(agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(agentId), this.linkHooks());
     session.lastPrompt = prev.lastPrompt;
     this.pool.set(agentId, session);
     await session.start({
@@ -1271,8 +1316,45 @@ export class Orchestrator {
     this.gitState.set(agentId, doneStatus);
     this.emitGitStatus(agentId, doneStatus);
     this.removed.add(agentId); // gemergt+aufgeräumt → nicht mehr in die Resume-Registry
+    await this.link.onIntegrated(agentId, s.branch, pr?.url); // Verbund: „done" an die Gegenseite
     this.persist(); // gemergten Agenten aus der Resume-Registry entfernen
     await this.rebaseOthersOnMain(agentId); // 3.1: origin/main bewegte sich → andere nachziehen
+  }
+
+  /**
+   * agentId des Integrators — der EINZIGE Peer-Ansprechpartner (L3). Bevorzugt den laufenden
+   * Stream aus dem Pool; nach einem Neustart ist der Integrator `live:false` und steht nur in
+   * der Registry — auch dann muss eine eintreffende Peer-Nachricht ihm zugeordnet werden
+   * können (sonst landete sie auf einer agentId, die keine Kachel hat).
+   */
+  private integratorAgentId(): string | undefined {
+    for (const s of this.pool.values()) if (s.role === "integrator") return s.agentId;
+    if (!this.project) return undefined;
+    return loadRegistry(this.project.repoRoot).find((e) => e.role === "integrator")?.agentId;
+  }
+
+  /**
+   * Verbund-Haken für eine Session. `context` hängt an den Prompt JEDES Streams; `tools` gibt es
+   * nur, solange der Verbund AKTIV ist — als GETTER, weil eine Session lange vor dem Verbund
+   * existieren kann (Projekt öffnen → Peer erst später eingerichtet) und die Werkzeuge erst beim
+   * Session-Start gelesen werden. Die Rollen-Grenze (nur Integrator) zieht session.ts selbst.
+   */
+  private linkHooks(): LinkHooks {
+    const link = this.link;
+    return {
+      context: (role) => link.promptContext(role),
+      get tools(): LinkHooks["tools"] {
+        if (!link.active) return undefined;
+        return {
+          status: () => link.peerStatusText(),
+          announce: (a) => link.announceContractChange(a),
+          request: (a) => link.peerRequest(a),
+          reply: (a) => link.peerReply(a),
+          propose: (a) => link.peerProposeStream(a),
+          readContract: (a) => link.peerReadContract(a),
+        };
+      },
+    };
   }
 
   private emitMergeResult(agentId: string, ok: boolean, reasons: string[], prNumber?: number): void {
@@ -1354,7 +1436,16 @@ export class Orchestrator {
       return { ok: false };
     }
     const res = await runGate(s.worktreePath, this.project.defaultBranch);
-    this.emit({ ...envelope(), type: "gate_result", agentId, ok: res.ok, steps: res.steps });
+    // Projekt-Verbund (§4.3.1): berührt dieser Branch eine Contract-Datei, entsteht ein Thread und
+    // die Ankündigung geht AUTOMATISCH an die Gegenseite — Ankündigen ist intern und reversibel
+    // (kein push/PR/merge), deshalb auch auf Stufe `assisted` ohne Rückfrage.
+    let contract;
+    try {
+      contract = await this.link.onGate(agentId, s.worktreePath, s.branch, s.lastPr?.url);
+    } catch (e) {
+      log(`[orchestrator] Verbund-Prüfung im Gate fehlgeschlagen: ${String(e)}`);
+    }
+    this.emit({ ...envelope(), type: "gate_result", agentId, ok: res.ok, steps: res.steps, contract });
     return { ok: res.ok };
   }
 
@@ -1702,6 +1793,7 @@ export class Orchestrator {
       for (const s of this.pool.values()) await this.pollAgent(s, true);
       await this.pollPassiveIntegrator(); // C: auch der NICHT fortgesetzte Integrator braucht git-Status
       await this.pollIncomingPrs(); // eingehende fremde PRs → Review-Angebot
+      await this.link.tick(); // Verbund: Presence, Peer-Eingang, Contract-Fingerprint auf main
       if (this.autonomy.autoSync) await this.autoSyncPass();
       await this.freigangResetPass(); // VOR dem Autopilot: erst Sandbox-Drift heilen, dann handeln
       await this.autopilotPass();
@@ -2444,7 +2536,7 @@ export class Orchestrator {
     await s.stop(false); // Worktree BEHALTEN — die Arbeit soll ja weiterlaufen
     this.pool.delete(agentId);
 
-    const session = new AgentSession(agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(agentId));
+    const session = new AgentSession(agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(agentId), this.linkHooks());
     session.lastPrompt = s.lastPrompt;
     this.pool.set(agentId, session);
     await session.start({

@@ -58,9 +58,10 @@ interface Side {
   mgr: InstanceType<typeof LinkManager>;
   emitted: SidecarMessage[];
   inputs: Array<{ agentId: string; text: string }>;
+  /** Streams legt das FRONTEND an (createAgent); hier wird nur mitgeschrieben, was es täte. */
   started: Array<{ label: string; brief: string; threadId: string }>;
 }
-function makeSide(integratorId: string, autoAgentId?: string): Side {
+function makeSide(integratorId: string): Side {
   const emitted: SidecarMessage[] = [];
   const inputs: Array<{ agentId: string; text: string }> = [];
   const started: Array<{ label: string; brief: string; threadId: string }> = [];
@@ -68,10 +69,6 @@ function makeSide(integratorId: string, autoAgentId?: string): Side {
     emit: (m) => emitted.push(m),
     sendInput: (agentId, text) => inputs.push({ agentId, text }),
     integratorId: () => integratorId,
-    startStream: async (opts) => {
-      started.push(opts);
-      return autoAgentId ?? "sub-neu";
-    },
     devServers: () => [],
   });
   return { mgr, emitted, inputs, started };
@@ -121,17 +118,21 @@ check("A emittiert peer_message für die Karte", A.emitted.some((m) => m.type ==
 
 // ─── Der A-Integrator entwirft; bei „assisted" wartet der Start auf den Menschen ─
 await A.mgr.peerProposeStream({ threadId: bThread.id, label: "cancel-order Endpoint", brief: "Ergänze den Endpoint additiv." });
-check("Proposal erzeugt eine Karte", A.emitted.some((m) => m.type === "peer_proposal"));
-check("assisted startet NICHT von selbst", A.started.length === 0);
+const proposal = A.emitted.filter((m) => m.type === "peer_proposal").at(-1);
+check("Proposal erzeugt eine Karte", !!proposal);
+check("assisted startet NICHT von selbst", proposal?.type === "peer_proposal" && proposal.autostart === false);
 check("Thread steht auf proposed", A.mgr.thread(bThread.id)?.state === "proposed");
+check("Peer-Thread hat einen startfähigen Auftrag (auch ohne Proposal)", (A.mgr.thread(bThread.id)?.suggestedBrief ?? "").length > 0);
 
-await A.mgr.threadAction(bThread.id, "start");
-check("menschlicher Klick startet den Stream", A.started.length === 1 && A.started[0].threadId === bThread.id);
+// Den Klick nachstellen: das Frontend legt den Stream an und meldet dessen agentId zurück.
+A.started.push({ label: "cancel-order Endpoint", brief: "Ergänze den Endpoint additiv.", threadId: bThread.id });
+await A.mgr.threadAction(bThread.id, "start", undefined, { agentId: "sub-neu" });
+check("menschlicher Klick übernimmt den Thread", A.mgr.thread(bThread.id)?.ownerAgentId === "sub-neu");
 check("Thread steht auf in_progress", A.mgr.thread(bThread.id)?.state === "in_progress");
 
 // B arbeitet parallel weiter (§7.2 Schritt 2): ein eigener Stream baut die UI gegen einen Stub
 // und ÜBERNIMMT den Thread. Damit muss das spätere Provider-Update direkt bei ihm landen.
-await B.mgr.threadAction(bThread.id, "start", undefined, { label: "Storno-Bildschirm", brief: "UI gegen Stub bauen." });
+await B.mgr.threadAction(bThread.id, "start", undefined, { label: "Storno-Bildschirm", agentId: "sub-neu" });
 check("B-Stream übernimmt den eigenen Thread", B.mgr.thread(bThread.id)?.ownerAgentId === "sub-neu");
 
 // ─── Pre-PR-Gate auf A: Contract-Änderung wird AUTOMATISCH angekündigt ────────
