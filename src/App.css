@@ -4815,3 +4815,13 @@ button.peer-card-link {
   font-size: 11px;
   padding: 3px 9px;
 }
+
+/* „Konto neu verbinden" unter der Konto-Auswahl. Bewusst unauffaellig: der Weg ist selten noetig,
+   aber wenn er noetig ist, soll man ihn nicht im Terminal suchen muessen. */
+.rail-account-relink {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+.rail-account-relink:hover { opacity: 1; }

@@ -101,6 +101,7 @@ export type HostMessage =
   | RequestSnapshotMsg
   | SetAccountMsg
   | RequestAccountsMsg
+  | AccountRelinkMsg
   | SetSandboxModeMsg
   | TargetsSaveMsg
   | LinkConfigureMsg
@@ -604,6 +605,7 @@ export type SidecarMessage =
   | HandoffResultMsg
   | PromptsUpdateMsg
   | AccountsUpdateMsg
+  | AccountRelinkUpdateMsg
   | AccountUsageMsg
   | RateLimitNoticeMsg
   | ModelActiveMsg
@@ -1087,6 +1089,41 @@ export interface SetAccountMsg extends BaseMsg {
 /** Host → Sidecar: Account-Zustand neu senden (beim Start / nach Reconnect). */
 export interface RequestAccountsMsg extends BaseMsg {
   type: "request_accounts";
+}
+
+/**
+ * Host → Sidecar: geführtes „Konto neu verbinden" (`claude setup-token`).
+ *
+ * `start` beginnt den Flow, `code` liefert den im Browser abgeholten Code, `cancel` bricht ab,
+ * `confirm` speichert TROTZ erkanntem Doppel-Konto (der Mensch entscheidet — mads soll niemanden
+ * von einer Konfiguration aussperren, die er wirklich will).
+ */
+export interface AccountRelinkMsg extends BaseMsg {
+  type: "account_relink";
+  accountId: string;
+  step: "start" | "code" | "cancel" | "confirm";
+  /** Nur bei `step: "code"`. Der Code ist kurzlebig und kein Token. */
+  code?: string;
+}
+
+/**
+ * Schritt im Verbinden-Flow. `duplicate` ist der eigentliche Zweck der Übung: die Messung hat
+ * ergeben, dass der neue Zugang zum selben Konto gehört wie ein anderes Profil — der Fehler, der
+ * sich sonst erst Wochen später als „beide Konten gleichzeitig leer" zeigt.
+ */
+export type AccountRelinkPhase = "starting" | "awaiting_code" | "verifying" | "duplicate" | "done" | "error";
+
+/** Sidecar → Host: Fortschritt des Verbinden-Flows. Enthält NIE einen Token. */
+export interface AccountRelinkUpdateMsg extends BaseMsg {
+  type: "account_relink_update";
+  accountId: string;
+  phase: AccountRelinkPhase;
+  /** Bei `awaiting_code`: die Anmelde-Adresse zum Öffnen im Browser. */
+  url?: string;
+  /** Bei `error`/`duplicate`: Klartext für die Oberfläche. */
+  message?: string;
+  /** Bei `duplicate`: Label des Profils, das dasselbe Konto benutzt. */
+  duplicateOf?: string;
 }
 
 /** Ergebnis eines Handoff-Export/-Imports → treibt einen dismissbaren Hinweis-Banner im Frontend. */

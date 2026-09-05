@@ -33,6 +33,7 @@ import type {
   TimelineAttachment,
   SavedPrompt,
   AccountsState,
+  AccountRelinkPhase,
   UsageWindow,
   SandboxMode,
   InvestigationTarget,
@@ -387,6 +388,9 @@ export interface MadsState {
   /** Claude-Konten + Cooldowns. Quelle ist der Sidecar (`accounts_update`) — hier nur gespiegelt.
    *  undefined = noch nicht geladen (dann bleibt die Konto-Auswahl schlicht unsichtbar). */
   accounts?: AccountsState;
+  /** Laufender „Konto neu verbinden"-Flow (Modal). undefined = kein Flow offen.
+   *  Enthält NIE einen Token — nur Phase, Anmelde-Adresse und Klartext für die Anzeige. */
+  relink?: { accountId: string; phase: AccountRelinkPhase; url?: string; message?: string; duplicateOf?: string };
   /** Plan-Nutzungslimits je Konto (aus `account_usage`, Fallback `rate_limit_notice`).
    *  Bewusst NUR im Speicher: eine Momentaufnahme, die nach einem Neustart veraltet wäre. */
   accountUsage: Record<
@@ -493,6 +497,14 @@ export interface MadsState {
   setStreamAccount: (id: string, accountId: string) => Promise<void>;
   /** Standard-Konto für NEU eröffnete Streams. Laufende Streams bleiben unberührt. */
   setDefaultAccount: (accountId: string) => Promise<void>;
+  /** „Konto neu verbinden" öffnen (führt durch `claude setup-token`). */
+  startAccountRelink: (accountId: string) => Promise<void>;
+  /** Den im Browser abgeholten Code einreichen. */
+  submitAccountRelinkCode: (code: string) => Promise<void>;
+  /** Speichern, obwohl die Messung dasselbe Konto wie ein anderes Profil ergeben hat. */
+  confirmAccountRelink: () => Promise<void>;
+  /** Modal schliessen / Flow abbrechen. */
+  cancelAccountRelink: () => Promise<void>;
   interruptAgent: (id: string) => Promise<void>;
   stopAgent: (id: string, removeWorktree: boolean) => Promise<void>;
   commitAgent: (id: string) => Promise<void>;
@@ -1145,6 +1157,24 @@ export const useStore = create<MadsState>((set) => {
       case "accounts_update":
         // Der Sidecar besitzt die Registry (er startet die Prozesse) — das Frontend spiegelt nur.
         set({ accounts: msg.accounts });
+        break;
+
+      case "account_relink_update":
+        // `done` schliesst das Modal von selbst; alles andere bleibt stehen, damit der Mensch die
+        // Adresse, die Meldung oder die Doppel-Konto-Warnung tatsächlich lesen kann.
+        set(
+          msg.phase === "done"
+            ? { relink: undefined }
+            : {
+                relink: {
+                  accountId: msg.accountId,
+                  phase: msg.phase,
+                  url: msg.url,
+                  message: msg.message,
+                  duplicateOf: msg.duplicateOf,
+                },
+              },
+        );
         break;
 
       case "account_usage":
@@ -1913,6 +1943,31 @@ export const useStore = create<MadsState>((set) => {
       // accounts_update (er besitzt die Registry und schreibt sie auf Platte).
       set((s) => (s.accounts ? { accounts: { ...s.accounts, activeId: accountId } } : {}));
       await sendHost({ ...envelope(), type: "set_account", accountId });
+    },
+
+    startAccountRelink: async (accountId) => {
+      set({ relink: { accountId, phase: "starting" } });
+      await sendHost({ ...envelope(), type: "account_relink", accountId, step: "start" });
+    },
+
+    submitAccountRelinkCode: async (code) => {
+      const cur = useStore.getState().relink;
+      if (!cur) return;
+      set({ relink: { ...cur, phase: "verifying", message: undefined } });
+      await sendHost({ ...envelope(), type: "account_relink", accountId: cur.accountId, step: "code", code });
+    },
+
+    confirmAccountRelink: async () => {
+      const cur = useStore.getState().relink;
+      if (!cur) return;
+      set({ relink: { ...cur, phase: "verifying" } });
+      await sendHost({ ...envelope(), type: "account_relink", accountId: cur.accountId, step: "confirm" });
+    },
+
+    cancelAccountRelink: async () => {
+      const cur = useStore.getState().relink;
+      set({ relink: undefined });
+      if (cur) await sendHost({ ...envelope(), type: "account_relink", accountId: cur.accountId, step: "cancel" });
     },
 
     interruptAgent: async (id) => {

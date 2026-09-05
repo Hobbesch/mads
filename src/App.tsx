@@ -12,6 +12,7 @@ import { IntegrationPanel } from "./components/IntegrationPanel";
 import { Inspector } from "./components/Inspector";
 import { PermissionDialog } from "./components/PermissionDialog";
 import { NewStreamDialog } from "./components/NewStreamDialog";
+import { AccountRelinkDialog } from "./components/AccountRelinkDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { ParallelDialog } from "./components/ParallelDialog";
 import { SaveToast } from "./components/SaveToast";
@@ -584,6 +585,7 @@ export default function App() {
           }}
         />
       )}
+      <AccountRelinkDialog />
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {closeGuard && (
         <ConfirmDialog

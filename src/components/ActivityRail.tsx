@@ -33,6 +33,7 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
   const accounts = useStore((s) => s.accounts);
   const accountUsage = useStore((s) => s.accountUsage);
   const setDefaultAccount = useStore((s) => s.setDefaultAccount);
+  const startAccountRelink = useStore((s) => s.startAccountRelink);
   const [projectOpen, setProjectOpen] = useState(false);
 
   // Badges/Enabled lesen denselben Store-State über memoisierte Selektoren (§3.3).
@@ -208,6 +209,18 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
               );
             })}
           </select>
+          {/* Der Knopf, der den stillen Fehlfall auflöst: eine abgelaufene oder auf dem FALSCHEN
+              Konto gelandete Anmeldung sieht in der Auswahl oben aus wie eine gültige. Hier führt
+              mads durch `claude setup-token` und misst danach nach, welches Konto wirklich
+              dahintersteckt — statt es zu glauben. */}
+          <button
+            type="button"
+            className="linklike rail-account-relink"
+            onClick={() => void startAccountRelink(accounts.activeId)}
+            title="Anmeldung dieses Kontos erneuern (führt durch claude setup-token und prüft danach, zu welchem Konto der Zugang wirklich gehört)"
+          >
+            Konto neu verbinden…
+          </button>
         </div>
       )}
 

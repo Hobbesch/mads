@@ -39,6 +39,7 @@ const SHARED_LANDFIRST_GLOBS = [
 import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, AutopilotLevel, ResumableAgent, SavedPrompt, OpenReviewStreamMsg, StartAgentMsg, SandboxMode, InvestigationTarget } from "../../shared/protocol.js";
 import conflictPlaybook from "../playbooks/conflict-resolution.md";
 import { loadAccounts, pruneCooldowns, saveAccounts } from "./accounts.js";
+import { AccountRelink } from "./accountRelink.js";
 
 /**
  * Grundtakt des Orchestrators. Früher 25 s — zusammen mit „eine Aktion pro Zyklus & Stream"
@@ -71,6 +72,9 @@ export class Orchestrator {
   private readonly approvedKinds = new Set<CommandKind>();
   // Dito, aber pro TOOL-NAME (MCP-/Nicht-Bash-Tools) — siehe permissions.ts.
   private readonly approvedTools = new Set<string>();
+  /** Lazy: der „Konto neu verbinden"-Flow. Absichtlich EINER — parallele `setup-token`-Läufe
+   *  teilten sich die Browser-Sitzung und lieferten damit garantiert dasselbe Konto. */
+  private relink?: AccountRelink;
   private pollTimer?: ReturnType<typeof setInterval>;
   private pollSoonTimer?: ReturnType<typeof setTimeout>;
   // Re-Entrancy-Schutz: dauert ein Poll-Zyklus (fetch + Autopilot commit/push/PR) länger als das
@@ -300,6 +304,10 @@ export class Orchestrator {
 
       case "request_accounts":
         this.emitAccounts();
+        break;
+
+      case "account_relink":
+        this.handleRelink(msg.accountId, msg.step, msg.code);
         break;
 
       case "set_sandbox_mode":
@@ -2459,6 +2467,32 @@ export class Orchestrator {
   }
 
   // ------------------------------------------------------- Claude-Konten
+  /**
+   * Geführtes „Konto neu verbinden". Der Flow lebt in accountRelink.ts; hier nur die Weiche und
+   * das Spiegeln des Ergebnisses. Nach `done` MUSS `emitAccounts()` laufen: die Registry hat einen
+   * neuen Schlüsselbund-Verweis bekommen, und die UI zeigte sonst weiter den alten Zustand.
+   */
+  private handleRelink(accountId: string, step: "start" | "code" | "cancel" | "confirm", code?: string): void {
+    const flow = (this.relink ??= new AccountRelink((u) => {
+      this.emit({ ...envelope(), type: "account_relink_update", ...u });
+      if (u.phase === "done") this.emitAccounts();
+    }));
+    switch (step) {
+      case "start":
+        flow.start(accountId);
+        break;
+      case "code":
+        if (code) flow.submitCode(code);
+        break;
+      case "confirm":
+        flow.confirmDuplicate();
+        break;
+      case "cancel":
+        flow.cancel();
+        break;
+    }
+  }
+
   /** Aktuellen Kontenzustand ans Frontend spiegeln (Registry ist die Wahrheit, nicht das UI). */
   private emitAccounts(): void {
     const state = pruneCooldowns(loadAccounts());
