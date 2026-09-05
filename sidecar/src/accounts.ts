@@ -15,6 +15,7 @@
  * erste benutzerweite Sidecar-Store (alles andere liegt projektlokal).
  */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -53,7 +54,7 @@ export function expandHome(p: string): string {
  * Bewusst defensiv: die Datei ist gross und gehört Claude Code; Fehler sind hier nie fatal.
  * Es wird NICHTS ausser der E-Mail gelesen und nie etwas geschrieben.
  */
-function readAccountEmail(configDir: string): string | undefined {
+function readConfigDirEmail(configDir: string): string | undefined {
   // Claude Code legt `.claude.json` unterschiedlich ab: bei gesetztem CLAUDE_CONFIG_DIR INNERHALB
   // des Verzeichnisses, im Standardfall (`~/.claude`) dagegen DANEBEN als `~/.claude.json`.
   // Beide Orte prüfen — sonst bliebe ausgerechnet das Standardkonto ohne Anzeigenamen.
@@ -77,7 +78,50 @@ function sanitizeProfile(raw: unknown): AccountProfile | undefined {
   const configDir = typeof r.configDir === "string" ? expandHome(r.configDir.trim()) : "";
   if (!id || !configDir) return undefined;
   const label = typeof r.label === "string" && r.label.trim() ? r.label.trim() : id;
-  return { id, label, configDir };
+  const svc = typeof r.tokenKeychainService === "string" ? r.tokenKeychainService.trim() : "";
+  const mail = typeof r.declaredEmail === "string" ? r.declaredEmail.trim() : "";
+  const prof: AccountProfile = { id, label, configDir };
+  if (svc) prof.tokenKeychainService = svc;
+  if (mail) prof.declaredEmail = mail;
+  return prof;
+}
+
+/**
+ * Langlebiger OAuth-Token eines Profils aus dem macOS-Schlüsselbund lesen (`claude setup-token`).
+ *
+ * Bewusst ein `security`-Aufruf und KEIN Klartext in `accounts.json`: die Registry darf jederzeit
+ * eingesehen, kopiert und ins Backup gelegt werden — ein Token darf das nicht. Der Wert läuft über
+ * stdout des Kindprozesses, nie über `argv` (dort wäre er kurzzeitig in der Prozessliste sichtbar).
+ *
+ * Der Rückgabewert wird NIE geloggt. Bei jedem Fehler `undefined` → der Aufrufer fällt auf die
+ * Verzeichnis-Anmeldung zurück, statt den Stream gar nicht erst zu starten.
+ */
+export function readAccountToken(profile: AccountProfile): string | undefined {
+  const service = profile.tokenKeychainService;
+  if (!service) return undefined;
+  try {
+    const r = spawnSync("/usr/bin/security", ["find-generic-password", "-w", "-s", service], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    if (r.status !== 0) {
+      log(`[accounts] Kein Schlüsselbund-Eintrag "${service}" für Konto "${profile.id}" — Verzeichnis-Anmeldung gilt.`);
+      return undefined;
+    }
+    // Trimmen ist hier nicht Kosmetik: ein beim Einfügen mitkopiertes führendes Leerzeichen macht
+    // den Token ungültig, und die CLI fällt dann STILL auf die Verzeichnis-Anmeldung zurück —
+    // also genau auf das falsche Konto. Passiert am 05.09.2026 real.
+    const token = (r.stdout ?? "").trim();
+    if (!token) return undefined;
+    if (!token.startsWith("sk-ant-")) {
+      log(`[accounts] Eintrag "${service}" sieht nicht wie ein Claude-Token aus — ignoriert.`);
+      return undefined;
+    }
+    return token;
+  } catch (e) {
+    log(`[accounts] Schlüsselbund-Zugriff für "${service}" fehlgeschlagen: ${String(e)}`);
+    return undefined;
+  }
 }
 
 function sanitizeCooldown(raw: unknown): AccountCooldown | undefined {
@@ -134,7 +178,12 @@ export function loadAccounts(now: number = Date.now()): AccountsState {
   const activeId = profiles.some((x) => x.id === activeRaw) ? activeRaw : profiles[0].id;
 
   // E-Mail nur anreichern, nicht persistieren (sie kann sich durch Neuanmeldung ändern).
-  for (const prof of profiles) prof.email = readAccountEmail(prof.configDir);
+  // Bei token-gebundenen Profilen ist `<configDir>/.claude.json` KEINE Quelle mehr: unter
+  // Token-Auth schreibt die CLI dort kein `oauthAccount`, der alte Eintrag bliebe stehen und
+  // zeigte weiter das Konto der letzten Verzeichnis-Anmeldung — also womöglich das falsche.
+  for (const prof of profiles) {
+    prof.email = prof.declaredEmail ?? (prof.tokenKeychainService ? undefined : readConfigDirEmail(prof.configDir));
+  }
 
   return { profiles, activeId, cooldowns };
 }
@@ -149,7 +198,13 @@ export function saveAccounts(state: AccountsState): void {
     const onDisk = {
       v: 1,
       activeId: state.activeId,
-      profiles: state.profiles.map((p) => ({ id: p.id, label: p.label, configDir: p.configDir })),
+      profiles: state.profiles.map((p) => ({
+        id: p.id,
+        label: p.label,
+        configDir: p.configDir,
+        ...(p.tokenKeychainService ? { tokenKeychainService: p.tokenKeychainService } : {}),
+        ...(p.declaredEmail ? { declaredEmail: p.declaredEmail } : {}),
+      })),
       cooldowns: state.cooldowns,
     };
     writeFileSync(tmp, JSON.stringify(onDisk, null, 2));

@@ -16,7 +16,7 @@ import { createWorktree, removeWorktree, worktreeFingerprint } from "./git.js";
 import { ensureMadsDir } from "./persistence.js";
 import { classifyToolCall, isDeployCommand, isGitCommit, isRememberableKind, registrableDomain, rememberableFetchDomain, type CommandKind } from "../../shared/safe-command.js";
 import { accountAgentEnv } from "./agentEnv.js";
-import { DEFAULT_ACCOUNT_ID, loadAccounts, pickFallback, resolveProfile, saveAccounts, withCooldown } from "./accounts.js";
+import { DEFAULT_ACCOUNT_ID, loadAccounts, pickFallback, readAccountToken, resolveProfile, saveAccounts, withCooldown } from "./accounts.js";
 import { sandboxOptions } from "./sandbox.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -641,11 +641,16 @@ export class AgentSession {
       // Env-Scrub: dem Agenten-Tool-Prozess GH-/AWS-Tokens entziehen (siehe agentEnv.ts). `options.env`
       // ERSETZT die Env des CLI-Subprozesses (nicht mergen) → scrubbedAgentEnv spreadet process.env.
       // Zusätzlich wählt CLAUDE_CONFIG_DIR das Claude-Konto dieses Streams (Mehrkonten-Betrieb).
-      const agentEnv = accountAgentEnv(this.accountConfigDir, defaultClaudeConfigDir());
+      // Token ERST HIER lesen, nicht beim Auflösen des Profils: so wirkt ein neu hinterlegter
+      // Token (Knopf „Konto neu verbinden") ab dem nächsten Start, ohne Sidecar-Neustart.
+      const accountToken = readAccountToken(resolveProfile(loadAccounts(), this.accountId));
+      const agentEnv = accountAgentEnv(this.accountConfigDir, defaultClaudeConfigDir(), process.env, accountToken);
       if (agentEnv.stripped.length) {
         log(`[${this.agentId}] Agenten-Env bereinigt (nicht an Tool-Prozess vererbt): ${agentEnv.stripped.join(", ")}`);
       }
-      log(`[${this.agentId}] Claude-Konto: ${this.accountId} (${this.accountConfigDir})`);
+      // Nur OB ein Token greift — niemals der Token selbst. Das Log geht in Dateien und Bug-Reports.
+      const bindung = agentEnv.tokenApplied ? "Token" : "Verzeichnis-Anmeldung";
+      log(`[${this.agentId}] Claude-Konto: ${this.accountId} (${this.accountConfigDir}, Bindung: ${bindung})`);
 
       this.q = sdk.query({
         prompt: this.inbox,

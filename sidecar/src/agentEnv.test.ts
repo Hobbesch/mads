@@ -82,5 +82,29 @@ check(
   !("ANTHROPIC_AUTH_TOKEN" in accountAgentEnv(ALT, DEF, { ...base, ANTHROPIC_AUTH_TOKEN: "t" }).env),
 );
 
+// ---- Token-Bindung: CLAUDE_CODE_OAUTH_TOKEN schlaegt die Verzeichnis-Anmeldung --------------
+const TOK = "sk-ant-oat01-profil-token";
+
+const altTok = accountAgentEnv(ALT, DEF, base, TOK);
+check("Token-Profil: eigener Token wird gesetzt", altTok.env.CLAUDE_CODE_OAUTH_TOKEN === TOK);
+check("Token-Profil: CLAUDE_CONFIG_DIR bleibt zusaetzlich gesetzt", altTok.env.CLAUDE_CONFIG_DIR === ALT);
+check("Token-Profil: geerbter API-Key ist weg (sonst uebersteuert er den Token)", !("ANTHROPIC_API_KEY" in altTok.env));
+check("Token-Profil: tokenApplied meldet die Bindung", altTok.tokenApplied === true);
+check(
+  "Token-Profil: der ERSETZTE Token wird nicht als entfernt gemeldet",
+  !altTok.stripped.includes("CLAUDE_CODE_OAUTH_TOKEN") && altTok.stripped.includes("ANTHROPIC_API_KEY"),
+);
+
+// Regressionsschutz fuer den Fall, der den Fehler vom 05.09.2026 ausmachte: ein token-gebundenes
+// Profil auf dem STANDARD-Verzeichnis darf nicht still auf die geerbte Anmeldung zurueckfallen.
+const stdTok = accountAgentEnv(DEF, DEF, base, TOK);
+check("Standard-Verzeichnis + Token: Token gewinnt", stdTok.env.CLAUDE_CODE_OAUTH_TOKEN === TOK);
+check("Standard-Verzeichnis + Token: CLAUDE_CONFIG_DIR bleibt ungesetzt", !("CLAUDE_CONFIG_DIR" in stdTok.env));
+check("Standard-Verzeichnis + Token: geerbter API-Key ist weg", !("ANTHROPIC_API_KEY" in stdTok.env));
+
+// Ohne Token bleibt das bisherige Verhalten exakt erhalten.
+check("ohne Token: tokenApplied ist false", accountAgentEnv(ALT, DEF, base).tokenApplied === false);
+check("Original-base bleibt auch mit Token unberuehrt", base.CLAUDE_CODE_OAUTH_TOKEN === "oauth-keep");
+
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) throw new Error(`${failed} agentEnv test(s) failed`);

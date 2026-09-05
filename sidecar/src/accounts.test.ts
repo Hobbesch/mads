@@ -1,4 +1,4 @@
-import { DEFAULT_ACCOUNT_ID, earliestReset, inCooldown, pickFallback, pruneCooldowns, resolveProfile, withCooldown } from "./accounts.js";
+import { DEFAULT_ACCOUNT_ID, earliestReset, inCooldown, pickFallback, pruneCooldowns, readAccountToken, resolveProfile, withCooldown } from "./accounts.js";
 import type { AccountsState } from "../../shared/protocol.js";
 
 let passed = 0;
@@ -79,6 +79,24 @@ check("nichts zu tun → identische Referenz (kein unnötiges Schreiben)", prune
 const before = state();
 withCooldown(before, "zweit", { until: NOW + HOUR, rejected: true });
 check("withCooldown mutiert den Ausgangszustand nicht", Object.keys(before.cooldowns).length === 0);
+
+// ---- readAccountToken: Fehler duerfen NIE werfen ---------------------------------------------
+// Ein Stream, der wegen eines fehlenden Schluesselbund-Eintrags gar nicht erst startet, waere
+// schlimmer als einer, der auf die Verzeichnis-Anmeldung zurueckfaellt. Beide Wege enden in
+// `undefined`, nie in einer Exception.
+check(
+  "Profil ohne Token-Verweis → undefined (ohne Subprozess)",
+  readAccountToken({ id: "a", label: "A", configDir: "/Users/x/.claude" }) === undefined,
+);
+check(
+  "unbekannter Schluesselbund-Eintrag → undefined statt Absturz",
+  readAccountToken({
+    id: "a",
+    label: "A",
+    configDir: "/Users/x/.claude",
+    tokenKeychainService: "mads-test-eintrag-der-nicht-existiert",
+  }) === undefined,
+);
 
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) throw new Error(`${failed} accounts test(s) failed`);

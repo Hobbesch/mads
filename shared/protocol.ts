@@ -974,7 +974,26 @@ export interface AccountProfile {
   label: string;
   /** Absoluter Pfad des Config-Verzeichnisses (z. B. `/Users/x/.claude`). */
   configDir: string;
-  /** Nur informativ (aus `<configDir>/.claude.json` gelesen), nie zum Anmelden benutzt. */
+  /**
+   * `svce` des macOS-Schlüsselbund-Eintrags, unter dem der langlebige OAuth-Token dieses Kontos
+   * liegt (erzeugt mit `claude setup-token`). mads speichert nur den VERWEIS, nie den Token selbst.
+   *
+   * Gesetzt = das Profil bindet sein Konto über `CLAUDE_CODE_OAUTH_TOKEN`. Das ist die belastbare
+   * Bindung: die Verzeichnis-Anmeldung hängt an der BROWSER-Sitzung — ein `claude auth login`
+   * meldet das an, was gerade auf claude.ai eingeloggt ist, `--email` hin oder her. Genau so
+   * landeten am 05.09.2026 beide mads-Profile still auf demselben Konto.
+   */
+  tokenKeychainService?: string;
+  /**
+   * Vom Benutzer HINTERLEGTE E-Mail (aus `accounts.json`). Nötig für token-gebundene Profile:
+   * unter Token-Auth schreibt die CLI kein `oauthAccount` mehr in `<configDir>/.claude.json`,
+   * die dort stehende Adresse wäre also bestenfalls veraltet.
+   */
+  declaredEmail?: string;
+  /**
+   * Anzeige-E-Mail, zur Laufzeit abgeleitet und NIE persistiert: `declaredEmail`, sonst — nur bei
+   * Profilen OHNE Token — die Adresse aus `<configDir>/.claude.json`. Nie zum Anmelden benutzt.
+   */
   email?: string;
 }
 

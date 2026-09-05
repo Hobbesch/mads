@@ -62,20 +62,31 @@ export const ACCOUNT_OVERRIDE_ENV: readonly string[] = [
 /**
  * Env für einen Agenten-Prozess unter einem BESTIMMTEN Claude-Konto.
  *
- * `configDir` wählt das Konto (eigener Schlüsselbund-Eintrag, eigene `.claude.json`, eigenes
- * `projects/`). Zusätzlich zum normalen Credential-Scrub werden die Auth-Übersteuerer entfernt —
- * aber NUR, wenn ein anderes als das Standard-Verzeichnis gewählt ist: wer mads ohne
- * Konto-Umschaltung nutzt und sich bewusst per `ANTHROPIC_API_KEY` anmeldet, soll genau so
- * weiterlaufen wie bisher (sonst bräche diese Änderung eine bestehende Anmeldeart).
+ * ZWEI Bindungswege, absichtlich in dieser Rangfolge:
+ *
+ * 1. **`token`** (aus `claude setup-token`, gelesen aus dem Schlüsselbund) — die belastbare
+ *    Bindung. Sie hängt an nichts ausser sich selbst.
+ * 2. **`configDir`** — die Verzeichnis-Anmeldung. Sie trennt die Konten zwar wirklich (ein
+ *    frisches Verzeichnis ist „Not logged in"), aber WELCHES Konto darin landet, entscheidet beim
+ *    `claude auth login` die BROWSER-Sitzung — nicht `--email`. Genau daran liefen am 05.09.2026
+ *    beide mads-Profile still auf dasselbe Konto.
+ *
+ * Auth-Übersteuerer aus der geerbten Env werden entfernt, sobald ein Konto bewusst gewählt ist
+ * (eigener `configDir` ODER eigener Token). Nur im reinen Standardfall ohne Token bleiben sie
+ * stehen — wer mads ohne Konto-Umschaltung nutzt und sich per `ANTHROPIC_API_KEY` anmeldet, soll
+ * genau so weiterlaufen wie bisher.
  */
 export function accountAgentEnv(
   configDir: string,
   defaultConfigDir: string,
   base: NodeJS.ProcessEnv = process.env,
-): { env: Record<string, string | undefined>; stripped: string[] } {
+  token?: string,
+): { env: Record<string, string | undefined>; stripped: string[]; tokenApplied: boolean } {
   const { env, stripped } = scrubbedAgentEnv(base);
-  if (configDir === defaultConfigDir) {
-    // WICHTIG: Für das Standardkonto die Variable ENTFERNEN, nicht auf `~/.claude` setzen.
+  const isDefaultDir = configDir === defaultConfigDir;
+
+  if (isDefaultDir) {
+    // WICHTIG: Für das Standardverzeichnis die Variable ENTFERNEN, nicht auf `~/.claude` setzen.
     // Claude Code leitet den Schlüsselbund-Eintrag unterschiedlich ab, je nachdem ob
     // CLAUDE_CONFIG_DIR GESETZT ist — mit `=~/.claude` sucht es einen abgeleiteten Eintrag, der für
     // das Standardkonto gar nicht existiert, und meldet „Not logged in". Verifiziert:
@@ -85,14 +96,21 @@ export function accountAgentEnv(
     // Löschen (statt nur nicht setzen) macht das Verhalten auch dann deterministisch, wenn der
     // Sidecar-Prozess die Variable selbst geerbt hat.
     delete env.CLAUDE_CONFIG_DIR;
-    return { env, stripped };
+  } else {
+    env.CLAUDE_CONFIG_DIR = configDir;
   }
-  env.CLAUDE_CONFIG_DIR = configDir;
-  for (const k of ACCOUNT_OVERRIDE_ENV) {
-    if (env[k] !== undefined) {
-      delete env[k];
-      stripped.push(k);
+
+  if (!isDefaultDir || token) {
+    for (const k of ACCOUNT_OVERRIDE_ENV) {
+      if (env[k] !== undefined) {
+        delete env[k];
+        // Einen geerbten Token, den wir gleich durch den EIGENEN ersetzen, nicht als „entfernt"
+        // melden — das Log soll die Kontowahl beschreiben, nicht einen Scheinverlust.
+        if (!(token && k === "CLAUDE_CODE_OAUTH_TOKEN")) stripped.push(k);
+      }
     }
   }
-  return { env, stripped };
+
+  if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+  return { env, stripped, tokenApplied: !!token };
 }
