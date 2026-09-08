@@ -78,6 +78,7 @@ export type HostMessage =
   | PanicReleaseMsg
   | CreatePrMsg
   | SyncBranchMsg
+  | PushBranchMsg
   | GateTaskMsg
   | IntegratePrMsg
   | SetAutonomyMsg
@@ -365,6 +366,17 @@ export interface CreatePrMsg extends BaseMsg {
 
 export interface SyncBranchMsg extends BaseMsg {
   type: "sync_branch"; // rebase onto origin/<default> + force-with-lease (stale-base-Killer)
+  agentId: string;
+}
+
+/**
+ * Sub-Branch nach origin/<branch> pushen — der MANUELLE Gegenpart zum Autopilot-Push.
+ * Nötig, weil der Autopilot bei Sandbox „off" (Freigang) alles Außen-Wirksame aussetzt und
+ * ausdrücklich auf den menschlichen Klick verweist; den Knopf dafür gab es bisher nicht.
+ * Läuft durch denselben fail-closed Secret-Gate wie jeder andere Push.
+ */
+export interface PushBranchMsg extends BaseMsg {
+  type: "push_branch";
   agentId: string;
 }
 
@@ -859,6 +871,13 @@ export interface GitStatusMsg extends BaseMsg {
   behind: number; // commits hinter origin/<default> (stale-base-Badge)
   ahead: number;
   dirty: boolean; // uncommitted ODER untracked (git status --porcelain nicht leer)
+  /**
+   * Commits, die noch nicht auf `origin/<branch>` liegen — der anstehende Push. Getrennt von
+   * `ahead` (Commits vor origin/<default>): ein Stream mit offenem PR ist typisch ahead 4,
+   * unpushed 1. undefined = kein Remote-Branch / nicht bestimmbar → die UI zeigt dann keinen
+   * Push-Knopf (ohne Remote-Branch ist „PR erstellen" der Weg).
+   */
+  unpushed?: number;
   syncBlocked?: boolean; // Auto-Sync wegen Rebase-Konflikt pausiert (autoSyncConflicted)
 }
 
@@ -1150,8 +1169,15 @@ export interface ReconcileSummaryMsg extends BaseMsg {
    * einen veralteten Stand (genau dieser Fehler trat auf). 0 = kein Problem.
    */
   mainBehind: number;
-  /** Grund, weshalb der fast-forward unterblieb (nur gesetzt, wenn mainBehind > 0). */
-  mainBlocked: "dirty" | "diverged" | "detached" | "unknown" | null;
+  /**
+   * Grund, weshalb der fast-forward unterblieb. Meist zusammen mit mainBehind > 0 — außer
+   * "wrong_branch": der Haupt-Checkout steht auf einem FREMDEN Branch, was auch dann gemeldet
+   * werden muss, wenn main selbst gerade aktuell ist (der Integrator arbeitet sonst still im
+   * falschen Baum).
+   */
+  mainBlocked: "dirty" | "diverged" | "detached" | "wrong_branch" | "unknown" | null;
+  /** Bei mainBlocked === "wrong_branch": der stattdessen ausgecheckte Branch. */
+  mainCurrentBranch?: string;
   /** automatisch aufgeräumt (PR gemergt + Worktree sauber + nichts ungepusht) — Labels. */
   cleaned: string[];
   /** PR gemergt, aber lokale Reste → zur Hand-Prüfung angeboten statt gelöscht — Labels. */

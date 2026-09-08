@@ -17,7 +17,24 @@ export function StalenessBanner() {
   const list = order.map((id) => agents[id]).filter(Boolean);
   const behindSubs = list.filter((a) => a.role === "sub" && a.behind > 0 && a.live !== false);
   const mainBehind = (reconcileSummary?.mainBehind ?? 0) > 0;
-  if (!mainBehind && behindSubs.length === 0) return null;
+  const wrongBranch = reconcileSummary?.mainBlocked === "wrong_branch";
+  if (!mainBehind && !wrongBranch && behindSubs.length === 0) return null;
+
+  // Fremder Branch im Haupt-Checkout: eigener Befund, eigene Handlung. „Alle aktualisieren" hilft
+  // hier NICHT (der fast-forward steigt bei fremdem Branch bewusst aus) — statt eines Knopfes, der
+  // nichts tut, die konkrete Anweisung zeigen.
+  if (wrongBranch) {
+    const db = project?.defaultBranch ?? "main";
+    return (
+      <div className="staleness-banner">
+        <span className="staleness-text">
+          ⚠︎ Haupt-Checkout steht auf <code>{reconcileSummary?.mainCurrentBranch ?? "?"}</code> statt auf{" "}
+          <code>{db}</code> — der Integrator arbeitet gegen einen fremden Branch. Checke <code>{db}</code> aus
+          (<code>git switch {db}</code>), dann Projekt neu öffnen.
+        </span>
+      </div>
+    );
+  }
 
   const parts: string[] = [];
   if (mainBehind) parts.push(`${project?.defaultBranch ?? "main"} (${reconcileSummary?.mainBehind})`);

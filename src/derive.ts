@@ -96,7 +96,7 @@ export function mergeReadiness(a: AgentVM): MergeGate {
   return preMergeGate(a.pr, a.behind);
 }
 
-export type NextStepKind = "commit" | "pr" | "integrate" | "cleanup" | "outsource" | "commit_release" | "none";
+export type NextStepKind = "commit" | "push" | "pr" | "integrate" | "cleanup" | "outsource" | "commit_release" | "none";
 export interface NextStep {
   kind: NextStepKind;
   label: string;
@@ -163,6 +163,16 @@ export function nextStep(a: AgentVM): NextStep {
   if (isMergedDone(a))
     return { kind: "cleanup", label: "Aufräumen ✓", disabled: false, hint: "Stream beenden, Worktree/Branch entfernen (Arbeit ist bereits in main)" };
   if (a.dirty) return { kind: "commit", label: "Committen", disabled: false, hint: "Der Agent committet seine Arbeit (Projektkonvention)" };
+  // VOR dem Merge-Vorschlag: liegen committete Commits noch nicht auf origin/<branch>, kennt der
+  // offene PR sie nicht — ein Merge würde ohne sie laufen (realer Fall: der CI-Fix, der den PR grün
+  // machen sollte, lag lokal fest, während die UI „Mergen" anbot). Erst pushen, dann mergen.
+  if ((a.unpushed ?? 0) > 0 && a.pr?.state === "OPEN")
+    return {
+      kind: "push",
+      label: `Push (${a.unpushed})`,
+      disabled: false,
+      hint: "Lokale Commits sind noch nicht im PR — erst hochladen, sonst mergt der PR ohne sie",
+    };
   if (a.pr && a.pr.state === "OPEN") {
     const r = mergeReadiness(a);
     // Default = der NICHT-destruktive Merge: nach main mergen, aber Branch + Stream behalten
@@ -216,6 +226,9 @@ export function integrationPlan(agents: AgentVM[], collisions: Collision[]): Int
       waiting.push({ ...base, state: "conflicting", detail: "Sync-Konflikt → „Konflikt lösen“ in der Seitenleiste" });
     } else if (a.dirty) {
       waiting.push({ ...base, state: "unsaved", detail: "ungesicherte Arbeit → committen" });
+    } else if ((a.unpushed ?? 0) > 0 && a.pr?.state === "OPEN") {
+      // Nicht „merge-bereit": der PR kennt diese Commits noch nicht.
+      waiting.push({ ...base, state: "unsaved", detail: `${a.unpushed} Commit(s) nicht im PR → pushen` });
     } else if (a.pr && a.pr.state === "OPEN") {
       const r = mergeReadiness(a);
       if (r.ok) ready.push({ ...base, state: "ready", detail: "merge-bereit" });

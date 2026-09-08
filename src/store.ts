@@ -168,6 +168,9 @@ export interface AgentVM {
   behind: number;
   ahead: number;
   dirty: boolean; // uncommitted ODER untracked
+  /** Commits, die noch nicht auf origin/<branch> liegen (anstehender Push). Getrennt von `ahead`,
+   *  das gegen origin/<default> zählt. undefined = kein Remote-Branch → kein Push-Knopf. */
+  unpushed?: number;
   /** main-Dirt stammt aus einem gerade erkannten Deploy (Eskalation `main_deploy_dirty`) —
    *  dann ist „Als Release committen" der Primärschritt (nicht „In Sub-Stream auslagern").
    *  Gelöscht, sobald ein git_status mit dirty=false für diesen Agenten eintrifft. */
@@ -510,6 +513,7 @@ export interface MadsState {
   commitAgent: (id: string) => Promise<void>;
   createPr: (id: string) => Promise<void>;
   syncBranch: (id: string) => Promise<void>;
+  pushBranch: (id: string) => Promise<void>;
   /**
    * „Don't Panic": hält alle Sub-Streams an und übergibt die Konfliktlösung an den Integrator.
    * Ersetzt den früheren per-Stream-Knopf, der nur einen Prompt in einen gesandboxten Sub-Stream
@@ -972,6 +976,9 @@ export const useStore = create<MadsState>((set) => {
           behind: msg.behind,
           ahead: msg.ahead,
           dirty: msg.dirty,
+          // Immer übernehmen — auch `undefined` (kein Remote-Branch): sonst bliebe ein alter
+          // Zähler als Geister-Badge stehen, nachdem der Push durch ist.
+          unpushed: msg.unpushed,
           syncBlocked: msg.syncBlocked ?? false,
           // Deploy-Flag löschen, sobald main wieder sauber ist (Release committet/ausgelagert).
           ...(msg.dirty ? {} : { deployDirty: false }),
@@ -2022,6 +2029,11 @@ export const useStore = create<MadsState>((set) => {
       await sendHost({ ...envelope(), type: "sync_branch", agentId: id });
     },
 
+    pushBranch: async (id) => {
+      notice(id, "accent", "▶ Push (origin/<branch>)");
+      await sendHost({ ...envelope(), type: "push_branch", agentId: id });
+    },
+
     outsourceMain: async (integratorId) => {
       // Uncommittete main-Änderungen in einen NEUEN Sub-Stream verschieben (main bleibt sauber).
       const newId = mkId();
@@ -2410,7 +2422,16 @@ export const useStore = create<MadsState>((set) => {
       const db = project?.defaultBranch ?? "main";
       let prompt = "Setze die Arbeit fort. Fasse zuerst kurz den aktuellen Stand zusammen, dann mach weiter.";
       if (r.role === "integrator" && rc) {
-        if (rc.mainFastForwarded > 0) {
+        if (rc.mainBlocked === "wrong_branch") {
+          // Schwerwiegender als „behind": der Integrator sitzt in einem ANDEREN Baum als main.
+          // Ohne diesen Hinweis analysiert er fremden Code und hält ihn für den Projektstand.
+          prompt =
+            `ACHTUNG: Der Haupt-Checkout steht auf Branch „${rc.mainCurrentBranch ?? "?"}", NICHT auf „${db}". ` +
+            `Alles, was du im Working Tree siehst, gehört zu diesem fremden Branch — nicht zum Projektstand. ` +
+            `Sag dem Menschen das zuerst und lass ihn ${db} auschecken (\`git switch ${db}\`), bevor du ` +
+            `Annahmen über den Code triffst. ` +
+            prompt;
+        } else if (rc.mainFastForwarded > 0) {
           prompt =
             `WICHTIG: Dein Working Tree (${db}) wurde gerade per fast-forward auf origin/${db} ` +
             `aktualisiert (+${rc.mainFastForwarded} Commits) — dein lokaler Stand ist jetzt aktuell. ` +

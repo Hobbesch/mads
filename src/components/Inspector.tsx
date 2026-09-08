@@ -38,6 +38,7 @@ export function Inspector() {
   const commitAgent = useStore((s) => s.commitAgent);
   const createPr = useStore((s) => s.createPr);
   const syncBranch = useStore((s) => s.syncBranch);
+  const pushBranch = useStore((s) => s.pushBranch);
   const outsourceMain = useStore((s) => s.outsourceMain);
   const commitMainRelease = useStore((s) => s.commitMainRelease);
   const updateMain = useStore((s) => s.updateMain);
@@ -396,6 +397,7 @@ export function Inspector() {
 
   const runStep = () => {
     if (step.kind === "commit") void commitAgent(selectedId);
+    else if (step.kind === "push") void pushBranch(selectedId);
     else if (step.kind === "pr") void createPr(selectedId);
     else if (step.kind === "integrate") askMerge(true); // Default = mergen + Stream BEHALTEN
     else if (step.kind === "outsource") askOutsource();
@@ -826,6 +828,18 @@ export function Inspector() {
             >
               Sync{agent.behind > 0 ? ` (${agent.behind})` : ""}
               {agent.syncBlocked ? " ⚠︎" : ""}
+            </button>
+          )}
+          {/* Manueller Push: committete Arbeit liegt noch nicht auf origin/<branch>. Nötig, weil
+              der Autopilot bei Freigang (Sandbox aus) nicht pusht und ausdrücklich auf den
+              manuellen Klick verweist — und weil der Auto-Sync (der sonst mitpusht) nur bei
+              behind > 0 anläuft. Ohne Remote-Branch (unpushed === undefined) führt „PR erstellen". */}
+          {live && agent.role === "sub" && (agent.unpushed ?? 0) > 0 && (
+            <button
+              onClick={() => void pushBranch(selectedId)}
+              title={`${agent.unpushed} lokale(r) Commit(s) liegen noch nicht auf origin/${agent.branch ?? "<branch>"} — jetzt pushen (Secret-Scan läuft vorher).`}
+            >
+              Push ({agent.unpushed})
             </button>
           )}
           {live && agent.role === "integrator" && agent.behind > 0 && (

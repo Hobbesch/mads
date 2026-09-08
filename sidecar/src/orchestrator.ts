@@ -404,6 +404,10 @@ export class Orchestrator {
         await this.handleSync(msg.agentId);
         break;
 
+      case "push_branch":
+        await this.handlePush(msg.agentId);
+        break;
+
       case "gate_task":
         await this.handleGate(msg.agentId);
         break;
@@ -695,7 +699,10 @@ export class Orchestrator {
               ? "uncommittete Änderungen an getrackten Dateien"
               : res.blocked === "detached"
                 ? "detached HEAD"
-                : "unerwartet (git-Status prüfen)";
+                : res.blocked === "wrong_branch"
+                  ? `der Haupt-Checkout steht auf „${res.currentBranch}", nicht auf „${this.project.defaultBranch}" — ` +
+                    `dort auschecken (git switch ${this.project.defaultBranch}), dann erneut`
+                  : "unerwartet (git-Status prüfen)";
           this.emitError(msg.agentId, "stale_base", `main konnte nicht vorgezogen werden: ${why} (${res.behind} behind).`);
         } else {
           this.emit({
@@ -1186,6 +1193,55 @@ export class Orchestrator {
   }
 
   /**
+   * Manueller Push eines Sub-Branches — der menschliche Gegenpart zum Autopilot-Push.
+   * Existiert, weil der Autopilot bei Sandbox „off" (Freigang) alles Außen-Wirksame aussetzt und
+   * dabei ausdrücklich auf den manuellen Klick verweist; diesen Klick gab es bisher nirgends, und
+   * ohne `behind > 0` griff auch der Auto-Sync nicht → committete Arbeit lag fest, ohne dass die
+   * UI das zeigte. Bewusst OHNE Freigang-Schranke: der Mensch entscheidet hier selbst. Der
+   * fail-closed Secret-Gate in `pushBranch` gilt unverändert.
+   */
+  private async handlePush(agentId: string): Promise<void> {
+    const s = this.pool.get(agentId);
+    // B2: bereits aufgeräumte Streams nicht rot eskalieren (verspäteter Klick) — wie in doCreatePr.
+    if (this.removed.has(agentId) || (s?.worktreePath && !existsSync(s.worktreePath))) {
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: { kind: "assistant_text", text: "Kein Push möglich: Dieser Stream ist bereits aufgeräumt — nichts zu tun." },
+      });
+      return;
+    }
+    if (!s || !s.worktreePath || !s.branch || !this.project) {
+      this.emitError(agentId, "spawn_failed", "Kein Worktree/Projekt — Push nicht möglich.");
+      return;
+    }
+    // 3.6: dieselbe Ownership-Schranke wie bei PR-Erstellung und Autopilot-Push.
+    const trespass = await this.ownershipGate(agentId);
+    if (trespass.length) {
+      this.emitError(
+        agentId,
+        "ownership_trespass",
+        `Push gestoppt — Überschneidung: ${this.trespassReason(trespass)}. Warte, bis der andere Stream gemergt ist, dann „Sync" (rebase) und erneut.`,
+      );
+      return;
+    }
+    const res = await pushBranch(s.worktreePath, s.branch, this.project.defaultBranch);
+    if (!res.ok) {
+      this.emitError(agentId, res.kind, `Push fehlgeschlagen: ${res.error}`);
+      return;
+    }
+    log(`[orchestrator] Branch ${s.branch} manuell nach origin gepusht`);
+    this.emit({
+      ...envelope(),
+      type: "agent_event",
+      agentId,
+      event: { kind: "assistant_text", text: `↑ Nach origin/${s.branch} gepusht.` },
+    });
+    await this.pollAgent(s);
+  }
+
+  /**
    * Integrator-Merge (Invariante 1: nur diese Op landet auf main). 3.2: über `integrateLock`
    * SERIALISIERT — zwei fast gleichzeitige Merges würden sich gegenseitig veralten lassen.
    * Jede Integration wartet auf die vorige; `doIntegrate` holt oben jeweils frischen
@@ -1341,7 +1397,7 @@ export class Orchestrator {
     // B1: nach Merge + Aufräumen den git-Status EXPLIZIT auf „fertig" setzen und emitten.
     // Bisher emittierte dieser Pfad keinen git_status → das UI leitete bis zu 25 s aus dem
     // stale ahead>0 einen „Geist"-Stream ab, statt sofort „erledigt" anzuzeigen.
-    const doneStatus: GitStatusResult = { behind: 0, ahead: 0, dirty: false };
+    const doneStatus: GitStatusResult = { behind: 0, ahead: 0, dirty: false, unpushed: 0 };
     this.gitState.set(agentId, doneStatus);
     this.emitGitStatus(agentId, doneStatus);
     this.removed.add(agentId); // gemergt+aufgeräumt → nicht mehr in die Resume-Registry
@@ -1732,9 +1788,25 @@ export class Orchestrator {
     //    vorgezogen werden" (sonst arbeitet der Integrator still gegen veralteten Stand).
     const mainBehind = ff.blocked ? ff.behind : 0;
     const mainBlocked = ff.blocked;
+    // „wrong_branch" MUSS auch bei mainBehind === 0 durch: ein fremder Branch im Haupt-Checkout ist
+    // für sich genommen der Befund (der Integrator arbeitet sonst still im falschen Baum), auch
+    // wenn main zufällig gerade aktuell ist.
+    const wrongBranch = mainBlocked === "wrong_branch";
     if (offer.length > 0) this.emit({ ...envelope(), type: "resumable_agents", agents: offer });
-    if (mainFastForwarded > 0 || mainBehind > 0 || cleaned.length > 0 || residue.length > 0 || seedGenerated > 0 || relocated.length > 0 || adopted.length > 0) {
-      this.emit({ ...envelope(), type: "reconcile_summary", mainFastForwarded, mainBehind, mainBlocked, cleaned, residue, seedGenerated, relocated, adopted });
+    if (mainFastForwarded > 0 || mainBehind > 0 || wrongBranch || cleaned.length > 0 || residue.length > 0 || seedGenerated > 0 || relocated.length > 0 || adopted.length > 0) {
+      this.emit({
+        ...envelope(),
+        type: "reconcile_summary",
+        mainFastForwarded,
+        mainBehind,
+        mainBlocked,
+        ...(ff.currentBranch ? { mainCurrentBranch: ff.currentBranch } : {}),
+        cleaned,
+        residue,
+        seedGenerated,
+        relocated,
+        adopted,
+      });
     }
     log(`[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length} seed=${seedGenerated} relocated=${relocated.length} adopted=${adopted.length}`);
     await this.hydrateReviewStreams(); // persistierte Review-Streams (fremde PRs) als Kacheln wiederherstellen
@@ -2455,12 +2527,22 @@ export class Orchestrator {
     this.emit({ ...envelope(), type: "error", agentId, scope: "agent", code, message, recoverable: true });
   }
   /** git_status emittieren + den (orchestrator-eigenen) syncBlocked-Zustand mitliefern. */
-  private emitGitStatus(agentId: string, st: { behind: number; ahead: number; dirty: boolean }): void {
+  private emitGitStatus(agentId: string, st: { behind: number; ahead: number; dirty: boolean; unpushed?: number }): void {
     // Explizit destrukturieren statt spreaden: ein GitStatusResult trägt ggf. `unreliable`,
     // das nicht im Protokoll (GitStatusMsg) definiert ist — strengere Decoder (mads-remote)
     // dürfen nie unbekannte Felder auf dem Draht sehen.
-    const { behind, ahead, dirty } = st;
-    this.emit({ ...envelope(), type: "git_status", agentId, behind, ahead, dirty, syncBlocked: this.autoSyncConflicted.has(agentId) });
+    const { behind, ahead, dirty, unpushed } = st;
+    this.emit({
+      ...envelope(),
+      type: "git_status",
+      agentId,
+      behind,
+      ahead,
+      dirty,
+      // Nur setzen, wenn bestimmbar — `undefined` heißt „kein Remote-Branch", nicht „0 anstehend".
+      ...(unpushed !== undefined ? { unpushed } : {}),
+      syncBlocked: this.autoSyncConflicted.has(agentId),
+    });
   }
   private emit(obj: unknown): void {
     void send(obj);

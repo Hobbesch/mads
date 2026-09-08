@@ -103,6 +103,14 @@ function AgentCard({ agent }: { agent: AgentVM }) {
       {needsInput && <div className="card-flag yellow">● braucht Input{pending ? ` (${pending})` : ""}</div>}
       {unsaved && <div className="card-flag red" title="Uncommittete/untrackte Arbeit oder Commits ohne PR — geht beim Aufräumen verloren">● Arbeit nicht gesichert</div>}
       {agent.syncBlocked && <div className="card-flag red" title="Auto-Sync wegen Rebase-Konflikt pausiert — über „Konflikt lösen“ in der Seitenleiste auflösen, dann Sync">⚠︎ Sync blockiert (Konflikt)</div>}
+      {agent.role === "sub" && (agent.unpushed ?? 0) > 0 && (
+        <div
+          className="card-flag yellow"
+          title={`${agent.unpushed} committete(r) Commit(s) liegen nur lokal — noch nicht auf origin/${agent.branch ?? "<branch>"}. Bei offenem PR fehlen sie dort. Über „Push" in der Seitenleiste hochladen.`}
+        >
+          ↑ {agent.unpushed} Commit{agent.unpushed === 1 ? "" : "s"} nicht gepusht
+        </div>
+      )}
       {showPrompt && (
         <div className="card-prompt">
           <div className="card-prompt-label">Auftrag</div>

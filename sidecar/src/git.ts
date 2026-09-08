@@ -855,7 +855,9 @@ export interface FastForwardResult {
   /** Wie viele Commits main hinter origin/<default> lag/liegt (auch wenn ff=0). */
   behind: number;
   /** Falls NICHT vorgezogen wurde: warum. ("unknown" = FF scheiterte unerwartet, z. B. Remote-Race.) */
-  blocked: "diverged" | "dirty" | "detached" | "unknown" | null;
+  blocked: "diverged" | "dirty" | "detached" | "wrong_branch" | "unknown" | null;
+  /** Bei "wrong_branch": der stattdessen ausgecheckte Branch (für eine konkrete Meldung). */
+  currentBranch?: string;
 }
 
 /**
@@ -876,7 +878,21 @@ export async function fastForwardMain(repoRoot: string, defaultBranch: string): 
   const behind = parseInt((await git(["-C", repoRoot, "rev-list", "--count", `HEAD..${base}`], repoRoot)).stdout.trim() || "0", 10);
   const ahead = parseInt((await git(["-C", repoRoot, "rev-list", "--count", `${base}..HEAD`], repoRoot)).stdout.trim() || "0", 10);
   if (cur === "HEAD") return { ff: 0, behind, blocked: "detached" }; // detached blockiert FF immer
-  if (cur !== defaultBranch) return { ff: 0, behind: 0, blocked: null }; // nicht auf main → nicht anfassen
+  // Der Haupt-Checkout hat einen FREMDEN Branch ausgecheckt (realer Fall: ein Altbranch aus der Zeit
+  // vor mads blieb nach der Übernahme ausgecheckt). Ein FF wäre hier falsch — er würde den fremden
+  // Branch bewegen, nicht main. Früher meldete dieser Pfad `behind: 0, blocked: null`, also formal
+  // „nichts zu tun": der Aufrufer las das als Erfolg und antwortete „main ist bereits aktuell",
+  // während main in Wahrheit zurücklag. Jetzt ein eigener Grund — mit dem behind des BRANCHES main
+  // (nicht von HEAD, das hier auf dem fremden Branch steht): genau die Zahl, die die UI anzeigt.
+  if (cur !== defaultBranch) {
+    const mainBehind = await git(["-C", repoRoot, "rev-list", "--count", `${defaultBranch}..${base}`], repoRoot);
+    return {
+      ff: 0,
+      behind: mainBehind.code === 0 ? parseInt(mainBehind.stdout.trim() || "0", 10) : 0,
+      blocked: "wrong_branch",
+      currentBranch: cur,
+    };
+  }
   if (behind === 0) return { ff: 0, behind: 0, blocked: null };
   if (ahead > 0) return { ff: 0, behind, blocked: "diverged" }; // braucht echten Merge/Rebase → Mensch
   // Nur getrackte uncommittete Änderungen blockieren einen FF (untracked ist egal).
@@ -941,6 +957,18 @@ export interface GitStatusResult {
   ahead: number;
   dirty: boolean;
   /**
+   * Commits, die noch nicht auf `origin/<branch>` liegen — der „anstehende Push". NICHT dasselbe
+   * wie `ahead` (das zählt gegen origin/<default>, also die ungemergte Arbeit). Beide können weit
+   * auseinanderliegen: ein Stream mit offenem PR ist typisch `ahead: 4, unpushed: 1`.
+   *
+   * `undefined` = nicht bestimmbar, weil `origin/<branch>` (noch) nicht existiert oder rev-list
+   * scheiterte. Bewusst KEINE 0: ein nie gepushter Branch hat keinen sinnvollen Zähler, und der
+   * richtige Weg ist dort „PR erstellen" (das pusht), nicht „Push". Setzt `unreliable` NICHT —
+   * ein fehlender Remote-Branch ist ein Normalzustand, kein git-Fehler, und darf weder Auto-Sync
+   * noch Autopilot lahmlegen.
+   */
+  unpushed?: number;
+  /**
    * true, wenn eines der drei git-Subkommandos (behind/ahead/dirty) mit code!==0 endete —
    * z. B. Worktree gerade entfernt, Branch/Base-Ref weg, Timeout. Ein git-FEHLER darf nie wie
    * „echte 0 / clean" aussehen: Konsumenten dürfen einen unreliable-Status weder als frischen
@@ -961,11 +989,15 @@ export async function gitStatus(
   const behindR = await git(["-C", worktree, "rev-list", "--count", `${branch}..${base}`], worktree);
   const aheadR = await git(["-C", worktree, "rev-list", "--count", `${base}..${branch}`], worktree);
   const dirtyR = await git(["-C", worktree, "status", "--porcelain"], worktree);
+  // Absichtlich NICHT in `unreliable`: fehlt origin/<branch> (nie gepusht), endet rev-list mit
+  // code!==0 — ein Normalzustand, der den übrigen Status nicht entwerten darf.
+  const unpushedR = await git(["-C", worktree, "rev-list", "--count", `origin/${branch}..${branch}`], worktree);
   const unreliable = behindR.code !== 0 || aheadR.code !== 0 || dirtyR.code !== 0;
   return {
     behind: parseInt(behindR.stdout.trim() || "0", 10),
     ahead: parseInt(aheadR.stdout.trim() || "0", 10),
     dirty: dirtyR.stdout.trim().length > 0,
+    ...(unpushedR.code === 0 ? { unpushed: parseInt(unpushedR.stdout.trim() || "0", 10) } : {}),
     ...(unreliable ? { unreliable: true } : {}),
   };
 }
