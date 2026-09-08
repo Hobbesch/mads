@@ -912,10 +912,45 @@ function isPrivateOrSsrfHost(host: string): boolean {
 }
 
 /** Sieht wie kodierte Daten aus (base64/hex/url-safe, ≥24, hohe Entropie, keine reine ID)? → Exfil-Verdacht. */
+/**
+ * Wortartige Silbe eines menschlichen Slugs? Das ist das Unterscheidungsmerkmal zu kodierten Daten:
+ * ein Wort hat EINHEITLICHE Groß-/Kleinschreibung (klein, GROSS oder Title-Case) und Vokale;
+ * base64/hex mischt die Schreibweise unregelmäßig bzw. hat keine Wortstruktur. Bis 4 Zeichen gilt
+ * alles als Abkürzung („tts“, „api“, „v2“).
+ */
+function isWordLike(p: string): boolean {
+  if (!/^[A-Za-z0-9]+$/.test(p)) return false;
+  const oneCase = /^[a-z0-9]+$/.test(p) || /^[A-Z0-9]+$/.test(p) || /^[A-Z][a-z0-9]*$/.test(p);
+  if (!oneCase) return false;
+  if (p.length <= 4) return true;
+  if (!/[aeiouy]/i.test(p)) return false; //           vokallos ab 5 Zeichen → kein Wort
+  if (/^[A-Za-z]+$/.test(p)) return true; //           reines Wort (auch lange Komposita)
+  return p.length <= 20; //                            Wort mit Ziffern nur kurz (hält Hex-Blobs draußen)
+}
+/**
+ * Menschlicher URL-Slug („orpheus-tts-modellvergleich“, „how-to-configure-webpack“)? Ohne diese
+ * Ausnahme schlug die reine Entropie-Schwelle bei FAST JEDEM Artikel-Slug an — Bindestriche gehören
+ * zum base64url-Zeichensatz, und ein normaler Slug über 24 Zeichen liegt zuverlässig über 3.5 Bit.
+ * Genau das war die Ursache dafür, dass der Auto-Modus bei praktisch jedem Web-Abruf fragte.
+ */
+function looksLikeSlug(s: string): boolean {
+  // Auch `/`, `+` und `~` trennen: `queryCarriesData` prüft ganze Query-WERTE, und ein
+  // `?next=/docs/getting-started` ist pfadförmig, nicht kodiert. Für base64 ändert das nichts —
+  // die Stücke zwischen den Trennern bleiben unregelmäßig gemischt und damit nicht wortartig.
+  const parts = s.split(/[-_./+~]+/).filter(Boolean);
+  return parts.length > 0 && parts.every(isWordLike);
+}
+/**
+ * Sieht wie kodierte Daten aus (base64/hex/url-safe, ≥ 24 Zeichen, hohe Entropie)? → Exfil-Verdacht.
+ * GRENZE: Heuristik. Wer Daten bewusst als kleingeschriebene, bindestrich-getrennte Pseudo-Wörter
+ * kodiert, kommt hier durch — der belastbare Schutz sind `findSecrets(url)` davor und die
+ * Injektions-/Taint-Schicht danach (shared/web-untrusted.ts), nicht diese Formprobe.
+ */
 function looksEncodedBlob(s: string): boolean {
   if (s.length < 24) return false;
   if (!/^[A-Za-z0-9+/=_-]+$/.test(s)) return false; // base64/hex/url-safe-Zeichensatz
   if (/^[0-9]+$/.test(s)) return false; //             reine Ziffern = ID/Nummer, keine kodierten Daten
+  if (looksLikeSlug(s)) return false; //               menschlicher Slug → kein Blob
   const freq: Record<string, number> = {};
   for (const c of s) freq[c] = (freq[c] ?? 0) + 1;
   let entropy = 0;
@@ -923,10 +958,40 @@ function looksEncodedBlob(s: string): boolean {
     const p = freq[c] / s.length;
     entropy -= p * Math.log2(p);
   }
-  return entropy >= 3.5; // hohe Zeichen-Entropie → wirkt zufällig/kodiert (nicht ein strukturierter Slug)
+  return entropy >= 3.5; // hohe Zeichen-Entropie → wirkt zufällig/kodiert
 }
 function pathHasEncodedBlob(pathname: string): boolean {
   return pathname.split("/").some((seg) => looksEncodedBlob(seg));
+}
+
+/** Ab hier gilt eine Query als „datentragend“, egal wie sie aussieht (Freitext-Exfiltration). */
+const MAX_QUIET_QUERY_LEN = 120;
+/**
+ * Trägt dieser Query-String Daten NACH AUßEN — oder ist es eine gewöhnliche Abfrage?
+ *
+ * Früher fragte JEDE Query an einem unbekannten Host nach. Das traf `?q=webpack`, `?page=2` und
+ * `?utm_source=x` genauso wie einen echten Exfil-Kanal und war der zweite Grund für die dauernden
+ * Rückfragen — während `WebSearch` (derselbe Kanal, nur über einen Suchanbieter) längst still lief.
+ * Jetzt entscheidet der WERT: ein kodierter Blob oder eine auffällig lange Query fragt nach, eine
+ * normale Abfrage läuft durch. Secrets im Klartext fängt weiterhin `findSecrets(url)` davor ab.
+ */
+function queryCarriesData(search: string): boolean {
+  const q = search.startsWith("?") ? search.slice(1) : search;
+  if (!q) return false;
+  if (q.length > MAX_QUIET_QUERY_LEN) return true;
+  for (const pair of q.split("&")) {
+    const eq = pair.indexOf("=");
+    const raw = eq < 0 ? pair : pair.slice(eq + 1);
+    if (looksEncodedBlob(raw)) return true;
+    let decoded = raw;
+    try {
+      decoded = decodeURIComponent(raw.replace(/\+/g, " "));
+    } catch {
+      return true; // kaputte Prozent-Kodierung → nicht interpretierbar → bewusst bestätigen
+    }
+    if (looksEncodedBlob(decoded)) return true;
+  }
+  return false;
 }
 
 // Mehrteilige Public-Suffixe, bei denen die registrierbare Domain 3 Labels braucht.
@@ -1005,11 +1070,18 @@ export function classifyToolCall(
     return ASK("startet neue Sub-Streams (eigener Worktree/Branch, Autopilot) — bewusst bestätigen");
   if (toolName.startsWith("mcp__mads__")) return ALLOW;
 
-  // WebFetch: GET + Zusammenfassung. Sanktionierter Netz-Kanal — die zwei realen Gefahren sind
-  // EXFILTRATION (Daten IN der URL an einen Angreifer-Host) und SSRF (internes/Metadaten-Ziel).
-  // Ein reiner Lese-Aufruf trägt praktisch keine Daten nach aussen → wird erlaubt (kein nerviges
-  // per-URL-Nachfragen). Gefragt wird nur bei echtem Risiko-Signal; „Immer erlauben" merkt die
-  // ganze DOMAIN (nicht die einzelne URL). SSRF wird IMMER gefragt, nie gemerkt.
+  // WebFetch: GET + Zusammenfassung. Sanktionierter Netz-Kanal — die zwei realen Gefahren AUF DEM
+  // HINWEG sind EXFILTRATION (Daten IN der URL an einen Angreifer-Host) und SSRF (internes/
+  // Metadaten-Ziel). Ein reiner Lese-Aufruf trägt praktisch keine Daten nach aussen → wird erlaubt.
+  // Gefragt wird nur bei echtem Risiko-Signal; „Immer erlauben" merkt die ganze DOMAIN (nicht die
+  // einzelne URL). SSRF wird IMMER gefragt, nie gemerkt.
+  //
+  // Die Gefahr auf dem RÜCKWEG (Prompt-Injection im abgerufenen Text) prüft dieses Gate NICHT und
+  // kann es nicht prüfen — die Seite ist hier noch nicht geladen. Dafür gibt es die zweite Schicht:
+  // shared/web-untrusted.ts rahmt jede Antwort als Daten, erkennt Übernahme-Muster und setzt bei
+  // einem `high`-Fund den Injektions-Verdacht im Stream (session.ts), der die gemerkten
+  // „Immer erlauben"-Freigaben für den Rest des Turns aussetzt. Erst beide Schichten zusammen
+  // rechtfertigen, dass der Hinweg so leise ist.
   if (toolName === "WebSearch") return ALLOW; // Suche → fester Provider, kein wählbarer Ziel-Host
   if (toolName === "WebFetch") {
     const url = String(input?.url ?? "");
@@ -1024,8 +1096,8 @@ export function classifyToolCall(
     if (isTrustedFetchHost(u.host) || ctx.isFetchHostApproved?.(u.host)) return ALLOW;
     // Unbekannter öffentlicher Host: datentragende URL = möglicher Exfil-Kanal → einmal je Domain
     // bestätigen. Reiner Lese-Aufruf (keine Query, kein kodierter Pfad-Blob) → erlauben.
-    if (u.search && u.search !== "?")
-      return ASK(`WebFetch auf „${u.host}“ mit Query-Parametern — mögliche Exfiltration; „Immer erlauben“ merkt die ganze Domain`);
+    if (queryCarriesData(u.search))
+      return ASK(`WebFetch auf „${u.host}“ mit datentragender Query — mögliche Exfiltration; „Immer erlauben“ merkt die ganze Domain`);
     if (pathHasEncodedBlob(u.pathname))
       return ASK(`WebFetch auf „${u.host}“ mit kodiert wirkendem Pfad-Segment — mögliche Exfiltration bestätigen`);
     return ALLOW;

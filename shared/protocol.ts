@@ -1228,6 +1228,11 @@ export type EscalationKind =
   | "main_edited" // Integrator hat main direkt geändert → in Sub-Stream auslagern (proaktiver Hinweis)
   | "main_deploy_dirty" // main-Dirt stammt aus einem gerade gelaufenen Deploy → „Als Release committen" anbieten
   | "foreign_edit" // Worktree änderte sich, während der Agent ruhte → Autopilot committet nicht blind mit
+  // Mögliche Prompt-Injection in externem Inhalt (Web/Doku-MCP). WARNUNG, kein Stream-Fehler: der
+  // Inhalt wurde als Daten gerahmt (shared/web-untrusted.ts), der Stream läuft weiter. Bei einem
+  // `high`-Fund setzt das Sidecar zusätzlich die gemerkten „Immer erlauben"-Freigaben für den Rest
+  // des Turns aus — riskante Aktionen fragen wieder.
+  | "web_injection_flagged"
   // ── Projekt-Verbund (docs/design/12-project-link.md §6.3) ──
   | "peer_contract_drift" // Gegenseite hat den Contract geändert, ohne dass ein Thread es erklärt
   | "peer_loop_guard" // Ping-Pong zwischen den Instanzen (hops ≥ Schwelle) → Mensch entscheidet

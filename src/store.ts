@@ -1406,6 +1406,12 @@ export const useStore = create<MadsState>((set) => {
         // harmlosen Reihenfolge-Warnung dauerhaft auf „Eskalation".
         if (msg.agentId && (msg.code === "peer_land_order" || msg.code === "peer_contract_drift")) {
           notice(msg.agentId, "warn", `⇄ ${msg.message}`);
+        } else if (msg.agentId && msg.code === "web_injection_flagged") {
+          // Injektions-Verdacht in abgerufenem Fremdtext: sichtbar warnen, aber KEIN Fehler-Status.
+          // Der Stream ist gesund — mads hat den Inhalt gerahmt und (bei `high`) die gemerkten
+          // Freigaben ausgesetzt. Ein „Eskalation"-Status hier würde eine funktionierende
+          // Schutzmaßnahme wie einen Ausfall aussehen lassen.
+          notice(msg.agentId, "warn", `⚠ ${msg.message}`);
         } else if (msg.agentId && (msg.code === "main_edited" || msg.code === "main_deploy_dirty")) {
           // Proaktiver Hinweis (kein Fehler-Status): main-Dirt → auslagern ODER (nach Deploy) als Release
           // committen. Status bleibt unberührt; die Aktionen bietet der Inspector an, solange main dirty ist.
