@@ -14,7 +14,7 @@ import { loadApprovedKinds, saveApprovedKinds, loadApprovedTools, saveApprovedTo
 import { killProcessesInWorktree } from "./worktree-procs.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
-import { adoptRemoteBranch, autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverAdoptableBranches, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
+import { adoptRemoteBranch, autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverAdoptableBranches, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, resyncWorktreeAfterMerge, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
 import { LinkManager } from "./link.js";
 import { attributesArgs } from "./gitAttributes.js";
@@ -368,6 +368,7 @@ export class Orchestrator {
         await this.reapWorktreeProcesses(msg.agentId, wt);
         this.pool.delete(msg.agentId);
         this.removed.add(msg.agentId); // bewusst entfernt → merge-persist nicht wiederbeleben
+        this.autoSyncConflicted.delete(msg.agentId); // kein Worktree mehr → kein offener Sync-Konflikt
         this.persist();
         break;
       }
@@ -589,6 +590,7 @@ export class Orchestrator {
           await this.reapWorktreeProcesses(msg.agentId, path); // Agenten-Prozesse halten ihn ebenso offen
           this.emitSeedReclaimed(msg.agentId, await removeWorktree(root, path, msg.branch));
           this.removed.add(msg.agentId); // aufgeräumt → merge-persist nicht wiederbeleben
+          this.autoSyncConflicted.delete(msg.agentId); // kein Worktree mehr → kein offener Sync-Konflikt
           saveRegistry(root, loadRegistry(root).filter((e) => e.agentId !== msg.agentId));
           log(`[orchestrator] aufgeräumt: ${msg.branch ?? msg.agentId} (${path})`);
         } catch (e) {
@@ -1321,6 +1323,15 @@ export class Orchestrator {
       });
     }
 
+    // Den Stand festhalten, den GitHub gleich squasht (= origin/<branch> in diesem Moment). Der
+    // Resync unten darf genau diese Commits NICHT erneut abspielen — ihr Inhalt liegt nach dem
+    // Merge bereits in main. Siehe resyncWorktreeAfterMerge() (Vorfall Boba PR #725).
+    let mergedHead: string | undefined;
+    if (s.worktreePath) {
+      const head = await run("git", ["-C", s.worktreePath, "rev-parse", `origin/${s.branch}`], s.worktreePath);
+      if (head.code === 0) mergedHead = head.stdout.trim() || undefined;
+    }
+
     const res = await mergePr(s.repoRoot, s.branch, method);
     if (!res.ok) {
       this.emitMergeResult(agentId, false, [res.error], pr?.number);
@@ -1341,7 +1352,7 @@ export class Orchestrator {
         await this.stopDevServerIf(agentId); // Dev-Server killen, bevor der Worktree bewegt wird
         const base = this.project.defaultBranch;
         await run("git", ["-C", s.worktreePath, "fetch", "origin", base], s.worktreePath);
-        resyncOk = await this.resyncAfterMerge(agentId, s.worktreePath, base);
+        resyncOk = await this.resyncAfterMerge(agentId, s.worktreePath, base, mergedHead);
         const st = await gitStatus(s.repoRoot, s.worktreePath, s.branch, base);
         // B3: git-Fehler nie als frischen Stand cachen/senden — letzter guter Stand bleibt.
         if (!st.unreliable) {
@@ -1398,6 +1409,12 @@ export class Orchestrator {
     // Bisher emittierte dieser Pfad keinen git_status → das UI leitete bis zu 25 s aus dem
     // stale ahead>0 einen „Geist"-Stream ab, statt sofort „erledigt" anzuzeigen.
     const doneStatus: GitStatusResult = { behind: 0, ahead: 0, dirty: false, unpushed: 0 };
+    // Ein gemergter und aufgeräumter Stream kann keinen offenen Sync-Konflikt mehr haben. Ohne
+    // dieses Löschen bliebe ein während des Merges gesetztes Flag für immer stehen: `removed`
+    // beendet das Pollen (pollAgent steigt oben aus), und genau dort sitzt der einzige Pfad, der
+    // das Flag sonst räumt. Die Kachel zeigte dann dauerhaft „merged" UND „Sync blockiert", und
+    // die Seitenleiste zählte sie in ihr rotes Konflikt-Badge.
+    this.autoSyncConflicted.delete(agentId);
     this.gitState.set(agentId, doneStatus);
     this.emitGitStatus(agentId, doneStatus);
     this.removed.add(agentId); // gemergt+aufgeräumt → nicht mehr in die Resume-Registry
@@ -2097,11 +2114,24 @@ export class Orchestrator {
    *      automatische Auflösung, wenn zwei Streams nacheinander mergen). Konflikt → abbrechen +
    *      eskalieren, Arbeit bleibt unangetastet.
    *   3. Sonst (inhaltlich deckungsgleich — der Normalfall direkt nach dem Squash) → reset --hard.
+   * Die git-Seite steckt in resyncWorktreeAfterMerge(); `mergedHead` (der von GitHub gesquashte
+   * Stand) sorgt dort dafür, dass Schritt 2 NUR das abspielt, was nach dem Merge dazukam — sonst
+   * kollidiert der Stream mit seiner eigenen, gerade gemergten Arbeit (Vorfall Boba PR #725).
    * Liefert true, wenn der Worktree danach sauber auf dem neuen main sitzt.
    */
-  private async resyncAfterMerge(agentId: string, worktree: string, base: string): Promise<boolean> {
-    const dirty = (await run("git", ["-C", worktree, "status", "--porcelain"], worktree)).stdout.trim();
-    if (dirty) {
+  private async resyncAfterMerge(agentId: string, worktree: string, base: string, mergedHead?: string): Promise<boolean> {
+    const res = await resyncWorktreeAfterMerge(worktree, base, mergedHead);
+    if (res.ok) {
+      log(`[orchestrator] ${agentId}: Resync nach Merge per ${res.mode}${res.replayed > 0 ? ` (${res.replayed} Commit(s) nach dem Merge umgehängt)` : ""}`);
+      // Ein geglückter Resync setzt den Branch auf das frische main — ein zuvor gemerkter
+      // Sync-Konflikt ist damit gegenstandslos. Ohne dieses Löschen bliebe „Sync blockiert" auf
+      // der Kachel kleben: der Poll-Pfad, der das Flag sonst räumt, verlangt zusätzlich einen
+      // Branch, der mit origin/<branch> synchron ist — nach „Mergen & weiterarbeiten" ist er das
+      // nie, weil mads den zurückgesetzten Branch bewusst nicht pusht.
+      this.autoSyncConflicted.delete(agentId);
+      return true;
+    }
+    if (res.reason === "dirty") {
       this.emitError(
         agentId,
         "stale_base",
@@ -2110,28 +2140,13 @@ export class Orchestrator {
       );
       return false;
     }
-    // Inhaltlicher Vergleich statt Commit-Zählung: nach einem SQUASH-Merge sind die Branch-Commits keine
-    // Vorfahren von main, ihr INHALT aber schon → leerer Diff heißt „alles drin, Reset gefahrlos".
-    const extra = await run("git", ["-C", worktree, "diff", "--quiet", `origin/${base}`, "HEAD"], worktree);
-    if (extra.code !== 0) {
-      // Es liegt Arbeit über main hinaus (typisch: der Autopilot hat während des Merges weiter committet,
-      // oder main ist inzwischen weitergelaufen). NIEMALS wegwerfen → auf das neue main rebasen.
-      const rb = await run("git", ["-C", worktree, "rebase", `origin/${base}`], worktree);
-      if (rb.code !== 0) {
-        await run("git", ["-C", worktree, "rebase", "--abort"], worktree); // definierter Zustand für die Auflösung
-        this.emitError(
-          agentId,
-          "merge_conflict",
-          "Nach dem Merge kollidiert die noch offene Arbeit dieses Streams mit dem neuen main — über „Konflikt lösen“ in der Seitenleiste auflösen. " +
-            "Es wurde NICHTS zurückgesetzt, die Arbeit ist unangetastet.",
-        );
-        return false;
-      }
-      log(`[orchestrator] ${agentId}: Rest-Arbeit auf origin/${base} rebased statt verworfen`);
-      return true;
-    }
-    const reset = await run("git", ["-C", worktree, "reset", "--hard", `origin/${base}`], worktree);
-    return reset.code === 0;
+    this.emitError(
+      agentId,
+      "merge_conflict",
+      "Nach dem Merge kollidiert die noch offene Arbeit dieses Streams mit dem neuen main — über „Konflikt lösen“ in der Seitenleiste auflösen. " +
+        "Es wurde NICHTS zurückgesetzt, die Arbeit ist unangetastet.",
+    );
+    return false;
   }
 
   private async pollAgent(s: AgentSession, skipFetch = false): Promise<void> {
@@ -2262,6 +2277,14 @@ export class Orchestrator {
     // rebase/force die Dateien um, während der Server sie ausliefert. Nach dem Stoppen zieht der
     // nächste Poll nach. (Der Nutzer testet bewusst einen stabilen Stand.)
     if (this.devServer?.agentId === s.agentId) return;
+    // Läuft für DIESEN Stream gerade doIntegrate() (Merge + Aufräumen), NICHT parallel rebasen —
+    // der Autopilot hält diese Sperre längst ein, der Auto-Sync bisher nicht. Genau das war die
+    // Ursache der „Sync blockiert (Konflikt)"-Geister auf frisch gemergten Kacheln (Vorfälle
+    // neurolink PR #2/#11, Boba PR #727/#733): ein Statuswechsel im Merge stößt schedulePollSoon an,
+    // 1,2 s später misst der Poll das durch den Squash entstandene behind>0, und der Auto-Sync
+    // rebaset in einen Worktree, den removeWorktree() im selben Moment löscht — Ergebnis:
+    // „Kein Git-Repository" als merge_conflict auf einem GELUNGENEN Merge.
+    if (this.integrating.has(s.agentId)) return;
     if (this.syncing.has(s.agentId) || this.autoSyncConflicted.has(s.agentId)) return;
     // Aufgeräumt/Worktree weg → nie syncBranch gegen einen toten Pfad starten: der gecachte
     // Status ist dann der LETZTE GUTE (z. B. behind>0) und würde hier eine Falsch-Eskalation
@@ -2285,6 +2308,11 @@ export class Orchestrator {
       });
       if (res.renamedAdrs?.length) this.emitAdrRenamed(s.agentId, res.renamedAdrs);
       await this.pollAgent(s, true);
+    } else if (!existsSync(s.worktreePath) || this.removed.has(s.agentId) || this.integrating.has(s.agentId)) {
+      // Der Worktree ist WÄHREND des Rebase verschwunden (mads räumt ihn nach dem Merge selbst
+      // weg). Das ist kein Konflikt und darf weder eskalieren noch den Auto-Sync pausieren —
+      // sonst klebt „Sync blockiert" für immer auf einer Kachel, die längst „merged" ist.
+      log(`[orchestrator] Auto-Sync ${s.agentId}: Worktree während des Rebase entfernt → keine Eskalation (${res.error})`);
     } else {
       this.autoSyncConflicted.add(s.agentId);
       this.emitError(s.agentId, res.kind, `Auto-Sync gestoppt (manuell „Sync" nötig): ${res.error}`);
@@ -2813,6 +2841,7 @@ export class Orchestrator {
     this.reviewStreams.delete(agentId);
     saveRegistry(this.project.repoRoot, loadRegistry(this.project.repoRoot).filter((e) => e.agentId !== agentId));
     this.removed.add(agentId); // falls Discovery/persist diesen agentId je sähe → nicht wiederbeleben
+    this.autoSyncConflicted.delete(agentId); // kein Worktree mehr → kein offener Sync-Konflikt
   }
 
   /** Einen offenen Review-Stream als Registry-Eintrag persistieren (überlebt den App-Neustart). Kein

@@ -1350,6 +1350,69 @@ export async function rebaseMainOntoOrigin(
   return { ok: true, rebased: ahead };
 }
 
+export type ResyncResult =
+  | { ok: true; mode: "reset" | "rebase"; replayed: number }
+  | { ok: false; reason: "dirty" }
+  | { ok: false; reason: "conflict"; error: string };
+
+/**
+ * „Mergen & weiterarbeiten": den Branch nach einem SQUASH-Merge wieder auf origin/<base> setzen,
+ * OHNE bereits gemergte Arbeit ein zweites Mal abzuspielen.
+ *
+ * Vorfall (Boba, PR #725): Der Autopilot hatte NACH dem letzten Push noch lokal committet. Der
+ * Branch trug damit den gesquashten Stand PLUS einen neuen Commit, der inhaltliche Vergleich gegen
+ * origin/<base> war also nicht leer → es wurde `git rebase origin/<base>` gefahren. Der spielt aber
+ * ALLE Commits ab merge-base ab, auch die, deren Inhalt GitHub gerade als Squash nach main gelegt
+ * hat. Ergebnis: ein Rebase-Konflikt des Streams mit sich selbst, in genau den Dateien, die er
+ * eben gemergt hatte — und danach dieselbe Kollision bei jedem Auto-Sync und jedem manuellen Sync.
+ *
+ * `mergedHead` ist der Stand, den GitHub gesquasht hat (= origin/<branch> unmittelbar vor dem
+ * Merge). Ist er bekannt und ein Vorfahre von HEAD, wird nur `mergedHead..HEAD` umgehängt
+ * (`rebase --onto`) — also ausschließlich das, was NACH dem Merge dazukam. Ist er unbekannt oder
+ * durch amend/rebase kein Vorfahre mehr, bleibt es beim bisherigen Verhalten (fail-safe: lieber ein
+ * Konflikt zum Auflösen als stillschweigend verworfene Arbeit).
+ */
+export async function resyncWorktreeAfterMerge(
+  worktree: string,
+  base: string,
+  mergedHead?: string,
+): Promise<ResyncResult> {
+  const dirty = (await git(["-C", worktree, "status", "--porcelain"], worktree)).stdout.trim();
+  if (dirty) return { ok: false, reason: "dirty" };
+  const baseRef = `origin/${base}`;
+  // Inhaltlicher Vergleich statt Commit-Zählung: nach einem SQUASH-Merge sind die Branch-Commits
+  // keine Vorfahren von main, ihr INHALT aber schon → leerer Diff heißt „alles drin, Reset gefahrlos".
+  const extra = await git(["-C", worktree, "diff", "--quiet", baseRef, "HEAD"], worktree);
+  if (extra.code === 0) {
+    const reset = await git(["-C", worktree, "reset", "--hard", baseRef], worktree);
+    return reset.code === 0
+      ? { ok: true, mode: "reset", replayed: 0 }
+      : { ok: false, reason: "conflict", error: (reset.stderr || reset.stdout).trim() };
+  }
+  // Es liegt Arbeit über main hinaus (typisch: der Autopilot hat während des Merges weiter
+  // committet, oder main ist inzwischen weitergelaufen). NIEMALS wegwerfen → umhängen.
+  const upstream = (await usableMergedHead(worktree, mergedHead)) ? mergedHead! : undefined;
+  const args = upstream ? ["rebase", "--onto", baseRef, upstream] : ["rebase", baseRef];
+  const replayed = upstream
+    ? parseInt((await git(["-C", worktree, "rev-list", "--count", `${upstream}..HEAD`], worktree)).stdout.trim() || "0", 10)
+    : -1;
+  const rb = await git(["-C", worktree, ...args], worktree);
+  if (rb.code !== 0) {
+    await git(["-C", worktree, "rebase", "--abort"], worktree); // definierter Zustand für die Auflösung
+    return { ok: false, reason: "conflict", error: (rb.stderr || rb.stdout).trim() };
+  }
+  return { ok: true, mode: "rebase", replayed };
+}
+
+/** Taugt `mergedHead` als Rebase-Upstream? Muss existieren UND Vorfahre von HEAD sein. */
+async function usableMergedHead(worktree: string, mergedHead?: string): Promise<boolean> {
+  if (!mergedHead) return false;
+  const exists = await git(["-C", worktree, "rev-parse", "--verify", "--quiet", `${mergedHead}^{commit}`], worktree);
+  if (exists.code !== 0) return false;
+  const anc = await git(["-C", worktree, "merge-base", "--is-ancestor", mergedHead, "HEAD"], worktree);
+  return anc.code === 0;
+}
+
 /** Lokale Commits, die noch nicht auf origin/<branch> liegen (für „PR aktuell halten"). */
 export async function unpushedCount(worktree: string, branch: string): Promise<number> {
   const r = await git(["-C", worktree, "rev-list", "--count", `origin/${branch}..HEAD`], worktree);
