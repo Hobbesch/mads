@@ -52,6 +52,10 @@ export default function App() {
   const cleanupResumable = useStore((s) => s.cleanupResumable);
   const reconcileSummary = useStore((s) => s.reconcileSummary);
   const dismissReconcile = useStore((s) => s.dismissReconcile);
+  const cleanupRemoteBranches = useStore((s) => s.cleanupRemoteBranches);
+  const dismissRemoteBranchOffer = useStore((s) => s.dismissRemoteBranchOffer);
+  const remoteCleanup = useStore((s) => s.remoteCleanup);
+  const dismissRemoteCleanup = useStore((s) => s.dismissRemoteCleanup);
   const collisions = useStore((s) => s.collisions);
   const autonomy = useStore((s) => s.autonomy);
   const setAutonomy = useStore((s) => s.setAutonomy);
@@ -462,6 +466,64 @@ export default function App() {
               </div>
             );
           })()}
+
+        {/* Aufräum-ANGEBOT für Remote-Branch-Leichen: Branches unter mads/*, deren Inhalt
+            restlos im Default-Branch liegt. mads löscht sie NIE von selbst (Kern-Invariante 4) —
+            hier entscheidet der Mensch, mit Bestätigungsdialog. */}
+        {(reconcileSummary?.mergedRemoteBranches?.length ?? 0) > 0 &&
+          (() => {
+            const stale = reconcileSummary!.mergedRemoteBranches!;
+            return (
+              <div className="reconcile-banner">
+                <span className="reconcile-text">
+                  🧹 {stale.length} Remote-Branch(es) auf origin sind vollständig in {defaultBranch} — kein eigener Stand
+                  mehr: {stale.slice(0, 6).join(", ")}
+                  {stale.length > 6 ? ` … (+${stale.length - 6})` : ""}
+                </span>
+                <button
+                  className="banner-action"
+                  title={`Löscht diese ${stale.length} Branch(es) auf origin. mads prüft jeden unmittelbar vorher noch einmal; was inzwischen wieder eigene Arbeit trägt, bleibt stehen.`}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `${stale.length} Remote-Branch(es) auf origin löschen?\n\n${stale.join("\n")}\n\n` +
+                          `Ihr Inhalt liegt vollständig in ${defaultBranch} — es geht keine Arbeit verloren. ` +
+                          `Das Löschen auf origin lässt sich nicht rückgängig machen.`,
+                      )
+                    )
+                      void cleanupRemoteBranches(stale);
+                  }}
+                >
+                  Auf origin löschen ({stale.length})
+                </button>
+                <button
+                  className="banner-close"
+                  title="Angebot schließen (die Branches bleiben unangetastet)"
+                  aria-label="Angebot schließen"
+                  onClick={() => dismissRemoteBranchOffer()}
+                >
+                  ✕
+                </button>
+              </div>
+            );
+          })()}
+
+        {remoteCleanup && (
+          <div className="reconcile-banner">
+            <span className="reconcile-text">
+              🧹 Remote-Aufräumen: {remoteCleanup.deleted.length} Branch(es) auf origin gelöscht
+              {remoteCleanup.deleted.length > 0 ? ` (${remoteCleanup.deleted.join(", ")})` : ""}
+              {remoteCleanup.kept.length > 0
+                ? ` · ${remoteCleanup.kept.length} stehen gelassen: ${remoteCleanup.kept
+                    .map((k) => `${k.branch} — ${k.reason}`)
+                    .join("; ")}`
+                : ""}
+            </span>
+            <button className="banner-close" title="Hinweis schließen" aria-label="Hinweis schließen" onClick={() => dismissRemoteCleanup()}>
+              ✕
+            </button>
+          </div>
+        )}
 
         {liveResumables.length > 0 && (
           <div className="resume-banner">

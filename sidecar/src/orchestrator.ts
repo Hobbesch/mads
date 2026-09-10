@@ -14,7 +14,7 @@ import { loadApprovedKinds, saveApprovedKinds, loadApprovedTools, saveApprovedTo
 import { killProcessesInWorktree } from "./worktree-procs.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
-import { adoptRemoteBranch, autoCommit, commitMainRelease, createPr, createReviewWorktree, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverAdoptableBranches, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, resyncWorktreeAfterMerge, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
+import { adoptRemoteBranch, autoCommit, commitMainRelease, createPr, createReviewWorktree, deleteRemoteBranches, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverAdoptableBranches, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, findMergedRemoteBranches, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, resyncWorktreeAfterMerge, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
 import { LinkManager } from "./link.js";
 import { attributesArgs } from "./gitAttributes.js";
@@ -559,6 +559,32 @@ export class Orchestrator {
       case "poll_project":
         await this.pollAll();
         break;
+
+      case "cleanup_remote_branches": {
+        // Aufräum-Angebot angenommen: die genannten Remote-Branch-Leichen auf origin löschen.
+        // Außen-sichtbar und nicht rückholbar (Kern-Invariante 4) — deshalb kommt das AUSSCHLIESSLICH
+        // per Klick hierher, nie aus einer Automatik. deleteRemoteBranches() prüft jeden Branch
+        // unmittelbar vor dem Löschen erneut (Präfix + Inhalt restlos in <default>); was inzwischen
+        // wieder eigene Arbeit trägt, bleibt stehen und wird als `kept` zurückgemeldet.
+        if (!this.project) break;
+        const branches = Array.isArray(msg.branches) ? msg.branches : [];
+        if (branches.length === 0) break;
+        try {
+          const res = await deleteRemoteBranches(this.project.repoRoot, this.project.defaultBranch, branches);
+          log(`[orchestrator] Remote-Branches aufgeräumt: ${res.deleted.length} gelöscht, ${res.kept.length} stehen gelassen`);
+          for (const k of res.kept) log(`[orchestrator]   behalten: ${k.branch} — ${k.reason}`);
+          this.emit({ ...envelope(), type: "remote_branches_cleaned", deleted: res.deleted, kept: res.kept });
+        } catch (e) {
+          log(`[orchestrator] cleanup_remote_branches fehlgeschlagen: ${String(e)}`);
+          this.emit({
+            ...envelope(),
+            type: "remote_branches_cleaned",
+            deleted: [],
+            kept: branches.map((branch) => ({ branch, reason: String(e) })),
+          });
+        }
+        break;
+      }
 
       case "cleanup_worktree": {
         if (!this.project) break;
@@ -1233,6 +1259,24 @@ export class Orchestrator {
       this.emitError(agentId, res.kind, `Push fehlgeschlagen: ${res.error}`);
       return;
     }
+    // Nichts Eigenes am Branch → mads pusht bewusst nicht (das legte nur einen inhaltsleeren
+    // Remote-Branch an, siehe branchHasOwnCommits in git.ts). Klar sagen statt „gepusht" melden.
+    if (res.skipped) {
+      this.emit({
+        ...envelope(),
+        type: "agent_event",
+        agentId,
+        event: {
+          kind: "assistant_text",
+          text:
+            `Nichts zu pushen: „${s.branch}" trägt keine eigenen Commits gegenüber ${this.project.defaultBranch} ` +
+            `(alles bereits gemergt). mads legt dafür bewusst keinen leeren Remote-Branch an — sobald hier neue ` +
+            `Commits liegen, geht der Push wieder los.`,
+        },
+      });
+      await this.pollAgent(s);
+      return;
+    }
     log(`[orchestrator] Branch ${s.branch} manuell nach origin gepusht`);
     this.emit({
       ...envelope(),
@@ -1801,6 +1845,29 @@ export class Orchestrator {
       }
     }
 
+    // 4b) Aufräum-ANGEBOT für Remote-Branch-Leichen: mads-Branches auf origin, deren Inhalt
+    //     restlos im Default-Branch liegt. Gemessen im Feld (Boba): 28 solche Branches, entstanden
+    //     durch „Mergen & weiterarbeiten" + Auto-Sync-Push, bevor branchHasOwnCommits das
+    //     unterband. Reine Diagnose — gelöscht wird NUR auf ausdrücklichen Klick
+    //     (cleanup_remote_branches). Branches mit OFFENEM PR bleiben außen vor: ein Löschen
+    //     schlösse den PR.
+    let mergedRemoteBranches: string[] = [];
+    try {
+      const openHeads = (await listOpenPrs(repoRoot)).map((p) => p.headRefName);
+      const stale = await findMergedRemoteBranches(repoRoot, defaultBranch, openHeads);
+      mergedRemoteBranches = stale.map((b) => b.branch);
+      if (stale.length > 0) {
+        const empties = stale.filter((b) => b.emptyReset).length;
+        log(
+          `[orchestrator] reconcile: ${stale.length} Remote-Branch(es) vollständig in ${defaultBranch} ` +
+            `(${empties} davon reine main-Kopien) → zum Aufräumen angeboten: ${mergedRemoteBranches.slice(0, 5).join(", ")}` +
+            (stale.length > 5 ? ` … (+${stale.length - 5})` : ""),
+        );
+      }
+    } catch (e) {
+      log(`[orchestrator] Suche nach gemergten Remote-Branches fehlgeschlagen: ${String(e)}`);
+    }
+
     // 5) Ergebnis melden — inkl. „main hängt zurück, konnte aber nicht automatisch
     //    vorgezogen werden" (sonst arbeitet der Integrator still gegen veralteten Stand).
     const mainBehind = ff.blocked ? ff.behind : 0;
@@ -1810,7 +1877,17 @@ export class Orchestrator {
     // wenn main zufällig gerade aktuell ist.
     const wrongBranch = mainBlocked === "wrong_branch";
     if (offer.length > 0) this.emit({ ...envelope(), type: "resumable_agents", agents: offer });
-    if (mainFastForwarded > 0 || mainBehind > 0 || wrongBranch || cleaned.length > 0 || residue.length > 0 || seedGenerated > 0 || relocated.length > 0 || adopted.length > 0) {
+    if (
+      mainFastForwarded > 0 ||
+      mainBehind > 0 ||
+      wrongBranch ||
+      cleaned.length > 0 ||
+      residue.length > 0 ||
+      seedGenerated > 0 ||
+      relocated.length > 0 ||
+      adopted.length > 0 ||
+      mergedRemoteBranches.length > 0
+    ) {
       this.emit({
         ...envelope(),
         type: "reconcile_summary",
@@ -1823,9 +1900,14 @@ export class Orchestrator {
         seedGenerated,
         relocated,
         adopted,
+        mergedRemoteBranches,
       });
     }
-    log(`[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length} seed=${seedGenerated} relocated=${relocated.length} adopted=${adopted.length}`);
+    log(
+      `[orchestrator] reconcile: ff=${mainFastForwarded} behind=${mainBehind} blocked=${mainBlocked ?? "-"} ` +
+        `cleaned=${cleaned.length} residue=${residue.length} offer=${offer.length} seed=${seedGenerated} ` +
+        `relocated=${relocated.length} adopted=${adopted.length} staleRemote=${mergedRemoteBranches.length}`,
+    );
     await this.hydrateReviewStreams(); // persistierte Review-Streams (fremde PRs) als Kacheln wiederherstellen
   }
 
@@ -1967,7 +2049,11 @@ export class Orchestrator {
       // B3: unreliable-Status = git-Fehler → daraus keine Autopilot-Entscheidung ableiten.
       if (!st || st.unreliable) continue;
       const prOpen = s.lastPr?.state === "OPEN";
-      const unpushed = prOpen ? await unpushedCount(s.worktreePath, s.branch) : 0;
+      // `ahead > 0` als Vorbedingung: trägt der Branch nichts Eigenes gegenüber origin/<default>,
+      // gibt es nichts zu pushen — pushBranch überspränge ihn ohnehin (branchHasOwnCommits), der
+      // Autopilot käme aber in JEDEM Zyklus wieder hierher. Der Fall entsteht bei einem noch
+      // offenen PR, dessen Inhalt inzwischen anderweitig in <default> gelandet ist.
+      const unpushed = prOpen && st.ahead > 0 ? await unpushedCount(s.worktreePath, s.branch) : 0;
       const { action } = autopilotDecision({
         level: s.autopilot,
         role: "sub",
@@ -2303,7 +2389,11 @@ export class Orchestrator {
         agentId: s.agentId,
         event: {
           kind: "assistant_text",
-          text: `↻ Auto-Sync: rebaset onto origin/${this.project.defaultBranch} (war ${st.behind} behind).`,
+          text:
+            `↻ Auto-Sync: rebaset onto origin/${this.project.defaultBranch} (war ${st.behind} behind).` +
+            // Ohne diesen Zusatz wirkt es rätselhaft, dass der Remote-Branch nach einem Merge
+            // verschwunden bleibt — mads legt ihn bewusst nicht als leere Hülle neu an.
+            (res.pushed ? "" : " Kein Push: der Branch trägt gerade nichts Eigenes — er bleibt lokal, bis wieder committet wird."),
         },
       });
       if (res.renamedAdrs?.length) this.emitAdrRenamed(s.agentId, res.renamedAdrs);

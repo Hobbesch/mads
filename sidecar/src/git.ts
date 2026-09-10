@@ -405,6 +405,132 @@ export async function discoverAdoptableBranches(
   return out;
 }
 
+/** Ein Remote-Branch, dessen Inhalt vollständig in origin/<default> liegt (Aufräum-Kandidat). */
+export interface MergedRemoteBranch {
+  /** Branch-Name OHNE „origin/"-Präfix. */
+  branch: string;
+  /** SHA der Branch-Spitze (zum Nachvollziehen im Log/Dialog). */
+  tip: string;
+  /** Unix-Sekunden des Spitzen-Commits. */
+  lastCommitAt: number;
+  /** true: die Spitze ist ein Commit AUS <default> — der Branch trägt keinerlei eigene Historie. */
+  emptyReset: boolean;
+}
+
+/**
+ * Aufräum-Kandidaten: mads-eigene Remote-Branches, deren INHALT vollständig in origin/<default>
+ * liegt. Reine LESE-Operation — sie schlägt nur vor, gelöscht wird ausschließlich über
+ * {@link deleteRemoteBranches} nach menschlicher Bestätigung (Kern-Invariante 4).
+ *
+ * Zwei Sorten Leiche, beide erfasst:
+ *  1. der auf main zurückgesetzte Branch aus „Mergen & weiterarbeiten" (Spitze = Commit aus main,
+ *     entstanden vor dem branchHasOwnCommits-Fix) — `emptyReset`;
+ *  2. der squash-gemergte Branch, den GitHub nicht selbst weggeräumt hat (eigene Commit-IDs,
+ *     aber inhaltsgleich).
+ *
+ * Erkennung über den MERGE-BAUM statt über Commit-Vorfahrenschaft: `git merge-tree --write-tree
+ * origin/<default> <branch>` liefert bei vollständig enthaltenem Inhalt exakt den Baum von
+ * origin/<default>. Vorfahrenschaft allein (Fall 1) prüft der billigere `merge-base --is-ancestor`
+ * davor; er ist auch der Rückfall für git < 2.38, wo `--write-tree` fehlt.
+ *
+ * Grenzen (bewusst eng — mads löscht nie fremdes Zeug): nur Branches mit `mads/`-Präfix, nie
+ * <default>, und nie etwas aus `skip` (der Aufrufer setzt dort Branches mit offenem PR und aktive
+ * Streams hinein). Setzt einen frischen `fetch --prune` voraus.
+ */
+export async function findMergedRemoteBranches(
+  repoRoot: string,
+  defaultBranch: string,
+  skip: Iterable<string> = [],
+): Promise<MergedRemoteBranch[]> {
+  const exclude = new Set(skip);
+  const baseRef = `origin/${defaultBranch}`;
+  const baseTree = await git(["-C", repoRoot, "rev-parse", `${baseRef}^{tree}`], repoRoot);
+  if (baseTree.code !== 0) return [];
+  const wanted = baseTree.stdout.trim();
+  const listed = await git(
+    ["-C", repoRoot, "for-each-ref", "--format=%(refname:short)%09%(objectname)%09%(committerdate:unix)", "refs/remotes/origin"],
+    repoRoot,
+  );
+  if (listed.code !== 0) return [];
+  const out: MergedRemoteBranch[] = [];
+  for (const line of listed.stdout.split("\n")) {
+    const [ref = "", sha = "", when = "0"] = line.split("\t");
+    if (!ref.startsWith("origin/")) continue;
+    const branch = ref.slice("origin/".length);
+    if (!branch || branch === "HEAD" || branch === defaultBranch) continue;
+    if (!branch.startsWith("mads/")) continue; // nur von mads angelegte Stream-Branches
+    if (exclude.has(branch)) continue;
+    const how = await remoteBranchIsInBase(repoRoot, ref, baseRef, wanted);
+    if (!how) continue;
+    out.push({ branch, tip: sha, lastCommitAt: parseInt(when, 10) || 0, emptyReset: how === "ancestor" });
+  }
+  out.sort((a, b) => b.lastCommitAt - a.lastCommitAt);
+  return out;
+}
+
+/**
+ * Liegt der Inhalt von `ref` restlos in `baseRef` (dessen Baum `baseTree` ist)? Antwortet mit dem
+ * WIE: `"ancestor"` = die Spitze steckt schon in der Historie von <default> (die main-Kopie aus
+ * dem Vorfall), `"content"` = andere Commit-IDs, gleicher Inhalt (squash-/rebase-gemergt),
+ * `false` = trägt eigenen Stand.
+ */
+async function remoteBranchIsInBase(
+  repoRoot: string,
+  ref: string,
+  baseRef: string,
+  baseTree: string,
+): Promise<"ancestor" | "content" | false> {
+  // Billig zuerst: ist die Spitze ohnehin ein Vorfahre von <default>, ist alles drin.
+  const anc = await git(["-C", repoRoot, "merge-base", "--is-ancestor", ref, baseRef], repoRoot);
+  if (anc.code === 0) return "ancestor";
+  // Sonst inhaltlich: der Merge-Baum muss exakt der von <default> sein.
+  const mt = await git(["-C", repoRoot, "merge-tree", "--write-tree", baseRef, ref], repoRoot);
+  if (mt.code !== 0) return false; // Konflikt, oder git < 2.38 (kein --write-tree) → nicht anfassen
+  return (mt.stdout.split("\n")[0] ?? "").trim() === baseTree ? "content" : false;
+}
+
+/**
+ * Die bestätigten Aufräum-Kandidaten auf origin löschen. Außen-sichtbare Aktion (Kern-Invariante 4)
+ * — wird ausschließlich nach ausdrücklicher menschlicher Bestätigung aufgerufen.
+ *
+ * Jeder Branch wird UNMITTELBAR VOR dem Löschen erneut geprüft (Präfix, nicht <default>, Inhalt
+ * restlos in origin/<default>): zwischen Angebot und Klick können Minuten liegen, und in denen
+ * kann ein Stream neue Commits gepusht haben. Was die Prüfung nicht besteht, bleibt stehen.
+ */
+export async function deleteRemoteBranches(
+  repoRoot: string,
+  defaultBranch: string,
+  branches: string[],
+): Promise<{ deleted: string[]; kept: { branch: string; reason: string }[] }> {
+  const deleted: string[] = [];
+  const kept: { branch: string; reason: string }[] = [];
+  await run("git", ["-C", repoRoot, "fetch", "--prune", "origin"], repoRoot);
+  const baseRef = `origin/${defaultBranch}`;
+  const baseTree = (await git(["-C", repoRoot, "rev-parse", `${baseRef}^{tree}`], repoRoot)).stdout.trim();
+  if (!baseTree) return { deleted, kept: branches.map((branch) => ({ branch, reason: `${baseRef} nicht lesbar` })) };
+  for (const branch of [...new Set(branches)]) {
+    if (!branch.startsWith("mads/") || branch === defaultBranch) {
+      kept.push({ branch, reason: "kein mads-Branch" });
+      continue;
+    }
+    const ref = `origin/${branch}`;
+    const exists = await git(["-C", repoRoot, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], repoRoot);
+    if (exists.code !== 0) {
+      kept.push({ branch, reason: "auf origin nicht mehr vorhanden" });
+      continue;
+    }
+    if (!(await remoteBranchIsInBase(repoRoot, ref, baseRef, baseTree))) {
+      kept.push({ branch, reason: `trägt inzwischen Arbeit, die nicht in ${defaultBranch} liegt` });
+      continue;
+    }
+    const del = await git(["-C", repoRoot, "push", "origin", "--delete", branch], repoRoot);
+    if (del.code === 0) deleted.push(branch);
+    else kept.push({ branch, reason: (del.stderr || del.stdout).trim().slice(0, 200) });
+  }
+  if (deleted.length > 0) await run("git", ["-C", repoRoot, "fetch", "--prune", "origin"], repoRoot);
+  return { deleted, kept };
+}
+
 /**
  * Einen origin-Branch als lokalen Worktree auschecken. Legt den lokalen Branch mit Tracking auf
  * origin/<branch> an (nur falls er lokal noch fehlt) — NIE mit `-b` auf einen bestehenden Branch,
@@ -993,11 +1119,19 @@ export async function gitStatus(
   // code!==0 — ein Normalzustand, der den übrigen Status nicht entwerten darf.
   const unpushedR = await git(["-C", worktree, "rev-list", "--count", `origin/${branch}..${branch}`], worktree);
   const unreliable = behindR.code !== 0 || aheadR.code !== 0 || dirtyR.code !== 0;
+  const ahead = parseInt(aheadR.stdout.trim() || "0", 10);
+  // Ohne EIGENE Commits (ahead === 0) liegt alles, was der Branch trägt, bereits in
+  // origin/<default> — es gibt nichts zu veröffentlichen. Ein Rest-Delta gegen origin/<branch>
+  // ist dann keine ungepushte Arbeit, sondern main-Historie, die einem stehengebliebenen
+  // Remote-Branch fehlt. Genau die pusht mads bewusst NICHT mehr (branchHasOwnCommits) — ohne
+  // diese Klammer forderte das Grid mit „↑ n Commits nicht gepusht" auf, den leeren
+  // Remote-Branch von Hand wiederherzustellen.
+  const unpushed = ahead === 0 && aheadR.code === 0 ? 0 : parseInt(unpushedR.stdout.trim() || "0", 10);
   return {
     behind: parseInt(behindR.stdout.trim() || "0", 10),
-    ahead: parseInt(aheadR.stdout.trim() || "0", 10),
+    ahead,
     dirty: dirtyR.stdout.trim().length > 0,
-    ...(unpushedR.code === 0 ? { unpushed: parseInt(unpushedR.stdout.trim() || "0", 10) } : {}),
+    ...(unpushedR.code === 0 ? { unpushed } : {}),
     ...(unreliable ? { unreliable: true } : {}),
   };
 }
@@ -1413,6 +1547,28 @@ async function usableMergedHead(worktree: string, mergedHead?: string): Promise<
   return anc.code === 0;
 }
 
+/**
+ * Trägt der Branch überhaupt EIGENE Commits — also etwas, das nicht schon in origin/<default>
+ * steckt? Gemessen an HEAD, damit die Antwort auch direkt nach einem Rebase/Reset stimmt.
+ *
+ * Warum das gebraucht wird (Vorfall Boba, 28 leere Branches unter origin/mads/*): Nach
+ * „Mergen & weiterarbeiten" setzt resyncWorktreeAfterMerge() den Branch auf origin/<default>
+ * zurück. GitHub hat den Head-Branch beim Merge im selben Moment selbst gelöscht (Repo-Option
+ * „delete_branch_on_merge" — bei mads der Normalfall). Der nächste Auto-Sync legte ihn per
+ * force-with-lease NEU an, jetzt mit reinem main als Inhalt: ein Branch, dessen Spitze ein
+ * Commit aus main ist und der nichts Eigenes trägt. Wird der Stream danach nicht mehr benutzt,
+ * bleibt diese Leiche für immer auf origin liegen — und bei jedem weiteren Merge im selben
+ * Stream entsteht die nächste. Ein Branch ohne eigene Commits hat nichts zu veröffentlichen.
+ *
+ * Fail-OPEN: Lässt sich die Frage nicht beantworten (git-Fehler, origin/<default> unbekannt),
+ * gilt „hat eigene Commits" — ein überflüssiger Push ist harmlos, zurückgehaltene Arbeit nicht.
+ */
+export async function branchHasOwnCommits(worktree: string, defaultBranch: string): Promise<boolean> {
+  const r = await git(["-C", worktree, "rev-list", "--count", `origin/${defaultBranch}..HEAD`], worktree);
+  if (r.code !== 0) return true;
+  return (parseInt(r.stdout.trim() || "0", 10) || 0) > 0;
+}
+
 /** Lokale Commits, die noch nicht auf origin/<branch> liegen (für „PR aktuell halten"). */
 export async function unpushedCount(worktree: string, branch: string): Promise<number> {
   const r = await git(["-C", worktree, "rev-list", "--count", `origin/${branch}..HEAD`], worktree);
@@ -1476,7 +1632,10 @@ export async function syncBranch(
   worktree: string,
   branch: string,
   defaultBranch: string,
-): Promise<{ ok: true; renamedAdrs?: { num: string; to: string }[] } | { ok: false; kind: EscalationKind; error: string }> {
+): Promise<
+  | { ok: true; pushed: boolean; renamedAdrs?: { num: string; to: string }[] }
+  | { ok: false; kind: EscalationKind; error: string }
+> {
   // `--prune`: gelöschte Remote-Branches (GitHub räumt den Head-Branch beim Merge weg) müssen auch
   // lokal als Tracking-Ref verschwinden — sonst blockiert ihr Leichnam den force-with-lease-Push
   // unten dauerhaft mit „stale info" (siehe pushForceWithLease).
@@ -1543,6 +1702,12 @@ export async function syncBranch(
     }
     return { ok: false, kind: "merge_conflict", error: errText + stuckNote };
   }
+  // Nach dem Rebase steht fest, was der Branch EIGENES trägt. Nichts Eigenes → NICHT pushen: der
+  // Branch ist dann reines origin/<default>, und ein Push legte bloß den beim Merge gelöschten
+  // Remote-Branch als inhaltsleere Leiche neu an (siehe branchHasOwnCommits). Der Rebase oben ist
+  // trotzdem gelaufen — der Worktree steht auf frischem main. Sobald der Stream wieder committet,
+  // greift der Push von selbst.
+  if (!(await branchHasOwnCommits(worktree, defaultBranch))) return { ok: true, pushed: false };
   // Robuster ADR-Kollisions-Backstop: nach dem Rebase trägt der Branch jetzt main + eigene
   // Änderungen — eine vom Branch gewählte ADR-Nummer, die main inzwischen vergeben hat, wird
   // hier (serialisiert sicher) auf die nächste freie Nummer umgeschrieben, BEVOR gepusht wird.
@@ -1554,16 +1719,21 @@ export async function syncBranch(
   if (push.code !== 0) {
     return { ok: false, kind: classifyGitError(push.stderr) ?? "push_rejected", error: push.stderr };
   }
-  return { ok: true, renamedAdrs: adr.renamed.length ? adr.renamed : undefined };
+  return { ok: true, pushed: true, renamedAdrs: adr.renamed.length ? adr.renamed : undefined };
 }
 
 export async function pushBranch(
   worktree: string,
   branch: string,
   base: string,
-): Promise<{ ok: true } | { ok: false; kind: EscalationKind; error: string }> {
+): Promise<{ ok: true; skipped?: "no_own_commits" } | { ok: false; kind: EscalationKind; error: string }> {
   const gate = await secretGateBeforePush(worktree, base);
   if (!gate.ok) return gate;
+  // Nichts Eigenes am Branch → nicht pushen (sonst entsteht der inhaltsleere Remote-Branch aus
+  // dem Boba-Vorfall, siehe branchHasOwnCommits). KEIN Fehler: der Aufrufer meldet es als
+  // harmlosen Hinweis. Der Secret-Gate oben hat origin/<base> gerade frisch geholt, die
+  // Messung sitzt also auf aktuellem Stand.
+  if (!(await branchHasOwnCommits(worktree, base))) return { ok: true, skipped: "no_own_commits" };
   let push = await git(["-C", worktree, "push", "-u", "origin", branch], worktree);
   // Wurde der Branch lokal umgeschrieben (z.B. Rebase onto origin/main), lehnt ein
   // normaler Push als „non-fast-forward" ab. mads-Branches sind single-owner → sicher
@@ -1586,6 +1756,10 @@ export async function createPr(
 ): Promise<{ ok: true; url: string } | { ok: false; error: string; transient?: boolean; noCommits?: boolean }> {
   const pushed = await pushBranch(worktree, branch, base);
   if (!pushed.ok) return { ok: false, error: pushed.error };
+  // Nicht gepusht, weil der Branch nichts Eigenes trägt → es gibt auch nichts zu PRen. Gleiche
+  // Bedeutung wie GitHubs „No commits between": kein Fehler, sondern ein Normalzustand (typisch
+  // direkt nach „Mergen & weiterarbeiten").
+  if (pushed.skipped) return { ok: false, noCommits: true, error: `${branch} trägt keine Commits gegenüber ${base}.` };
   // Idempotent: existiert für den Branch bereits ein OFFENER PR, hat der Push oben ihn
   // aktualisiert → diesen PR melden. Sonst würde `gh pr create` mit „a pull request … already
   // exists" scheitern und mads fälschlich `push_rejected` eskalieren, obwohl alles i.O. ist.

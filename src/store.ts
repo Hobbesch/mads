@@ -24,6 +24,7 @@ import type {
   ResumableAgent,
   IncomingPr,
   ReconcileSummaryMsg,
+  RemoteBranchesCleanedMsg,
   HandoffResultMsg,
   AutonomyConfig,
   PermissionMode,
@@ -339,6 +340,8 @@ export interface MadsState {
   reconcileSummary?: ReconcileSummaryMsg;
   /** Ergebnis des letzten Handoff-Export/-Imports — treibt einen dismissbaren Banner. */
   handoff?: HandoffResultMsg;
+  /** Ergebnis des letzten „Remote-Branches aufräumen" — dismissbarer Banner. */
+  remoteCleanup?: RemoteBranchesCleanedMsg;
   collisions: Collision[];
   /**
    * „Don't Panic"-Zustand: solange `active`, sind die genannten Sub-Streams angehalten und ihr
@@ -563,6 +566,11 @@ export interface MadsState {
   /** Erledigten (gemergten) Stream mit lokalen Resten endgültig aufräumen (Worktree+Branch weg). */
   cleanupResumable: (r: ResumableAgent) => Promise<void>;
   dismissReconcile: () => void;
+  /** Angebotene Remote-Branch-Leichen auf origin löschen (nur nach Nutzer-Bestätigung). */
+  cleanupRemoteBranches: (branches: string[]) => Promise<void>;
+  /** Nur das Aufräum-ANGEBOT wegblenden (der übrige Abgleich-Hinweis bleibt stehen). */
+  dismissRemoteBranchOffer: () => void;
+  dismissRemoteCleanup: () => void;
 
   // ── Activity-Rail / Primary-Panel actions (doc 10 §3.1) ──
   setActiveView: (view: ViewId) => void;
@@ -925,6 +933,7 @@ export const useStore = create<MadsState>((set) => {
             recentProjects: rememberProject(s.recentProjects, msg.project, Date.now()),
             // Reconcile-Artefakte des Vorprojekts immer verwerfen (frischer Abgleich meldet neu).
             reconcileSummary: undefined,
+            remoteCleanup: undefined,
             resumables: [],
             ...(switching
               ? {
@@ -1127,6 +1136,20 @@ export const useStore = create<MadsState>((set) => {
 
       case "handoff_result":
         set({ handoff: msg });
+        break;
+
+      case "remote_branches_cleaned":
+        // Gelöschte aus dem Angebot nehmen (der Rest bleibt stehen — er hat einen Grund, siehe
+        // `kept`), Ergebnis als eigenen Banner zeigen.
+        set((s) => {
+          const gone = new Set(msg.deleted);
+          const rc = s.reconcileSummary;
+          const rest = (rc?.mergedRemoteBranches ?? []).filter((b) => !gone.has(b));
+          return {
+            remoteCleanup: msg,
+            ...(rc ? { reconcileSummary: { ...rc, mergedRemoteBranches: rest } } : {}),
+          };
+        });
         break;
 
       case "collision_warning":
@@ -1534,6 +1557,7 @@ export const useStore = create<MadsState>((set) => {
     resumables: [],
     incomingPrs: [],
     reconcileSummary: undefined,
+    remoteCleanup: undefined,
     collisions: [],
     panic: { active: false, stoppedAgentIds: [] },
     prompts: [],
@@ -2253,6 +2277,19 @@ export const useStore = create<MadsState>((set) => {
     },
 
     dismissReconcile: () => set({ reconcileSummary: undefined }),
+
+    cleanupRemoteBranches: async (branches) => {
+      // Außen-sichtbare, nicht rückholbare Aktion: kommt NUR aus dem bestätigten Banner-Klick.
+      // Der Sidecar prüft jeden Branch vor dem Löschen erneut und meldet das Ergebnis zurück.
+      if (branches.length === 0) return;
+      set({ remoteCleanup: undefined });
+      await sendHost({ ...envelope(), type: "cleanup_remote_branches", branches });
+    },
+
+    dismissRemoteBranchOffer: () =>
+      set((s) => (s.reconcileSummary ? { reconcileSummary: { ...s.reconcileSummary, mergedRemoteBranches: [] } } : {})),
+
+    dismissRemoteCleanup: () => set({ remoteCleanup: undefined }),
 
     // ── Session-Restore beim Öffnen ──────────────────────────────────────────
     loadTranscript: async (agentId) => {

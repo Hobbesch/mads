@@ -88,6 +88,7 @@ export type HostMessage =
   | CommitMainReleaseMsg
   | PollProjectMsg
   | CleanupWorktreeMsg
+  | CleanupRemoteBranchesMsg
   | UpdateMainMsg
   | StartDevServerMsg
   | StopDevServerMsg
@@ -562,6 +563,21 @@ export interface CleanupWorktreeMsg extends BaseMsg {
 }
 
 /**
+ * Aufräum-Angebot annehmen: die im Reconcile gemeldeten Remote-Branches (`mads/*`, deren Inhalt
+ * restlos im Default-Branch liegt) auf origin löschen. Das Frontend sendet das erst NACH
+ * ausdrücklicher Bestätigung; der Sidecar prüft jeden Branch unmittelbar vor dem Löschen erneut.
+ *
+ * Außen-sichtbare, nicht rückholbare Aktion (Kern-Invariante 4) → bewusst NICHT in der
+ * Remote-Bridge-Allowlist (src-tauri/src/bridge.rs): ein entfernter Client darf sie nicht
+ * auslösen, das bleibt dem Menschen am lokalen Fenster vorbehalten.
+ */
+export interface CleanupRemoteBranchesMsg extends BaseMsg {
+  type: "cleanup_remote_branches";
+  /** Branch-Namen OHNE „origin/"-Präfix — genau die aus `reconcile_summary.mergedRemoteBranches`. */
+  branches: string[];
+}
+
+/**
  * Integrator-Aktion: den Haupt-Checkout (main) per fast-forward auf origin/<default>
  * nachziehen. KEIN rebase/force-push (das ist die Sub-Branch-Operation) — nur ein
  * sicherer fast-forward. Antwortet über git_status + eine Notiz im Integrator-Stream.
@@ -604,6 +620,7 @@ export type SidecarMessage =
   | GateResultMsg
   | ResumableAgentsMsg
   | ReconcileSummaryMsg
+  | RemoteBranchesCleanedMsg
   | CollisionWarningMsg
   | PanicStateMsg
   | SpawnSubstreamsRequestMsg
@@ -1204,6 +1221,23 @@ export interface ReconcileSummaryMsg extends BaseMsg {
    * origin existierender Branch für mads unsichtbar (die Ursache der „mein Stream fehlt"-Lücke).
    */
   adopted?: string[];
+  /**
+   * Aufräum-ANGEBOT (kein Vollzug): Remote-Branches unter `mads/`, deren Inhalt restlos im
+   * Default-Branch liegt — Namen ohne „origin/". Zwei Sorten: der nach „Mergen & weiterarbeiten"
+   * auf main zurückgesetzte Leer-Branch (entstand vor dem branchHasOwnCommits-Fix) und der
+   * squash-gemergte Branch, den GitHub nicht selbst weggeräumt hat. Gelöscht wird erst auf
+   * `cleanup_remote_branches` hin, also nach menschlicher Bestätigung (Kern-Invariante 4).
+   */
+  mergedRemoteBranches?: string[];
+}
+
+/** Ergebnis von `cleanup_remote_branches` — treibt die Rückmeldung im Banner. */
+export interface RemoteBranchesCleanedMsg extends BaseMsg {
+  type: "remote_branches_cleaned";
+  /** tatsächlich auf origin gelöschte Branches. */
+  deleted: string[];
+  /** stehen gelassen (mit Grund) — z. B. weil der Branch inzwischen wieder eigene Arbeit trägt. */
+  kept: { branch: string; reason: string }[];
 }
 
 /** Laufzeit-Kollisionen zwischen aktiven Agenten (leeres Array = aufgeräumt). */
