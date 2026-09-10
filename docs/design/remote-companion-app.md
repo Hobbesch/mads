@@ -136,7 +136,10 @@ kohärentes, konsistentes Modell. **Reconnect** = erneutes `request_snapshot` + 
   den letzten Stand zeigt (plus frisches Re-Sync).
 - Erstmalig unbekannte Instanz → **Pairing-Flow** (§9). Bekannte (Token vorhanden) → direkt verbinden.
 - Da mads multi-instanzfähig ist, können mehrere Services auftauchen (auch mehrere Macs). Der
-  TXT-Record `project`/`pid`/`host` macht sie unterscheidbar.
+  TXT-Record `project`/`pid`/`host` macht sie für den Menschen unterscheidbar; die technische
+  Identität einer Instanz ist `iid` (SHA-256 des Repo-Roots, 12 Hex, auch im Service-Namen
+  `mads-<iid>`). Der `fp` taugt dafür NICHT mehr: er gehört seit der globalen Host-Identität (§9.2)
+  zum Mac und ist für alle dessen Instanzen gleich.
 
 ---
 
@@ -294,6 +297,10 @@ ist gewollt („als säße ich an mads"), macht Auth aber zur Pflicht.
    Port-Forwarding empfohlen. (Fern-Zugriff bewusst außen vor — sonst über VPN des Nutzers.)
 2. **Explizites Pairing.** Neue Geräte müssen **in mads bestätigt** werden: mads zeigt PIN/QR, die
    App scannt/tippt. Ergebnis: ein **pro-Gerät-Token** (widerrufbar; mads listet gekoppelte Geräte).
+   Die Kopplung gilt **pro Mac, nicht pro Projekt**: Zertifikat und Geräte-DB liegen global in
+   `<appData>/mads/remote-bridge/`. Ein gekoppeltes Gerät erreicht damit jedes Projekt, das in mads
+   geöffnet ist — bewusste Abwägung gegen die frühere pro-Repo-Ablage, die für jedes Projekt ein
+   eigenes Pairing verlangte. Wer ein Gerät aussperren will, widerruft es (wirkt sofort, überall).
 3. **Transportverschlüsselung.** WSS mit TLS. Da es keine CA im LAN gibt: **selbstsigniertes Zert +
    Trust-On-First-Use-Pinning** beim Pairing (Fingerprint im TXT-Record + in der Keychain gepinnt).
    Alternative: Noise-Protokoll über TCP.

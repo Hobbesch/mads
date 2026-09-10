@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 /**
  * Pairing-/Geräte-Verwaltung für die mads-Remote-App (iOS). Zeigt den Bridge-Status, gibt einen
- * einmaligen PIN + QR aus (60 s gültig) und listet gekoppelte Geräte mit Widerruf.
+ * einmaligen PIN + QR aus (60 s gültig) und listet gekoppelte Geräte mit Widerruf. Die Geräteliste
+ * gehört dem HOST (globale Auth-DB), nicht dem offenen Projekt — eine Kopplung gilt überall.
  * Die Rust-Bridge (src-tauri/src/bridge.rs, auth.rs) läuft nur mit MADS_REMOTE_BRIDGE=1.
  * Schnittstellen-Vertrag: mads-remote/docs/mads-bridge.md.
  */
@@ -82,7 +83,7 @@ export function RemotePairing() {
         {!status.enabled
           ? "Aus. Aktivieren, damit die iOS-App dieses Projekt im WLAN spiegeln/fernsteuern kann."
           : status.running
-            ? `Aktiv für ${status.project ?? "dieses Projekt"} (Port ${status.port}). Jede Instanz hat eine eigene Identität — mehrere Projekte parallel möglich.`
+            ? `Aktiv für ${status.project ?? "dieses Projekt"} (Port ${status.port}). Mehrere Projekte parallel möglich — eine Kopplung gilt für alle.`
             : status.project
               ? `Bridge startet für ${status.project} …`
               : "Aktiviert, aber noch kein Projekt offen. Öffne ein Projekt, dann läuft die Bridge dafür."}
@@ -108,6 +109,10 @@ export function RemotePairing() {
       {devices.length > 0 && (
         <div className="remote-devices">
           <div className="settings-row-sub">Gekoppelte Geräte</div>
+          <div className="settings-hint">
+            Gilt für diesen Mac, also für jedes Projekt, das du in mads öffnest. Widerruf wirkt
+            sofort und überall.
+          </div>
           {devices.map((d) => (
             <div className="remote-device-row" key={d.id}>
               <span className="remote-device-name">{d.name}</span>

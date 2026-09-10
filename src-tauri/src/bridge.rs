@@ -288,9 +288,15 @@ pub struct BridgeRuntimeInfo {
 }
 
 /// In Tauri gemanagter Bridge-MANAGER: startet/stoppt die Bridge zur LAUFZEIT, getrieben vom
-/// „Remote aktivieren"-Schalter UND dem aktuell offenen Projekt. Zertifikat, Port und Auth-DB liegen
-/// PRO PROJEKT in `<repoRoot>/.mads/remote-bridge/` (git-ignoriert) → jede Instanz hat einen
-/// eindeutigen, über Neustarts STABILEN SPKI-fp = die Multi-Instanz-Identität auf dem iPad.
+/// „Remote aktivieren"-Schalter UND dem aktuell offenen Projekt.
+///
+/// **Identitäts-Modell (zwei Ebenen):**
+///   - **Host** = Zertifikat + Geräte-DB, GLOBAL in `<appData>/mads/remote-bridge/`. Der SPKI-fp
+///     identifiziert diesen Mac, nicht ein Projekt → EINE Kopplung gilt für ALLE Projekte
+///     (vorher lag beides pro Repo → jedes Projekt verlangte ein eigenes Pairing).
+///   - **Instanz** = ein offenes Projekt, identifiziert über `iid` (SHA-256 des Repo-Roots,
+///     gekürzt). Trägt den mDNS-Instanznamen `mads-<iid>` und den TXT-Key `iid`; die iOS-App
+///     unterscheidet parallele Projekte darüber. Nur die Port-Datei bleibt pro Repo.
 pub struct RemoteBridgeState {
     // mpsc::Sender ist Send aber !Sync → in Mutex wickeln, damit RemoteBridgeState als Tauri-State
     // Send+Sync ist. Steuerbefehle sind selten (Toggle/Projektwechsel), Lock-Contention irrelevant.
@@ -318,6 +324,7 @@ impl RemoteBridgeState {
         forward: CommandSink,
         enabled_flag_path: PathBuf,
         enabled: bool,
+        global_dir: PathBuf,
     ) -> BridgeResult<Self> {
         let shared = Arc::new(std::sync::Mutex::new(Shared { enabled, ..Default::default() }));
         let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<Ctrl>();
@@ -328,7 +335,7 @@ impl RemoteBridgeState {
         // Control-Channel parkt.
         std::thread::Builder::new()
             .name("mads-remote-bridge".into())
-            .spawn(move || bridge_control_loop(ctrl_rx, shared_bg, tee, forward, enabled))
+            .spawn(move || bridge_control_loop(ctrl_rx, shared_bg, tee, forward, enabled, global_dir))
             .map_err(|e| e.to_string())?;
         Ok(Self { ctrl_tx: std::sync::Mutex::new(ctrl_tx), shared, enabled_flag_path })
     }
@@ -397,6 +404,7 @@ fn bridge_control_loop(
     tee: broadcast::Sender<String>,
     forward: CommandSink,
     mut enabled: bool,
+    global_dir: PathBuf,
 ) {
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -436,22 +444,38 @@ fn bridge_control_loop(
         }
         let Some((root, label)) = project.clone() else { continue };
 
-        // … dann per-Projekt neu starten.
-        let dir = root.join(".mads").join("remote-bridge");
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+        // … dann für das Projekt neu starten. Zertifikat + Geräte-DB kommen aus dem GLOBALEN
+        // Host-Verzeichnis (eine Kopplung gilt für alle Projekte); pro Repo bleibt nur die
+        // Port-Datei, damit jede Instanz ihren Port über Neustarts behält.
+        if let Err(e) = std::fs::create_dir_all(&global_dir) {
+            eprintln!("[mads:bridge] Host-Verzeichnis anlegen fehlgeschlagen: {e}");
+            continue;
+        }
+        let port_dir = root.join(".mads").join("remote-bridge");
+        if let Err(e) = std::fs::create_dir_all(&port_dir) {
             eprintln!("[mads:bridge] .mads/remote-bridge anlegen fehlgeschlagen: {e}");
             continue;
         }
-        let auth = match AuthState::open(&dir.join("devices.sqlite")) {
+        let auth = match AuthState::open(&global_dir.join("devices.sqlite")) {
             Ok(a) => Arc::new(a),
             Err(e) => {
                 eprintln!("[mads:bridge] Auth-DB konnte nicht geöffnet werden: {e}");
                 continue;
             }
         };
-        match rt.block_on(start(tee.clone(), forward.clone(), auth.clone(), dir, label)) {
+        let iid = instance_id(&root);
+        match rt.block_on(start(
+            tee.clone(),
+            forward.clone(),
+            auth.clone(),
+            global_dir.clone(),
+            port_dir,
+            root.clone(),
+            label,
+            iid,
+        )) {
             Ok(b) => {
-                eprintln!("[mads:bridge] läuft auf Port {} (SPKI-fp {}) für {:?}", b.port, b.spki_fp_hex, root);
+                eprintln!("[mads:bridge] läuft auf Port {} (Host-fp {}) für {:?}", b.port, b.spki_fp_hex, root);
                 let mut s = shared.lock().unwrap();
                 s.info = Some(BridgeRuntimeInfo { port: b.port, spki_fp_hex: b.spki_fp_hex.clone() });
                 s.auth = Some(auth);
@@ -477,10 +501,24 @@ pub fn pairing_qr_svg(fp: &str, pin: &str) -> Result<String, String> {
         .build())
 }
 
-/// Bridge starten: Zert laden/erzeugen (persistiert → stabiler Pin über Neustarts), TCP auf einem
-/// ephemeren Port binden (Multi-Instanz-freundlich), mDNS advertisen, Accept-Loop spawnen.
+/// Bridge starten: Host-Zert laden/erzeugen (persistiert → stabiler Pin über Neustarts), TCP auf
+/// einem ephemeren Port binden (Multi-Instanz-freundlich), mDNS advertisen, Accept-Loop spawnen.
 /// `tee` = Sender des Sidecar-stdout-Broadcasts; pro Client wird `tee.subscribe()` aufgerufen.
-pub async fn start(tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>, cert_dir: PathBuf, project: String) -> BridgeResult<Bridge> {
+///
+/// `cert_dir` ist das GLOBALE Host-Verzeichnis (Zert + Geräte-DB, projektübergreifend), `port_dir`
+/// das repo-lokale `.mads/remote-bridge` (nur die Port-Datei), `repo_root` das autoritative Projekt
+/// für den File-RPC-Scope und `instance_id` die Identität dieses Projekts im mDNS.
+#[allow(clippy::too_many_arguments)]
+pub async fn start(
+    tee: broadcast::Sender<String>,
+    forward: CommandSink,
+    auth: Arc<AuthState>,
+    cert_dir: PathBuf,
+    port_dir: PathBuf,
+    repo_root: PathBuf,
+    project: String,
+    instance_id: String,
+) -> BridgeResult<Bridge> {
     let cert = load_or_generate_cert(&cert_dir)?;
     let spki_fp_hex = hex_lower(&cert.spki_fp);
     let tls_config = make_server_config(cert.cert_der, cert.key_der)?;
@@ -488,16 +526,25 @@ pub async fn start(tee: broadcast::Sender<String>, forward: CommandSink, auth: A
     // Persistierter Port → über Neustarts STABIL. Damit zeigen auch veraltete Bonjour-Einträge (die
     // ein hart beendeter Vorgänger nicht abmelden konnte) weiter auf einen LEBENDEN Port, statt in
     // einen toten ephemeren zu laufen (→ 60-s-Timeout hinter der macOS-Stealth-Firewall, die kein
-    // RST schickt). Ist der Wunschport belegt, fällt `bind_and_serve` auf ephemer zurück.
-    let desired_port = read_persisted_port(&cert_dir);
-    // repoRoot aus cert_dir (= <repoRoot>/.mads/remote-bridge) ableiten → damit wird der
-    // File-RPC-Scope jeder Verbindung host-seitig aufs Projekt begrenzt (RB-FS-1).
-    let repo_root = cert_dir.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
-    let (port, accept) = bind_and_serve(tls_config, tee, forward, auth, desired_port, repo_root).await?;
-    persist_port(&cert_dir, port);
-    let mdns = advertise(port, &spki_fp_hex, &project)?;
+    // RST schickt). Ist der Wunschport belegt, fällt `bind_and_serve` auf ephemer zurück. Die
+    // Port-Datei liegt PRO REPO — zwei parallele Instanzen dürfen sich keinen Port teilen.
+    let desired_port = read_persisted_port(&port_dir);
+    // Der File-RPC-Scope jeder Verbindung wird host-seitig aufs Projekt begrenzt (RB-FS-1).
+    let (port, accept) = bind_and_serve(tls_config, tee, forward, auth, desired_port, Some(repo_root)).await?;
+    persist_port(&port_dir, port);
+    let mdns = advertise(port, &spki_fp_hex, &project, &instance_id)?;
 
     Ok(Bridge { port, spki_fp_hex, accept, mdns })
+}
+
+/// Stabile Identität EINES PROJEKTS (der SPKI-fp identifiziert seit der Host-Umstellung den Mac,
+/// nicht mehr die Instanz): SHA-256 über den kanonisierten Repo-Root, auf 12 Hex-Zeichen gekürzt.
+/// Überlebt Neustarts und Umbenennungen des Anzeigenamens, unterscheidet aber parallel offene
+/// Projekte — genau das braucht die iOS-App, um zwei Instanzen desselben Macs auseinanderzuhalten.
+fn instance_id(repo_root: &Path) -> String {
+    let canon = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let digest: [u8; 32] = Sha256::digest(canon.to_string_lossy().as_bytes()).into();
+    hex_lower(&digest)[..12].to_string()
 }
 
 /// Zuletzt gebundenen Port aus `dir/port` lesen (0 = keiner/Parsefehler → ephemer wählen).
@@ -602,9 +649,9 @@ fn make_server_config(cert_der: CertificateDer<'static>, key_der: PrivateKeyDer<
 
 // ─────────────────────────────────────────────────────────────── mDNS-Advertise
 
-/// `_mads-remote._tcp` advertisen; TXT trägt name/host/pid/project/pv/fp (fp = SPKI-Pin, nur Hinweis
-/// — autoritativ ist der beim Pairing gepinnte fp). IPs werden per `enable_addr_auto()` automatisch
-/// erkannt und aktuell gehalten.
+/// `_mads-remote._tcp` advertisen; TXT trägt name/iid/pid/project/pv/fp (fp = SPKI-Pin des HOSTS,
+/// nur Hinweis — autoritativ ist der beim Pairing gepinnte fp; `iid` = Identität dieses Projekts).
+/// IPs werden per `enable_addr_auto()` automatisch erkannt und aktuell gehalten.
 /// Primäre LAN-IPv4 (die des Default-Route-Interfaces) — die IP, die ein LAN-Client tatsächlich
 /// erreicht. Der UDP-„connect" sendet KEIN Paket, setzt nur die Route; `local_addr()` liefert dann
 /// die Quell-IP. Link-local/Loopback werden verworfen.
@@ -617,7 +664,7 @@ fn primary_lan_ip() -> Option<String> {
     }
 }
 
-fn advertise(port: u16, fp_hex: &str, project: &str) -> BridgeResult<mdns_sd::ServiceDaemon> {
+fn advertise(port: u16, fp_hex: &str, project: &str, instance_id: &str) -> BridgeResult<mdns_sd::ServiceDaemon> {
     use mdns_sd::{ServiceDaemon, ServiceInfo};
 
     let daemon = ServiceDaemon::new()?;
@@ -629,6 +676,9 @@ fn advertise(port: u16, fp_hex: &str, project: &str) -> BridgeResult<mdns_sd::Se
     props.insert("project".into(), project.to_string());
     props.insert("pv".into(), PROTOCOL_VERSION.into());
     props.insert("fp".into(), fp_hex.to_string());
+    // Instanz-Identität = Projekt. Seit Zert/Geräte-DB global sind, ist `fp` für alle Instanzen
+    // desselben Macs GLEICH — ohne `iid` verschmölzen zwei offene Projekte in der App zu einem.
+    props.insert("iid".into(), instance_id.to_string());
     // LAN-IP + Port direkt annoncieren, damit der Client OHNE fragile Bonjour-Auflösung verbindet
     // (die auf einem USB-verbundenen iPad die unbrauchbare link-local Adresse liefert).
     props.insert("port".into(), port.to_string());
@@ -636,10 +686,11 @@ fn advertise(port: u16, fp_hex: &str, project: &str) -> BridgeResult<mdns_sd::Se
         props.insert("addr".into(), ip);
     }
 
-    // Stabiler Instanzname aus dem SPKI-Fingerprint (NICHT der pid): mads ist Single-Instance, der fp
-    // überlebt Neustarts → ein Neustart AKTUALISIERT denselben mDNS-Eintrag statt einen neuen
-    // anzulegen. So sammeln sich keine Karteileichen (`mads-<altepid>`) mit toten Ports mehr an.
-    let instance = format!("mads-{}", &fp_hex[..12.min(fp_hex.len())]);
+    // Stabiler Instanzname aus der `iid` (NICHT der pid, und nicht mehr dem fp — der ist seit der
+    // Host-Umstellung für alle Projekte gleich): überlebt Neustarts → ein Neustart AKTUALISIERT
+    // denselben mDNS-Eintrag, statt einen neuen anzulegen. So sammeln sich keine Karteileichen
+    // (`mads-<altepid>`) mit toten Ports mehr an, und zwei parallele Projekte bleiben getrennt.
+    let instance = format!("mads-{instance_id}");
     let service = ServiceInfo::new(
         SERVICE_TYPE,
         &instance,
@@ -1177,11 +1228,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Die Instanz-Identität ist pro Repo-Root stabil und unterscheidet Projekte — sonst
+    /// verschmölzen zwei parallel offene Projekte in der App zu einem Eintrag (gleicher Host-fp).
+    #[test]
+    fn instance_id_is_stable_and_per_project() {
+        let a = instance_id(Path::new("/tmp/projekt-a"));
+        let b = instance_id(Path::new("/tmp/projekt-b"));
+        assert_eq!(a.len(), 12);
+        assert_eq!(a, instance_id(Path::new("/tmp/projekt-a")));
+        assert_ne!(a, b);
+    }
+
     /// mDNS-Advertise startet ohne Fehler und registriert den Service. Multicast ist in manchen
     /// CI-/Sandbox-Umgebungen gesperrt → toleriert einen `ServiceDaemon`-Fehler, statt hart zu failen.
     #[tokio::test]
     async fn advertise_starts_or_is_sandboxed() {
-        match advertise(12345, "deadbeef".repeat(8).as_str(), "test") {
+        match advertise(12345, "deadbeef".repeat(8).as_str(), "test", "0123456789ab") {
             Ok(daemon) => { let _ = daemon.shutdown(); }
             Err(e) => eprintln!("[test] mDNS in dieser Umgebung nicht verfügbar (ok in Sandbox): {e}"),
         }

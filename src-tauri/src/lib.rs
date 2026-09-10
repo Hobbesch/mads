@@ -158,6 +158,10 @@ fn start_remote_bridge(app: &tauri::App) {
         .unwrap_or_else(|_| std::env::temp_dir())
         .join("mads");
     let flag_path = app_data.join("remote-enabled");
+    // Host-Identität (TLS-Zert + Geräte-DB) — GLOBAL, nicht pro Repo: eine Kopplung gilt damit für
+    // jedes Projekt, das in mads geöffnet wird (vorher lag beides in `<repoRoot>/.mads/`, weshalb
+    // jedes Projekt ein eigenes Pairing verlangte).
+    let global_bridge_dir = app_data.join("remote-bridge");
 
     // Toggle-Zustand: die persistierte Flag-Datei hat Vorrang; existiert keine, gilt der
     // Env-Var-Default `MADS_REMOTE_BRIDGE=1` (Dev/CI). So respektiert der UI-Schalter die Wahl,
@@ -177,9 +181,9 @@ fn start_remote_bridge(app: &tauri::App) {
     };
 
     // Manager managen — die Bridge selbst startet ERST, wenn das Frontend via `remote_set_project`
-    // ein Projekt meldet (und Remote aktiv ist); dann mit dem per-Projekt-Zertifikat in
-    // `<repoRoot>/.mads/remote-bridge/` → eindeutige, stabile Instanz-Identität (Multi-Instanz).
-    match bridge::RemoteBridgeState::new(tee, forward, flag_path, enabled) {
+    // ein Projekt meldet (und Remote aktiv ist); dann mit dem globalen Host-Zertifikat und einer
+    // aus dem Repo-Root abgeleiteten Instanz-Identität (`iid`) für die Multi-Instanz-Trennung.
+    match bridge::RemoteBridgeState::new(tee, forward, flag_path, enabled, global_bridge_dir) {
         Ok(state) => {
             app.manage(state);
         }
