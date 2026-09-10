@@ -158,7 +158,8 @@ fn has_mads_component(p: &Path) -> bool {
 /// aufs Metadaten-/Config-Verzeichnis zu sperren, in BEIDE Richtungen:
 ///   • WRITE — `.mads/run.json` führt der Dev-Server als Shell aus (RCE), agents.json/Registry sind
 ///     Host-State.
-///   • READ — `.mads/remote-bridge/key.pk8.der` (TLS-Server-Privatkey → Impersonation) und
+///   • READ — `.mads/remote-bridge/key.pk8.der` (TLS-Server-Privatkey älterer Versionen →
+///     Impersonation; die aktive Host-Identität liegt inzwischen außerhalb des Repos) und
 ///     `devices.sqlite` (Auth-DB → Token-Diebstahl) dürfen NICHT über die Bridge exfiltriert werden.
 ///
 /// WICHTIG (adversarial gehärtet): reiner String-Vergleich reicht NICHT. Das macOS-APFS-Volume ist
