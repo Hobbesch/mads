@@ -654,6 +654,33 @@ export const useStore = create<MadsState>((set) => {
     });
   }
 
+  /** Hat der gerade offene Editor-Puffer ungespeicherte Änderungen? (dirty = Puffer ≠ Disk-Text) */
+  function hasUnsavedEdit(): boolean {
+    const st = useStore.getState();
+    const open = st.openFile;
+    if (!open || open.loadedText === undefined) return false;
+    const buf = st.editorBuffers[open.path];
+    return buf !== undefined && buf !== open.loadedText;
+  }
+
+  /**
+   * Datei-Basis dem Stream folgen lassen: Sub → sein Worktree, Integrator/ohne Worktree → Projekt-Root
+   * (main-Checkout). Nur umschalten, wenn sich der Pfad ändert. `setActiveRoot` MELDET den Root auch im
+   * Core an — ohne diesen Schritt ist er dort unbekannt und jeder Schreibzugriff (z.B. Datei-Anhang)
+   * scheitert mit „Pfad außerhalb des erlaubten Bereichs".
+   */
+  function followRoot(id: string) {
+    const st = useStore.getState();
+    const a = st.agents[id];
+    if (!a) return;
+    const target: ExplorerRoot | null = a.worktreePath
+      ? { kind: "worktree", agentId: id, path: a.worktreePath }
+      : st.project
+        ? { kind: "project", path: st.project.repoRoot }
+        : null;
+    if (target && st.activeRoot?.path !== target.path) void st.setActiveRoot(target);
+  }
+
   /** Eine Kachel lokal entfernen (Agent + Verlauf + Diff-Panes + Dev-Log). Genutzt von stopAgent,
    *  Review-Merge/-Verwerfen. */
   function removeAgentLocal(id: string) {
@@ -968,6 +995,12 @@ export const useStore = create<MadsState>((set) => {
 
       case "worktree_created":
         patchAgent(msg.agentId, { branch: msg.branch, worktreePath: msg.path });
+        // Ein neuer Sub-Stream ist beim Start schon ausgewählt, sein Worktree existiert aber erst
+        // JETZT — `selectAgent` konnte ihm damals nicht folgen. Ohne dieses Nachziehen zeigt der
+        // Explorer weiter den alten Kontext und der Core kennt den Worktree gar nicht.
+        // Ausnahme: ungespeicherte Editor-Änderungen. Der Kontextwechsel verwirft die Puffer, und
+        // dieser hier passiert OHNE Nutzer-Geste (Worktree-Ereignis) — dann lieber stehen bleiben.
+        if (useStore.getState().selectedId === msg.agentId && !hasUnsavedEdit()) followRoot(msg.agentId);
         notice(msg.agentId, "info", `Worktree ${msg.branch} (off ${msg.baseRef})`);
         break;
 
@@ -1037,6 +1070,7 @@ export const useStore = create<MadsState>((set) => {
           };
           return { agents: { ...s.agents, [id]: vm }, order: [...s.order, id], selectedId: id };
         });
+        followRoot(id); // Kachel wird sofort ausgewählt → Explorer/Core auf ihren Worktree setzen
         notice(id, "accent", `🔍 Review-Stream für PR #${msg.reviewPr} (@${msg.author}) geöffnet — Dev-Server starten, prüfen, dann „PR mergen".`);
         break;
       }
@@ -1693,17 +1727,8 @@ export const useStore = create<MadsState>((set) => {
     selectAgent: (id) => {
       set({ selectedId: id });
       // Datei-Basis dem gewählten Stream folgen lassen — sonst betrachtet man leicht die
-      // falschen Dateien (anderer/alter Kontext). Sub → sein Worktree; Integrator bzw. ohne
-      // Worktree → Projekt-Root (main-Checkout). Nur umschalten, wenn sich der Pfad ändert.
-      const st = useStore.getState();
-      const a = st.agents[id];
-      if (!a) return;
-      const target: ExplorerRoot | null = a.worktreePath
-        ? { kind: "worktree", agentId: id, path: a.worktreePath }
-        : st.project
-          ? { kind: "project", path: st.project.repoRoot }
-          : null;
-      if (target && st.activeRoot?.path !== target.path) void st.setActiveRoot(target);
+      // falschen Dateien (anderer/alter Kontext).
+      followRoot(id);
     },
 
     dismissEscalations: () => set({ escalations: [] }),
@@ -1732,6 +1757,7 @@ export const useStore = create<MadsState>((set) => {
       const base = cwd.replace(/\/$/, "");
       const newImgs: ImageInput[] = [];
       const newFiles: AttachedFile[] = [];
+      let rootRegistered = false;
       const MAX_ATTACH_BYTES = 20 * 1024 * 1024; // 20 MB — größere Dateien blähen das IPC-JSON auf
       for (const f of files) {
         if (f.size > MAX_ATTACH_BYTES) {
@@ -1745,6 +1771,14 @@ export const useStore = create<MadsState>((set) => {
           continue;
         }
         try {
+          // Der Core nimmt Schreibziele nur in REGISTRIERTEN Roots an. Ein Sub-Stream bekommt seinen
+          // Worktree erst NACH dem Anlegen (selectAgent lief noch ohne `worktreePath`) → der Pfad ist
+          // hier oft unbekannt und jeder Datei-Anhang scheiterte mit „Pfad außerhalb des erlaubten
+          // Bereichs". Einmal pro Aufruf nachholen; `mads_register_root` ist idempotent.
+          if (!rootRegistered) {
+            await invoke("mads_register_root", { path: base });
+            rootRegistered = true;
+          }
           const bytes = new Uint8Array(await f.arrayBuffer());
           // Dateinamen säubern (kein Pfad-Traversal) + eindeutig machen.
           const safe =
