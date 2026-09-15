@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use argon2::password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
 use rand::rngs::SysRng;
-use rand::{Rng, RngExt, TryRng};
+use rand::TryRng;
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -75,7 +75,7 @@ impl AuthState {
 
     /// Einen 6-stelligen PIN ausgeben (überschreibt einen evtl. offenen), 60 s gültig, ≤5 Versuche.
     pub fn issue_pin(&self) -> String {
-        let pin = format!("{:06}", SysRng.unwrap_err().random_range(0u32..1_000_000));
+        let pin = format!("{:06}", sys_random_below(1_000_000));
         *self.pin.lock().unwrap() = Some(PendingPin {
             pin: pin.clone(),
             expires_at: SystemTime::now() + PIN_TTL,
@@ -194,16 +194,31 @@ fn hash_secret(secret: &str) -> Result<String, String> {
     // 16 Byte Salt direkt aus dem System-RNG; password-hash 0.6 nimmt rohe Bytes und
     // B64-kodiert sie selbst in den PHC-String (vorher: SaltString::encode_b64).
     let mut salt_bytes = [0u8; 16];
-    SysRng.unwrap_err().fill_bytes(&mut salt_bytes);
+    SysRng.try_fill_bytes(&mut salt_bytes).map_err(|e| format!("System-RNG nicht verfügbar: {e}"))?;
     Ok(Argon2::default()
         .hash_password_with_salt(secret.as_bytes(), &salt_bytes)
         .map_err(|e| e.to_string())?
         .to_string())
 }
 
+/// Gleichverteilte Zahl in `0..upper` direkt aus dem System-RNG. Rejection Sampling statt
+/// Modulo, damit kein Bias entsteht; Panik, wenn das System keinen Zufall liefert (wie zuvor
+/// `OsRng.unwrap_err()`).
+fn sys_random_below(upper: u32) -> u32 {
+    debug_assert!(upper > 0);
+    // Größtes Vielfaches von `upper`, das noch in u32 passt — alles darüber wird verworfen.
+    let zone = u32::MAX - (u32::MAX % upper);
+    loop {
+        let v = SysRng.try_next_u32().expect("System-RNG nicht verfügbar");
+        if v < zone {
+            return v % upper;
+        }
+    }
+}
+
 fn hex_rand(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    SysRng.unwrap_err().fill_bytes(&mut buf);
+    SysRng.try_fill_bytes(&mut buf).expect("System-RNG nicht verfügbar");
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes * 2);
     for b in buf {
