@@ -1,7 +1,7 @@
 /**
  * Tests für den Secret-Scan (shared/secrets.ts). Via `npm run test:secrets`.
  */
-import { scanSecrets, findSecrets } from "./secrets";
+import { scanSecrets, findSecrets, redactSecrets, describeSecretHits } from "./secrets";
 
 const results: string[] = [];
 let failed = 0;
@@ -62,6 +62,45 @@ check("short value not flagged", scanSecrets(`+password = "short"`).length === 0
 // Maskierung: der Geheim-Wert darf NICHT im Preview stehen
 const masked = scanSecrets("+token: ghp_abcdefghijklmnopqrstuvwxyz0123456789");
 check("secret is masked", masked.length === 1 && !masked[0].preview.includes("ghp_abcdefghij"));
+
+// ---- reine Env-Referenzen (Vorfall powerblox-gis, 2026-09-15) ----
+// Jeder Wert hier ist ≥20 Zeichen ohne Leerzeichen — ohne die Ausnahme flaggte die unquoted-Regel ihn.
+const unquoted = (hits: ReturnType<typeof scanSecrets>) => hits.some((h) => h.kind === "Secret-Zuweisung (unquoted)");
+const cartoLine = "const CARTO_API_KEY = import.meta.env.VITE_CARTO_API_KEY as string | undefined;";
+check("import.meta.env-Ref nicht geflaggt (CARTO-Zeile)", scanSecrets(`+${cartoLine}`).length === 0);
+check("process.env-Ref im Objekt nicht geflaggt", scanSecrets("+  apiKey: process.env.STRIPE_SECRET_KEY,").length === 0);
+check("process.env-Ref mit TS-Non-Null nicht geflaggt", scanSecrets("+const API_KEY = process.env.OPENAI_API_KEY_PRIMARY!;").length === 0);
+check("process.env[`NAME`] nicht geflaggt", scanSecrets("+const API_KEY = process.env[`OPENAI_API_KEY`];").length === 0);
+check("os.environ[NAME] nicht geflaggt", scanSecrets("+API_KEY = os.environ[OPENAI_API_KEY_NAME]").length === 0);
+check("os.environ.get(NAME) nicht geflaggt", scanSecrets("+client_secret = os.environ.get(GRAPH_CLIENT_SECRET)").length === 0);
+check("os.getenv(NAME) nicht geflaggt", scanSecrets("+DB_PASSWORD = os.getenv(DB_PASSWORD_ENV_NAME)").length === 0);
+check("Deno.env.get(`NAME`) nicht geflaggt", scanSecrets("+const API_KEY = Deno.env.get(`MAPBOX_API_KEY`);").length === 0);
+check("redactSecrets lässt eine reine Env-Ref stehen", redactSecrets(cartoLine) === cartoLine);
+// ...aber nur die REINE Referenz: Klartext daneben oder angehängt bleibt geflaggt (fail-closed).
+check("Env-Ref + angehängter Klartext WIRD geflaggt", unquoted(scanSecrets("+API_KEY=process.env.X||abcdefghijklmnopqrstuvwx")));
+check("Env-Ref mit Klartext-Fallback in Quotes WIRD geflaggt", unquoted(scanSecrets('+const API_KEY = process.env.OPENAI_API_KEY ?? "Abc123RealSecretValue9";')));
+check("os.getenv mit Default-Argument WIRD geflaggt", unquoted(scanSecrets("+DB_PASSWORD = os.getenv(DB_PASSWORD_ENV,FALLBACK_PASSWORD_VALUE)")));
+check("env-ähnlicher fremder Ausdruck WIRD geflaggt", unquoted(scanSecrets("+API_KEY=myprocess.env.PRIMARY_KEY_VALUE")));
+// Keine Platzhalter-Heuristik und keine .example-Allowlist — das bliebe eine bewusste Entscheidung.
+check(".env.example-Platzhalter (unquoted) WIRD geflaggt", unquoted(scanSecrets("+++ b/.env.example\n+VITE_CARTO_API_KEY=your_carto_api_key_here")));
+check(
+  ".env.example-Platzhalter (quoted) WIRD geflaggt",
+  scanSecrets('+++ b/.env.example\n+VITE_CARTO_API_KEY="your-carto-api-key"').some((h) => h.kind === "Secret-Zuweisung"),
+);
+
+// ---- Vorschau: ab dem Treffer ist ALLES maskiert (sie geht an UI und Agent) ----
+check("Vorschau behält den Schlüssel", scanSecrets("+const CARTO_API_KEY = abcdefghijklmnopqrstuvwxyz1234;")[0]?.preview === "const CARTO_API_KEY = ***");
+const fallback = scanSecrets('+const API_KEY = process.env.OPENAI_API_KEY ?? "Abc123RealSecretValue9";');
+check("Klartext-Fallback hinter dem Treffer nicht in der Vorschau", fallback.length === 1 && !fallback[0].preview.includes("Abc123RealSecretValue9"));
+const twoInLine = scanSecrets(`+AWS=AKIAIOSFODNN7EXAMPLE GH=${ghp}`);
+check("zweites Secret in derselben Zeile nicht in der Vorschau", twoInLine.length === 1 && twoInLine[0].preview === "AWS=***");
+const earlier = scanSecrets('+password = "hunter2-supersecret" key=AKIAIOSFODNN7EXAMPLE');
+check(
+  "weiter vorn stehender Treffer eines anderen Musters wird in der Vorschau redigiert",
+  earlier.length === 1 && earlier[0].kind === "AWS Access Key" && !earlier[0].preview.includes("hunter2"),
+);
+const many = Array.from({ length: 7 }, (_, i) => ({ kind: "K", preview: `p${i}` }));
+check("describeSecretHits kappt auf max und nennt den Rest", describeSecretHits(many) === "K (p0) · K (p1) · K (p2) · K (p3) · K (p4) · … +2 weitere");
 
 for (const r of results) console.log(r);
 console.log(`\n${results.length - failed} passed, ${failed} failed`);
