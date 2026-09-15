@@ -43,6 +43,7 @@ import type {
 } from "../shared/protocol";
 import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultEffortForModel } from "./modelCatalog";
 import type { Collision } from "../shared/collision";
+import { gateNoticeText } from "../shared/gate-report";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
 import { loadUiPrefs, saveUiPrefs, type ViewId } from "./uiPrefs";
 import { notifyOsPermission, dismissOsPermission, notifyOsAuthRelogin } from "./osNotify";
@@ -1087,11 +1088,8 @@ export const useStore = create<MadsState>((set) => {
 
       case "gate_result":
         patchAgent(msg.agentId, { gate: { ok: msg.ok, steps: msg.steps } });
-        notice(
-          msg.agentId,
-          msg.ok ? "ok" : "err",
-          `Clean-Code-Gate: ${msg.ok ? "grün" : "rot"} — ${msg.steps.map((s) => `${s.name}:${s.status}`).join(", ")}`,
-        );
+        // Rote Steps mit ihrer (maskierten) Summary — `name:status` allein sagt nicht, WAS rot ist.
+        notice(msg.agentId, msg.ok ? "ok" : "err", gateNoticeText(msg.ok, msg.steps));
         break;
 
       case "devserver_status":

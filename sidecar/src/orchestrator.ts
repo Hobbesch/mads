@@ -22,6 +22,7 @@ import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } fro
 import { autopilotDecision } from "../../shared/autopilot.js";
 import { acquireProjectLock, ensureMadsDir, loadPrompts, loadRegistry, loadTargets, mergeRegistry, releaseProjectLock, savePrompts, saveRegistry, saveTargets, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
+import { gateBlockedPrMarkdown } from "../../shared/gate-report.js";
 import { parseDiffRegions, detectCollisions, type AgentRegions } from "../../shared/collision.js";
 import { detectTrespass, pathMatches, type TrespassFinding } from "../../shared/ownership.js";
 import type { OwnershipRule, ChangedRegion } from "../../shared/protocol.js";
@@ -36,7 +37,7 @@ const SHARED_LANDFIRST_GLOBS = [
   "**/pnpm-lock.yaml",
   "**/go.sum",
 ];
-import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, AutopilotLevel, ResumableAgent, SavedPrompt, OpenReviewStreamMsg, StartAgentMsg, SandboxMode, InvestigationTarget } from "../../shared/protocol.js";
+import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, AutopilotLevel, ResumableAgent, SavedPrompt, OpenReviewStreamMsg, StartAgentMsg, SandboxMode, InvestigationTarget, GateStep } from "../../shared/protocol.js";
 import conflictPlaybook from "../playbooks/conflict-resolution.md";
 import { loadAccounts, pruneCooldowns, saveAccounts } from "./accounts.js";
 import { AccountRelink } from "./accountRelink.js";
@@ -1144,11 +1145,12 @@ export class Orchestrator {
     // P6: kein roter PR — erst das Clean-Code-Gate.
     const gate = await this.handleGate(agentId);
     if (!gate.ok) {
+      // Rote Steps MIT Summary (Secret-Treffer nur maskiert) — „siehe oben" allein ließ den Agenten raten.
       this.emit({
         ...envelope(),
         type: "agent_event",
         agentId,
-        event: { kind: "assistant_text", text: "⛔ PR nicht erstellt — Clean-Code-Gate ist rot (siehe oben)." },
+        event: { kind: "assistant_text", text: gateBlockedPrMarkdown(gate.steps) },
       });
       return;
     }
@@ -1569,17 +1571,12 @@ export class Orchestrator {
   }
 
   // ---------------------------------------------------------------- Gate (P6)
-  private async handleGate(agentId: string): Promise<{ ok: boolean }> {
+  private async handleGate(agentId: string): Promise<{ ok: boolean; steps: GateStep[] }> {
     const s = this.pool.get(agentId);
     if (!s || !s.worktreePath || !this.project) {
-      this.emit({
-        ...envelope(),
-        type: "gate_result",
-        agentId,
-        ok: false,
-        steps: [{ name: "gate", status: "fail", summary: "Kein Worktree/Projekt" }],
-      });
-      return { ok: false };
+      const steps: GateStep[] = [{ name: "gate", status: "fail", summary: "Kein Worktree/Projekt" }];
+      this.emit({ ...envelope(), type: "gate_result", agentId, ok: false, steps });
+      return { ok: false, steps };
     }
     const res = await runGate(s.worktreePath, this.project.defaultBranch);
     // Projekt-Verbund (§4.3.1): berührt dieser Branch eine Contract-Datei, entsteht ein Thread und
@@ -1592,7 +1589,7 @@ export class Orchestrator {
       log(`[orchestrator] Verbund-Prüfung im Gate fehlgeschlagen: ${String(e)}`);
     }
     this.emit({ ...envelope(), type: "gate_result", agentId, ok: res.ok, steps: res.steps, contract });
-    return { ok: res.ok };
+    return { ok: res.ok, steps: res.steps };
   }
 
   // ---------------------------------------------------------- Persistenz/Resume (P7)

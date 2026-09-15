@@ -1838,6 +1838,7 @@ button.primary:hover {
 .tl-notice {
   flex: 1;
   font-size: 13px;
+  white-space: pre-line; /* mehrzeilige Notices, z. B. Gate-Details je rotem Step */
 }
 .tl-notice.ok {
   color: #28a745;
