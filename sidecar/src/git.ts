@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { ensureMadsDir } from "./persistence.js";
 import type { EscalationKind, PullRequestInfo, PrChecksState } from "../../shared/protocol.js";
-import { scanSecrets, type SecretHit } from "../../shared/secrets.js";
+import { describeSecretHits, scanSecrets, type SecretHit } from "../../shared/secrets.js";
 import { log } from "./io.js";
 import { planAdrCollisionRenames } from "../../shared/adr.js";
 import { isArtifactPath } from "../../shared/commit-hygiene.js";
@@ -1136,34 +1136,88 @@ export async function gitStatus(
   };
 }
 
+/** Secret-Treffer eines einzelnen Branch-Commits (Kurz-SHA). */
+export interface CommitSecretHits {
+  sha: string;
+  hits: SecretHit[];
+}
+
+/**
+ * Secret-Scan über JEDEN Commit in origin/<base>..HEAD — nicht nur den Netto-Diff: ein in Commit A
+ * eingeführtes und in Commit B wieder entferntes Secret verschwindet aus dem Netto-Diff, bleibt aber
+ * in der Historie, die gepusht wird. Gemeinsame Quelle für den Push-Scan (secretGateBeforePush) UND
+ * das Clean-Code-Gate (gate.ts): prüfen beide nicht denselben Bereich, ist das Gate grün und „PR
+ * erstellen" scheitert danach trotzdem am Push (Vorfall powerblox-gis, 2026-09-15).
+ * `null` = nicht prüfbar (origin/<base> unbekannt, git-Fehler). Holt origin/<base> NICHT selbst.
+ */
+export async function scanBranchHistory(worktree: string, base: string): Promise<CommitSecretHits[] | null> {
+  const baseRef = `origin/${base}`;
+  const exists = await git(["-C", worktree, "rev-parse", "--verify", "--quiet", baseRef], worktree);
+  if (exists.code !== 0) return null;
+  // Jeder Commit beginnt mit der Zeile „\x1e<sha>". Patch-Zeilen beginnen nie mit \x1e (sondern mit
+  // „+", „-", „ ", „@@", „diff" …) — die Zuordnung Treffer → Commit ist damit eindeutig.
+  const log = await git(
+    ["-C", worktree, "log", "-p", "--no-color", "--no-merges", "--format=%x1e%h", `${baseRef}..HEAD`],
+    worktree,
+  );
+  if (log.code !== 0) return null;
+  const found: CommitSecretHits[] = [];
+  let sha = "?";
+  let patch: string[] = [];
+  const flush = () => {
+    const hits = scanSecrets(patch.join("\n"));
+    if (hits.length) found.push({ sha, hits });
+  };
+  for (const line of log.stdout.split("\n")) {
+    if (!line.startsWith("\x1e")) {
+      patch.push(line);
+      continue;
+    }
+    flush();
+    sha = line.slice(1).trim() || "?";
+    patch = [];
+  }
+  flush();
+  return found;
+}
+
+/**
+ * Meldung für Secret-Treffer in der Branch-Historie — derselbe Wortlaut in Gate und Push-Scan. Nur
+ * Art + maskierte Vorschau, nie Klartext. Sagt, was zu tun ist: ein Korrektur-Commit obendrauf reicht
+ * NICHT, die betroffenen lokalen Commits müssen gesquasht/umgeschrieben werden. `reset --soft` auf die
+ * merge-base (nicht auf origin/<base>): sonst drehte der neue Commit inzwischen gelandete Änderungen zurück.
+ */
+export function secretHistoryMessage(found: CommitSecretHits[], base: string): string {
+  const total = found.reduce((n, c) => n + c.hits.length, 0);
+  const perCommit = found.slice(0, 5).map((c) => `Commit ${c.sha}: ${describeSecretHits(c.hits, 3)}`);
+  if (found.length > 5) perCommit.push(`… +${found.length - 5} weitere Commits`);
+  return (
+    `${total} Treffer in der Commit-Historie (${perCommit.join("; ")}). ` +
+    `Ein Korrektur-Commit obendrauf reicht NICHT — die Historie wird mitgepusht. Secret aus den Dateien ` +
+    `entfernen, dann die betroffenen lokalen Commits squashen/umschreiben, z. B. ` +
+    `\`git reset --soft $(git merge-base origin/${base} HEAD)\` und neu committen. War der Wert echt: rotieren.`
+  );
+}
+
 /**
  * LEAK-1: Fail-closed Secret-Scan VOR jedem Push zu origin. Verhindert, dass ein (ggf. von
  * untrusted Repo-Inhalt geschriebenes) Secret ins — bei mads öffentliche — Remote gelangt.
- * Scannt den Diff der Branch-Commits gegen origin/<base>. Treffer → Push wird verweigert.
- * Einziger Egress-Gate für manuellen Sync, 25 s-Auto-Sync und createPr.
+ * Scannt jeden zu pushenden Commit (scanBranchHistory — derselbe Bereich wie im Clean-Code-Gate).
+ * Treffer → Push wird verweigert. Einziger Egress-Gate für manuellen Sync, 25 s-Auto-Sync und createPr.
  */
 async function secretGateBeforePush(
   worktree: string,
   base: string,
 ): Promise<{ ok: true } | { ok: false; kind: EscalationKind; error: string }> {
   await run("git", ["-C", worktree, "fetch", "origin", base], worktree);
-  const baseRef = `origin/${base}`;
-  const exists = await git(["-C", worktree, "rev-parse", "--verify", "--quiet", baseRef], worktree);
-  if (exists.code !== 0) return { ok: true }; // Basis remote unbekannt → Scan nicht möglich (selten)
-  // JEDEN gepushten Commit prüfen (nicht nur den Netto-Diff): ein in Commit A eingeführtes und in
-  // Commit B wieder entferntes Secret verschwindet aus dem Netto-Diff, bleibt aber in der Historie,
-  // die gepusht wird. `git log -p <base>..HEAD` liefert die Patches ALLER dieser Commits.
-  const diff = await git(["-C", worktree, "log", "-p", "--no-color", "--no-merges", `${baseRef}..HEAD`], worktree);
-  if (diff.code !== 0) return { ok: true };
-  const hits = scanSecrets(diff.stdout);
-  if (hits.length === 0) return { ok: true };
-  const kinds = [...new Set(hits.map((h) => h.kind))].join(", ");
+  const found = await scanBranchHistory(worktree, base);
+  // null: Basis remote unbekannt / git-Fehler → Scan nicht möglich (selten)
+  if (!found || found.length === 0) return { ok: true };
+  const kinds = [...new Set(found.flatMap((c) => c.hits.map((h) => h.kind)))].join(", ");
   return {
     ok: false,
     kind: "secret_detected",
-    error:
-      `🔒 Push blockiert: mögliche Secrets in den zu pushenden Änderungen (${kinds}; ${hits.length} Treffer). ` +
-      `Entferne sie aus den Commits (und rotiere den Wert), bevor erneut gepusht wird.`,
+    error: `🔒 Push blockiert: mögliche Secrets in den zu pushenden Commits (${kinds}). ${secretHistoryMessage(found, base)}`,
   };
 }
 

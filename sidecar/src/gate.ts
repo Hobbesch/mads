@@ -1,14 +1,14 @@
 /**
  * P6 Clean-Code-Gate: führt projekt-erkannte Checks im Worktree aus
- * (lint / type-check / test) plus einen deterministischen Secret-Scan über den Diff.
+ * (lint / type-check / test) plus einen deterministischen Secret-Scan über Diff und Branch-Commits.
  * Nicht-anwendbare Checks werden übersprungen (skip), nicht als Fehler gewertet.
  *
  * Siehe docs/design/01-architecture.md §8.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { run } from "./git.js";
-import { scanSecrets } from "../../shared/secrets.js";
+import { run, scanBranchHistory, secretHistoryMessage } from "./git.js";
+import { describeSecretHits, scanSecrets } from "../../shared/secrets.js";
 import type { GateStep, GateStepStatus } from "../../shared/protocol.js";
 
 async function hasCmd(name: string): Promise<boolean> {
@@ -100,11 +100,19 @@ export async function runGate(
   }
 
   // ---- Secret-Scan (immer) ----
+  // Zwei Bereiche, beide müssen sauber sein: (1) der Netto-Diff inkl. Working Tree — erfasst auch
+  // Uncommittetes; (2) jeder Branch-Commit einzeln — GENAU der Bereich des Push-Scans. Ohne (2) war
+  // das Gate grün, während „PR erstellen" danach am Push-Scan scheiterte: Treffer in Commit A
+  // eingeführt, in Commit B korrigiert (Vorfall powerblox-gis, 2026-09-15).
   await run("git", ["-C", worktree, "fetch", "origin"], worktree);
   const diff = await run("git", ["-C", worktree, "diff", "--merge-base", `origin/${defaultBranch}`], worktree);
   const hits = scanSecrets(diff.stdout);
   if (hits.length === 0) add("secret-scan", "pass", "keine Secrets im Diff");
-  else add("secret-scan", "fail", `${hits.length} Treffer: ${hits.map((h) => `${h.kind} (${h.preview})`).join(" · ")}`);
+  else add("secret-scan", "fail", `${hits.length} Treffer: ${describeSecretHits(hits)}`);
+  const history = await scanBranchHistory(worktree, defaultBranch);
+  if (history === null) add("secret-scan-commits", "skip", `origin/${defaultBranch} nicht auflösbar — Commit-Historie ungeprüft`);
+  else if (history.length === 0) add("secret-scan-commits", "pass", "keine Secrets in den Branch-Commits");
+  else add("secret-scan-commits", "fail", secretHistoryMessage(history, defaultBranch));
 
   if (!steps.some((s) => s.status !== "skip")) {
     add("hinweis", "skip", "keine ausführbaren Checks erkannt (lint/type/test)");
