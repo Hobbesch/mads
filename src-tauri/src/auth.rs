@@ -11,10 +11,10 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
-use rand::rngs::OsRng;
-use rand::{Rng, RngCore, TryRngCore};
+use rand::rngs::SysRng;
+use rand::{Rng, RngExt, TryRng};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -75,7 +75,7 @@ impl AuthState {
 
     /// Einen 6-stelligen PIN ausgeben (überschreibt einen evtl. offenen), 60 s gültig, ≤5 Versuche.
     pub fn issue_pin(&self) -> String {
-        let pin = format!("{:06}", OsRng.unwrap_err().random_range(0u32..1_000_000));
+        let pin = format!("{:06}", SysRng.unwrap_err().random_range(0u32..1_000_000));
         *self.pin.lock().unwrap() = Some(PendingPin {
             pin: pin.clone(),
             expires_at: SystemTime::now() + PIN_TTL,
@@ -191,18 +191,19 @@ impl AuthState {
 // ─────────────────────────────────────────────────────────────── Helpers
 
 fn hash_secret(secret: &str) -> Result<String, String> {
+    // 16 Byte Salt direkt aus dem System-RNG; password-hash 0.6 nimmt rohe Bytes und
+    // B64-kodiert sie selbst in den PHC-String (vorher: SaltString::encode_b64).
     let mut salt_bytes = [0u8; 16];
-    OsRng.unwrap_err().fill_bytes(&mut salt_bytes);
-    let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| e.to_string())?;
+    SysRng.unwrap_err().fill_bytes(&mut salt_bytes);
     Ok(Argon2::default()
-        .hash_password(secret.as_bytes(), &salt)
+        .hash_password_with_salt(secret.as_bytes(), &salt_bytes)
         .map_err(|e| e.to_string())?
         .to_string())
 }
 
 fn hex_rand(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    OsRng.unwrap_err().fill_bytes(&mut buf);
+    SysRng.unwrap_err().fill_bytes(&mut buf);
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes * 2);
     for b in buf {
