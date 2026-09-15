@@ -42,7 +42,7 @@ tokio-rustls = "0.26"
 rustls = "0.23"
 rustls-pki-types = "1"
 rcgen = "0.14"
-mdns-sd = "0.20"
+mdns-sd = "0.21"
 futures-util = "0.3"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 argon2 = "0.5"
