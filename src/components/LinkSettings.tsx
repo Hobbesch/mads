@@ -49,6 +49,17 @@ export function LinkSettings() {
   const suggestions = (link?.suggestions ?? []).filter((s) => !patterns.includes(s));
   const configured = !!link?.config;
 
+  // Warum der Speichern-Knopf gesperrt ist — sonst klickt der Mensch ins Leere und hält den
+  // Verbund für kaputt. Die Gegenseite ist das einzige Pflichtfeld (der Contract darf leer
+  // bleiben: dann ist dieses Repo reiner Consumer).
+  const blocked = !peerRoot.trim()
+    ? "Erst die Gegenseite wählen — ohne das Repo des Partners gibt es nichts zu koppeln."
+    : !dirty
+      ? configured
+        ? "Keine Änderungen gegenüber dem gespeicherten Verbund."
+        : null
+      : null;
+
   const save = () => {
     const config: ProjectLinkConfig = {
       v: 1,
@@ -217,7 +228,7 @@ export function LinkSettings() {
       </select>
 
       <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-        <button className="primary" disabled={!peerRoot.trim() || !dirty} onClick={save}>
+        <button className="primary" disabled={!!blocked} onClick={save} title={blocked ?? undefined}>
           {configured ? "Verbund aktualisieren" : "Verbund einrichten"}
         </button>
         {configured && (
@@ -232,6 +243,11 @@ export function LinkSettings() {
           </button>
         )}
       </div>
+      {blocked && (
+        <div className="settings-hint" style={{ marginTop: 8 }}>
+          {blocked}
+        </div>
+      )}
       {configured && (
         <div className="settings-hint" style={{ marginTop: 8 }}>
           Damit der Verbund <strong>aktiv</strong> wird, muss die Gegenseite dieses Repo ebenfalls als

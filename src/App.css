@@ -618,6 +618,17 @@ button.primary {
 button.primary:hover {
   filter: brightness(1.08);
 }
+/* Deaktiviert muss auch deaktiviert AUSSEHEN. Ohne das sieht ein gesperrter Button
+   (z. B. „Verbund einrichten", solange die Gegenseite fehlt) voll aktiv aus, inkl.
+   Zeigefinger und Hover-Aufhellung — der Mensch klickt ins Leere und hält es für einen
+   kaputten Knopf. Spezifischere Regeln weiter unten gewinnen weiterhin. */
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+button:disabled:hover {
+  filter: none;
+}
 .fatal-error {
   position: fixed;
   inset: 0;
