@@ -1051,6 +1051,38 @@ mod tests {
         ws
     }
 
+    /// Die `pair-reply` trägt die Endpunkte mit — end-to-end über eine echte TLS-Verbindung, und
+    /// mit dem PORT DES LISTENERS, nicht dem Wunschport. Daran hängt der Fernzugriff: nur was hier
+    /// ankommt, merkt sich das Gerät, und ohne das findet es den Mac ausserhalb des WLAN nie wieder.
+    #[tokio::test]
+    async fn pair_reply_carries_reachable_endpoints() {
+        let auth = test_auth();
+        let (tee, _keep) = broadcast::channel::<String>(64);
+        let (port, accept) =
+            bind_and_serve(test_config(), tee, noop_sink(), auth.clone(), 0, None).await.expect("bind_and_serve");
+
+        let mut ws = connect_ws_client(port).await;
+        let pin = auth.issue_pin();
+        ws.send(Message::text(serde_json::json!({"channel":"pair","pin":pin,"name":"test"}).to_string()))
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout")
+            .expect("stream")
+            .expect("ws");
+
+        let Message::Text(t) = reply else { panic!("erwartete Text-Reply: {reply:?}") };
+        let v: serde_json::Value = serde_json::from_str(t.as_str()).expect("JSON");
+        let endpoints = v["endpoints"].as_array().expect("endpoints-Feld fehlt");
+        // Auf einer Maschine ganz ohne Netz-Interface wäre die Liste leer — dann ist nichts zu prüfen.
+        for ep in endpoints {
+            let ep = ep.as_str().expect("Endpunkt ist ein String");
+            assert!(ep.ends_with(&format!(":{port}")), "falscher Port in {ep} (erwartet {port})");
+        }
+        accept.abort();
+    }
+
     /// P0.2: der stdout-Tee erreicht einen (gepaarten) TLS-WSS-Client end-to-end.
     #[tokio::test]
     async fn tee_reaches_tls_ws_client() {
