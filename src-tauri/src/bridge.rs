@@ -272,11 +272,14 @@ pub struct Bridge {
     pub spki_fp_hex: String,
     accept: tokio::task::JoinHandle<()>,
     mdns: mdns_sd::ServiceDaemon,
+    /// Hält die annoncierte `addr` bei einem Netzwechsel aktuell (siehe `advertise`).
+    addr_refresh: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for Bridge {
     fn drop(&mut self) {
         self.accept.abort();
+        self.addr_refresh.abort();
         let _ = self.mdns.shutdown();
     }
 }
@@ -532,9 +535,9 @@ pub async fn start(
     // Der File-RPC-Scope jeder Verbindung wird host-seitig aufs Projekt begrenzt (RB-FS-1).
     let (port, accept) = bind_and_serve(tls_config, tee, forward, auth, desired_port, Some(repo_root)).await?;
     persist_port(&port_dir, port);
-    let mdns = advertise(port, &spki_fp_hex, &project, &instance_id)?;
+    let (mdns, addr_refresh) = advertise(port, &spki_fp_hex, &project, &instance_id)?;
 
-    Ok(Bridge { port, spki_fp_hex, accept, mdns })
+    Ok(Bridge { port, spki_fp_hex, accept, mdns, addr_refresh })
 }
 
 /// Stabile Identität EINES PROJEKTS (der SPKI-fp identifiziert seit der Host-Umstellung den Mac,
@@ -664,15 +667,25 @@ fn primary_lan_ip() -> Option<String> {
     }
 }
 
-fn advertise(port: u16, fp_hex: &str, project: &str, instance_id: &str) -> BridgeResult<mdns_sd::ServiceDaemon> {
-    use mdns_sd::{ServiceDaemon, ServiceInfo};
+/// mDNS-Hostname der Bridge. Steht zusätzlich als TXT-Key `host` im Record: hinter ihm hält
+/// `enable_addr_auto()` den A-Record bei jedem Netzwechsel aktuell, und er trägt — anders als eine
+/// aufgelöste Link-Local-Adresse — keine Interface-Zone, an der `URLSession` aussteigt. Er ist
+/// damit der verlässliche Rückfall der App, wenn `addr` nicht (mehr) stimmt.
+const BRIDGE_HOSTNAME: &str = "mads-remote.local";
 
-    let daemon = ServiceDaemon::new()?;
-    let pid = std::process::id();
+/// Takt, in dem geprüft wird, ob sich die primäre LAN-IP geändert hat.
+const ADDR_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Den `ServiceInfo` für den aktuellen Stand bauen. `lan_ip` ist bewusst ein Parameter statt eines
+/// internen Aufrufs: der Record wird bei einem IP-Wechsel mit neuem Wert NEU gebaut.
+fn service_info(
+    port: u16, fp_hex: &str, project: &str, instance_id: &str, lan_ip: Option<&str>,
+) -> BridgeResult<mdns_sd::ServiceInfo> {
+    use mdns_sd::ServiceInfo;
 
     let mut props: HashMap<String, String> = HashMap::new();
     props.insert("name".into(), format!("mads Remote ({project})"));
-    props.insert("pid".into(), pid.to_string());
+    props.insert("pid".into(), std::process::id().to_string());
     props.insert("project".into(), project.to_string());
     props.insert("pv".into(), PROTOCOL_VERSION.into());
     props.insert("fp".into(), fp_hex.to_string());
@@ -682,8 +695,9 @@ fn advertise(port: u16, fp_hex: &str, project: &str, instance_id: &str) -> Bridg
     // LAN-IP + Port direkt annoncieren, damit der Client OHNE fragile Bonjour-Auflösung verbindet
     // (die auf einem USB-verbundenen iPad die unbrauchbare link-local Adresse liefert).
     props.insert("port".into(), port.to_string());
-    if let Some(ip) = primary_lan_ip() {
-        props.insert("addr".into(), ip);
+    props.insert("host".into(), BRIDGE_HOSTNAME.into());
+    if let Some(ip) = lan_ip {
+        props.insert("addr".into(), ip.to_string());
     }
 
     // Stabiler Instanzname aus der `iid` (NICHT der pid, und nicht mehr dem fp — der ist seit der
@@ -691,18 +705,60 @@ fn advertise(port: u16, fp_hex: &str, project: &str, instance_id: &str) -> Bridg
     // denselben mDNS-Eintrag, statt einen neuen anzulegen. So sammeln sich keine Karteileichen
     // (`mads-<altepid>`) mit toten Ports mehr an, und zwei parallele Projekte bleiben getrennt.
     let instance = format!("mads-{instance_id}");
-    let service = ServiceInfo::new(
+    Ok(ServiceInfo::new(
         SERVICE_TYPE,
         &instance,
-        "mads-remote.local.", // host_name (Trailing-Dot Pflicht)
-        "",                    // IP-Platzhalter → von enable_addr_auto() gefüllt
+        &format!("{BRIDGE_HOSTNAME}."), // host_name (Trailing-Dot Pflicht)
+        "",                              // IP-Platzhalter → von enable_addr_auto() gefüllt
         port,
         props,
     )?
-    .enable_addr_auto();
+    .enable_addr_auto())
+}
 
-    daemon.register(service)?;
-    Ok(daemon)
+/// Service registrieren und die annoncierte `addr` aktuell HALTEN.
+///
+/// `addr` ist eine einmal berechnete TXT-Kopie der LAN-IP. Wechselt der Mac das Netz, zeigt sie ins
+/// Leere: die App wählt sie bevorzugt, bekommt aus einem fremden Subnetz nicht einmal ein RST und
+/// hängt bis in ihren Watchdog — während der A-Record hinter dem Hostnamen längst aktuell ist.
+/// Deshalb wird die IP periodisch verglichen und der Service bei Änderung neu registriert; das
+/// ersetzt den Eintrag und schickt eine Ankündigung raus.
+fn advertise(
+    port: u16, fp_hex: &str, project: &str, instance_id: &str,
+) -> BridgeResult<(mdns_sd::ServiceDaemon, tokio::task::JoinHandle<()>)> {
+    use mdns_sd::ServiceDaemon;
+
+    let daemon = ServiceDaemon::new()?;
+    let mut current = primary_lan_ip();
+    daemon.register(service_info(port, fp_hex, project, instance_id, current.as_deref())?)?;
+
+    let refresher = {
+        let daemon = daemon.clone();
+        let (fp, project, iid) = (fp_hex.to_string(), project.to_string(), instance_id.to_string());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(ADDR_REFRESH_INTERVAL).await;
+                let latest = primary_lan_ip();
+                if latest == current {
+                    continue;
+                }
+                match service_info(port, &fp, &project, &iid, latest.as_deref()) {
+                    Ok(info) => match daemon.register(info) {
+                        Ok(()) => {
+                            eprintln!("[mads:bridge] LAN-IP gewechselt, annonciert jetzt {latest:?}");
+                            current = latest;
+                        }
+                        // Nicht übernehmen: beim nächsten Takt erneut versuchen, statt den alten
+                        // Wert als „aktualisiert" zu verbuchen.
+                        Err(e) => eprintln!("[mads:bridge] mDNS-Update fehlgeschlagen: {e}"),
+                    },
+                    Err(e) => eprintln!("[mads:bridge] mDNS-Record nicht baubar: {e}"),
+                }
+            }
+        })
+    };
+
+    Ok((daemon, refresher))
 }
 
 // ─────────────────────────────────────────────────────────────── Accept-Loop
@@ -1244,8 +1300,33 @@ mod tests {
     #[tokio::test]
     async fn advertise_starts_or_is_sandboxed() {
         match advertise(12345, "deadbeef".repeat(8).as_str(), "test", "0123456789ab") {
-            Ok(daemon) => { let _ = daemon.shutdown(); }
+            Ok((daemon, refresher)) => {
+                refresher.abort();
+                let _ = daemon.shutdown();
+            }
             Err(e) => eprintln!("[test] mDNS in dieser Umgebung nicht verfügbar (ok in Sandbox): {e}"),
         }
+    }
+
+    /// Der Record trägt den Hostnamen als TXT-Key `host`. Ohne ihn hat die App keinen zonenfreien
+    /// Rückfall, wenn `addr` nach einem Netzwechsel ins Leere zeigt — genau der Fall, in dem sie
+    /// stumm in ihren Watchdog lief.
+    #[test]
+    fn service_info_carries_hostname_and_addr() {
+        let info = service_info(12345, "abc", "test", "0123456789ab", Some("10.0.0.24"))
+            .expect("ServiceInfo baubar");
+        assert_eq!(info.get_property_val_str("host"), Some(BRIDGE_HOSTNAME));
+        assert_eq!(info.get_property_val_str("addr"), Some("10.0.0.24"));
+        assert_eq!(info.get_property_val_str("port"), Some("12345"));
+        assert_eq!(info.get_hostname(), format!("{BRIDGE_HOSTNAME}."));
+    }
+
+    /// Ohne ermittelbare LAN-IP bleibt `addr` WEG statt leer zu stehen: ein leerer Wert wäre für
+    /// die App ein Kandidat, der garantiert in den Timeout läuft.
+    #[test]
+    fn service_info_omits_addr_when_unknown() {
+        let info = service_info(12345, "abc", "test", "0123456789ab", None).expect("ServiceInfo baubar");
+        assert_eq!(info.get_property_val_str("addr"), None);
+        assert_eq!(info.get_property_val_str("host"), Some(BRIDGE_HOSTNAME));
     }
 }
