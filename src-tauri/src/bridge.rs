@@ -138,6 +138,7 @@ fn process_client_frame(
     conn_fs: &files::FsScope,
     forward: &CommandSink,
     auth: &AuthState,
+    port: u16,
 ) -> Option<String> {
     let env: serde_json::Value = match serde_json::from_str(frame) {
         Ok(v) => v,
@@ -156,7 +157,9 @@ fn process_client_frame(
                     let device_id = token.split_once('.').map(|(a, _)| a.to_string()).unwrap_or_default();
                     eprintln!("[mads:bridge] Gerät gekoppelt: {name} ({device_id})");
                     *authed = Some(device_id.clone());
-                    Some(serde_json::json!({ "channel": "pair-reply", "ok": true, "token": token, "deviceId": device_id }).to_string())
+                    // Endpunkte GLEICH beim Koppeln mitgeben: danach findet das Geraet den Mac auch dort,
+                    // wo es kein mDNS gibt — ohne dass jemand eine Adresse abtippen muss.
+                    Some(serde_json::json!({ "channel": "pair-reply", "ok": true, "token": token, "deviceId": device_id, "endpoints": reachable_endpoints(port) }).to_string())
                 }
                 Err(e) => Some(serde_json::json!({ "channel": "pair-reply", "ok": false, "error": e }).to_string()),
             }
@@ -167,7 +170,9 @@ fn process_client_frame(
             match auth.verify_token(token) {
                 Ok(device_id) => {
                     *authed = Some(device_id.clone());
-                    Some(serde_json::json!({ "channel": "auth-reply", "ok": true, "deviceId": device_id }).to_string())
+                    // Bei JEDEM Reconnect neu: wechselt die Overlay- oder LAN-Adresse des Macs, lernt das
+                    // Geraet sie bei der naechsten Verbindung von selbst nach.
+                    Some(serde_json::json!({ "channel": "auth-reply", "ok": true, "deviceId": device_id, "endpoints": reachable_endpoints(port) }).to_string())
                 }
                 Err(e) => Some(serde_json::json!({ "channel": "auth-reply", "ok": false, "error": e }).to_string()),
             }
@@ -723,6 +728,57 @@ fn service_info(
 /// hängt bis in ihren Watchdog — während der A-Record hinter dem Hostnamen längst aktuell ist.
 /// Deshalb wird die IP periodisch verglichen und der Service bei Änderung neu registriert; das
 /// ersetzt den Eintrag und schickt eine Ankündigung raus.
+/// Wie viele Endpunkte einem Gerät höchstens gemeldet werden. Jeder kostet beim Verbinden einen
+/// Anklopf-Versuch — eine Maschine mit Docker-, VM- und VPN-Interfaces käme sonst auf ein Dutzend.
+const MAX_ENDPOINTS: usize = 8;
+
+/// Alle Adressen, unter denen diese Bridge erreichbar ist, als `host:port`.
+///
+/// Ein Overlay-Netz (Tailscale, Headscale, WireGuard) erscheint auf dem Mac als ganz normales
+/// Interface — seine Adresse steht hier also automatisch mit drin, ohne dass irgendwo ein Tunnel
+/// konfiguriert werden müsste. Die Liste geht nach `pair`/`auth` an das gekoppelte Gerät, das sie
+/// sich merkt: mDNS endet an der Netzgrenze, eine gemerkte Adresse nicht.
+///
+/// Loopback und Link-Local fliegen raus (nicht erreichbar bzw. zonenbehaftet, woran `URLSession`
+/// scheitert). Reihenfolge: LAN zuerst, dann CGNAT (100.64/10 — dort liegen die Overlay-Netze),
+/// dann der Rest; der Normalfall „zu Hause im WLAN" trifft damit sofort.
+///
+/// Bewusst nur IPv4: Tailscale & Co. vergeben immer auch eine 100.x, und eine IPv6-URL bräuchte
+/// eine Klammer-Schreibweise, die der Anklopf-Test auf der Gegenseite wieder auspacken müsste.
+fn reachable_endpoints(port: u16) -> Vec<String> {
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        eprintln!("[mads:bridge] Interface-Adressen nicht lesbar — Gerät bekommt keine Endpunkte");
+        return Vec::new();
+    };
+
+    let addrs = ifaces
+        .into_iter()
+        .filter_map(|i| match i.addr {
+            if_addrs::IfAddr::V4(v4) if !v4.ip.is_loopback() && !v4.ip.is_link_local() => Some(v4.ip),
+            _ => None,
+        })
+        .collect();
+
+    order_candidates(addrs).into_iter().map(|ip| format!("{ip}:{port}")).collect()
+}
+
+/// Entdoppeln, nach Rang sortieren und kappen. Pur gehalten, damit die Rangfolge prüfbar ist, ohne
+/// von den Interfaces der Testmaschine abzuhängen.
+fn order_candidates(mut addrs: Vec<Ipv4Addr>) -> Vec<Ipv4Addr> {
+    addrs.sort();
+    addrs.dedup();
+    // Stabile Sortierung NACH dem Dedup: gleiche Ränge behalten ihre numerische Ordnung.
+    addrs.sort_by_key(|ip| if ip.is_private() { 0 } else if is_cgnat(ip) { 1 } else { 2 });
+    addrs.truncate(MAX_ENDPOINTS);
+    addrs
+}
+
+/// 100.64.0.0/10 — der CGNAT-Bereich, aus dem Overlay-Netze ihre stabilen Adressen vergeben.
+fn is_cgnat(ip: &Ipv4Addr) -> bool {
+    let [a, b, _, _] = ip.octets();
+    a == 100 && (64..=127).contains(&b)
+}
+
 fn advertise(
     port: u16, fp_hex: &str, project: &str, instance_id: &str,
 ) -> BridgeResult<(mdns_sd::ServiceDaemon, tokio::task::JoinHandle<()>)> {
@@ -764,6 +820,9 @@ fn advertise(
 // ─────────────────────────────────────────────────────────────── Accept-Loop
 
 async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcast::Sender<String>, forward: CommandSink, auth: Arc<AuthState>, repo_root: Option<PathBuf>) {
+    // Der Port, den das gekoppelte Gerät sich merken soll — vom Listener selbst, nicht vom Wunsch:
+    // ist der persistierte Port belegt, läuft die Bridge auf einem ephemeren (siehe `bind_and_serve`).
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -779,7 +838,7 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcas
         let auth = auth.clone();
         let repo_root = repo_root.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(tcp, acceptor, rx, forward, auth, repo_root).await {
+            if let Err(e) = handle_conn(tcp, acceptor, rx, forward, auth, repo_root, port).await {
                 eprintln!("[mads:bridge] Verbindung {peer} beendet: {e}");
             }
         });
@@ -793,7 +852,7 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, tee: broadcas
 ///
 /// P0.3 hat NOCH keine Auth (kommt P1.2, hinter dem MADS_REMOTE_BRIDGE-Gate); ein verbundener
 /// Client darf also bereits Befehle senden — außer den per Deny-Liste gesperrten permissionMode.
-async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::Receiver<String>, forward: CommandSink, auth: Arc<AuthState>, repo_root: Option<PathBuf>) -> BridgeResult<()> {
+async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::Receiver<String>, forward: CommandSink, auth: Arc<AuthState>, repo_root: Option<PathBuf>, port: u16) -> BridgeResult<()> {
     let tls = acceptor.accept(tcp).await?;
 
     // Anti-CSWSH: ein nativer Client sendet KEINEN Origin-Header; ein Browser schon → ablehnen.
@@ -852,7 +911,7 @@ async fn handle_conn(tcp: TcpStream, acceptor: TlsAcceptor, mut rx: broadcast::R
             }
             incoming = source.next() => match incoming {
                 Some(Ok(Message::Text(t))) => {
-                    if let Some(reply) = process_client_frame(t.as_str(), &mut authed, &conn_fs, &forward, &auth) {
+                    if let Some(reply) = process_client_frame(t.as_str(), &mut authed, &conn_fs, &forward, &auth, port) {
                         sink.send(Message::text(reply)).await?;
                     }
                 }
@@ -1305,6 +1364,52 @@ mod tests {
                 let _ = daemon.shutdown();
             }
             Err(e) => eprintln!("[test] mDNS in dieser Umgebung nicht verfügbar (ok in Sandbox): {e}"),
+        }
+    }
+
+    /// LAN vor Overlay: zu Hause im WLAN soll der erste Kandidat sitzen. Das Overlay (CGNAT) ist
+    /// der Fernweg und steht dahinter, alles Übrige zuletzt.
+    #[test]
+    fn endpoint_order_puts_lan_before_overlay() {
+        let ordered = order_candidates(vec![
+            "203.0.113.7".parse().unwrap(),   // öffentlich
+            "100.101.102.103".parse().unwrap(), // Overlay (CGNAT)
+            "192.168.1.5".parse().unwrap(),   // LAN
+        ]);
+        let as_str: Vec<String> = ordered.iter().map(|i| i.to_string()).collect();
+        assert_eq!(as_str, vec!["192.168.1.5", "100.101.102.103", "203.0.113.7"]);
+    }
+
+    /// Doppelte Adressen (dasselbe Interface mehrfach gemeldet) zählen einmal, und die Liste bleibt
+    /// gedeckelt — jeder Kandidat kostet dem Gerät beim Verbinden einen Anklopf-Versuch.
+    #[test]
+    fn endpoint_order_dedupes_and_caps() {
+        let dupes = vec!["192.168.1.5".parse().unwrap(); 4];
+        assert_eq!(order_candidates(dupes).len(), 1);
+
+        let many: Vec<Ipv4Addr> = (1..=20).map(|n| format!("192.168.1.{n}").parse().unwrap()).collect();
+        assert_eq!(order_candidates(many).len(), MAX_ENDPOINTS);
+    }
+
+    /// Die CGNAT-Grenzen exakt: 100.64.0.0/10 ist der Bereich der Overlay-Netze, 100.63 und 100.128
+    /// gehören NICHT dazu.
+    #[test]
+    fn cgnat_range_boundaries() {
+        assert!(is_cgnat(&"100.64.0.0".parse().unwrap()));
+        assert!(is_cgnat(&"100.127.255.255".parse().unwrap()));
+        assert!(!is_cgnat(&"100.63.255.255".parse().unwrap()));
+        assert!(!is_cgnat(&"100.128.0.0".parse().unwrap()));
+        assert!(!is_cgnat(&"10.0.0.24".parse().unwrap()));
+    }
+
+    /// Was die Bridge tatsächlich meldet, darf nie Loopback oder Link-Local enthalten — beides
+    /// wäre für das Gerät ein garantierter Fehlschlag — und trägt immer den echten Port.
+    #[test]
+    fn reachable_endpoints_are_usable() {
+        for ep in reachable_endpoints(4711) {
+            assert!(ep.ends_with(":4711"), "Port fehlt: {ep}");
+            assert!(!ep.starts_with("127."), "Loopback gemeldet: {ep}");
+            assert!(!ep.starts_with("169.254."), "Link-Local gemeldet: {ep}");
         }
     }
 

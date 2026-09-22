@@ -43,6 +43,9 @@ rustls = "0.23"
 rustls-pki-types = "1"
 rcgen = "0.14"
 mdns-sd = "0.21"
+# Interface-Adressen aufzählen, um der gekoppelten App ALLE Endpunkte zu melden (LAN + Overlay).
+# Steckt ohnehin schon als Abhängigkeit von mdns-sd im Baum — kein neues Supply-Chain-Risiko.
+if-addrs = "0.15"
 futures-util = "0.3"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 argon2 = "0.6"
