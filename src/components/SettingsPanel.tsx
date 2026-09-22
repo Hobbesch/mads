@@ -15,13 +15,21 @@ export function SettingsPanel() {
   const setAutonomy = useStore((s) => s.setAutonomy);
   const reloginClaude = useStore((s) => s.reloginClaude);
   const checkAuthStatus = useStore((s) => s.checkAuthStatus);
+  const accounts = useStore((s) => s.accounts);
+  const authReloginAccountId = useStore((s) => s.authReloginAccountId);
   const [authStatus, setAuthStatus] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  // Anmeldung ist PRO KONTO (eigener Schlüsselbund-Eintrag je `CLAUDE_CONFIG_DIR`). Vorbelegt
+  // ist das Konto, dessen Auth gerade scheiterte, sonst das aktive — so trifft ein Klick ohne
+  // weitere Auswahl das richtige Konto.
+  const [pick, setPick] = useState<string>("");
+  const profiles = accounts?.profiles ?? [];
+  const targetId = pick || authReloginAccountId || accounts?.activeId || "";
 
   async function onCheckAuth() {
     setChecking(true);
     try {
-      setAuthStatus(await checkAuthStatus());
+      setAuthStatus(await checkAuthStatus(targetId || undefined));
     } catch (e) {
       setAuthStatus(`Status konnte nicht ermittelt werden: ${String(e)}`);
     } finally {
@@ -65,12 +73,31 @@ export function SettingsPanel() {
           <div className="settings-group-title">Anthropic-Login</div>
           <div className="settings-hint">
             mads nutzt deine bestehende Claude-Anmeldung (macOS-Schlüsselbund) und speichert selbst kein
-            Token. Auth-Fehler sind oft vorübergehend (erneut senden genügt); bei dauerhaftem
-            „Authentifizierung fehlgeschlagen" hier neu anmelden — es öffnet sich ein Terminal mit dem
-            Browser-Login. Danach den Stream erneut senden (kein Neustart nötig).
+            Token. Jedes Konto hat einen EIGENEN Anmelde-Eintrag (eigenes Config-Verzeichnis) — Anmeldung
+            und Status gelten deshalb immer für das hier gewählte Konto. Auth-Fehler sind oft vorübergehend
+            (erneut senden genügt); bei dauerhaftem „Authentifizierung fehlgeschlagen" hier neu anmelden —
+            es öffnet sich ein Terminal mit dem Browser-Login. Danach den Stream erneut senden (kein
+            Neustart nötig).
           </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-            <button onClick={() => void reloginClaude()} title="Öffnet ein Terminal mit dem Befehl claude auth login (Browser-OAuth)">
+          <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
+            {profiles.length > 1 && (
+              <select
+                value={targetId}
+                onChange={(e) => setPick(e.target.value)}
+                title="Konto, für das Anmeldung und Status gelten"
+                aria-label="Claude-Konto"
+              >
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id} title={p.email ?? p.configDir}>
+                    {p.email ? `${p.label} · ${p.email}` : p.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              onClick={() => void reloginClaude(targetId || undefined)}
+              title="Öffnet ein Terminal mit dem Browser-Login (claude auth login) für das gewählte Konto — mit dessen Config-Verzeichnis"
+            >
               Bei Claude neu anmelden
             </button>
             <button onClick={() => void onCheckAuth()} disabled={checking}>
