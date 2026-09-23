@@ -74,6 +74,7 @@ function resolveRel(baseDir: string, rel: string): string {
   return "/" + out.join("/");
 }
 import { EDIT_TOOLS, toEditOp, editPath, type EditOp } from "./editOps";
+import { createTranscriptWriter } from "./transcriptSeal";
 
 export type AgentRole = "integrator" | "sub";
 export type { ViewId } from "./uiPrefs";
@@ -631,21 +632,29 @@ function isWhisperHallucination(text: string): boolean {
 // Transkript-Persistenz (Session-Restore): den UI-Verlauf je Stream debounced auf Platte
 // schreiben (<repoRoot>/.mads/transcripts/<agentId>.json), damit er nach dem Neustart
 // wieder erscheint. Pro Agent ein Timer; häufige Events werden gebündelt.
-const transcriptTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// Das Siegel (transcriptSeal.ts) sperrt geschlossene Streams — dort steht, warum: ohne es
+// überschrieben die Abschluss-Events nach einem Stop den ganzen Dialogverlauf auf Platte.
+const transcriptWriter = createTranscriptWriter({
+  schedule: (fn, ms) => setTimeout(fn, ms),
+  cancel: (timer) => clearTimeout(timer),
+  write: (agentId) => {
+    const st = useStore.getState();
+    const repo = st.project?.repoRoot;
+    const evs = st.events[agentId];
+    if (!repo || !evs || evs.length === 0) return;
+    void invoke("mads_save_transcript", { repoRoot: repo, agentId, content: JSON.stringify(evs) }).catch(() => {});
+  },
+});
 function scheduleTranscriptSave(agentId: string): void {
-  const existing = transcriptTimers.get(agentId);
-  if (existing) clearTimeout(existing);
-  transcriptTimers.set(
-    agentId,
-    setTimeout(() => {
-      transcriptTimers.delete(agentId);
-      const st = useStore.getState();
-      const repo = st.project?.repoRoot;
-      const evs = st.events[agentId];
-      if (!repo || !evs || evs.length === 0) return;
-      void invoke("mads_save_transcript", { repoRoot: repo, agentId, content: JSON.stringify(evs) }).catch(() => {});
-    }, 1500),
-  );
+  transcriptWriter.save(agentId);
+}
+/** Stream geschlossen → Verlauf auf Platte einfrieren; er bleibt als Archiv liegen. */
+function sealTranscript(agentId: string): void {
+  transcriptWriter.seal(agentId);
+}
+/** Neuer bzw. fortgesetzter Stream unter dieser agentId → wieder mitschreiben. */
+function unsealTranscript(agentId: string): void {
+  transcriptWriter.unseal(agentId);
 }
 
 function slugifyBranch(label: string): string {
@@ -697,6 +706,7 @@ export const useStore = create<MadsState>((set) => {
   /** Eine Kachel lokal entfernen (Agent + Verlauf + Diff-Panes + Dev-Log). Genutzt von stopAgent,
    *  Review-Merge/-Verwerfen. */
   function removeAgentLocal(id: string) {
+    sealTranscript(id); // gleicher Grund wie in stopAgent
     set((s) => {
       const agents = { ...s.agents };
       delete agents[id];
@@ -1086,6 +1096,7 @@ export const useStore = create<MadsState>((set) => {
           };
           return { agents: { ...s.agents, [id]: vm }, order: [...s.order, id], selectedId: id };
         });
+        unsealTranscript(id); // frische Kachel unter dieser id → Verlauf darf wieder mitschreiben
         followRoot(id); // Kachel wird sofort ausgewählt → Explorer/Core auf ihren Worktree setzen
         notice(id, "accent", `🔍 Review-Stream für PR #${msg.reviewPr} (@${msg.author}) geöffnet — Dev-Server starten, prüfen, dann „PR mergen".`);
         break;
@@ -1721,6 +1732,7 @@ export const useStore = create<MadsState>((set) => {
         dirty: false,
         live: true,
       };
+      unsealTranscript(id);
       set((s) => ({ agents: { ...s.agents, [id]: agent }, order: [...s.order, id], selectedId: id }));
       // Start-Prompt NICHT optimistisch pushen: der Sidecar emittiert ihn als user_text-Event
       // (session.start, vor der Worktree-Erstellung → praktisch instant) — so ist er auf Mac
@@ -2079,6 +2091,10 @@ export const useStore = create<MadsState>((set) => {
     },
 
     stopAgent: async (id, removeWorktree) => {
+      // VOR dem Senden versiegeln: der Sidecar schickt nach dem Stop noch Abschluss-Events, und
+      // die legten den gerade geleerten Verlauf mit einer einzigen Zeile neu an — der nächste
+      // Save schrieb sie über das Transkript. Danach war der ganze Dialog weg.
+      sealTranscript(id);
       await sendHost({ ...envelope(), type: "stop_agent", agentId: id, removeWorktree });
       set((s) => {
         const agents = { ...s.agents };
@@ -2158,6 +2174,7 @@ export const useStore = create<MadsState>((set) => {
         order: [...s.order, newId],
         selectedId: newId,
       }));
+      unsealTranscript(newId);
       notice(integratorId, "accent", `↗ Main-Änderungen → neuer Sub-Stream „${label}"`);
       await sendHost({ ...envelope(), type: "outsource_main", integratorId, agentId: newId, label, branch });
     },
@@ -2512,6 +2529,7 @@ export const useStore = create<MadsState>((set) => {
         // Auftrag über das Resume hinweg behalten — der automatische „Fortsetzen"-Nudge ersetzt ihn nicht.
         lastPrompt: r.lastPrompt ?? existing?.lastPrompt,
       };
+      unsealTranscript(r.agentId);
       set((s) => ({
         agents: { ...s.agents, [r.agentId]: agent },
         order: s.order.includes(r.agentId) ? s.order : [...s.order, r.agentId],
