@@ -247,28 +247,56 @@ export function Inspector() {
       onConfirm: () => void integratePr(selectedId, keep),
     });
 
-  // Stop entfernt Worktree + Branch → bei ungesicherter Arbeit erst warnen (sonst Verlust).
+  // Stop wird IMMER bestätigt — auch wenn git nichts Ungesichertes meldet. Die frühere Abkürzung
+  // („sauber → sofort stoppen") stammte aus der Zeit, als Stop noch umkehrbar war. Seit dem
+  // Tombstone ist er endgültig: die Kachel kommt von selbst nicht wieder, ein laufender Auftrag
+  // bricht ab, und der Dialogverlauf ist aus der App verschwunden. `unsavedWork` misst dabei nur
+  // den GIT-Stand und sah davon nichts — ein Fehlklick (falsches Fenster getroffen, 23.09.2026)
+  // kostete so den gesamten Frage-Antwort-Verlauf eines fertigen Streams, ohne eine Rückfrage.
+  // Der Dialog ist abgestuft: rot mit „verwerfen", wenn wirklich Arbeit auf dem Spiel steht,
+  // sonst eine schlichte Bestätigung.
   const askStop = () => {
-    if (!unsavedWork(agent)) {
-      void stopAgent(selectedId, agent.role === "sub");
-      return;
-    }
+    const unsaved = unsavedWork(agent);
+    const busy = agent.status === "running" || agent.status === "starting";
     setConfirm({
-      title: "Stream stoppen — ungesicherte Arbeit",
-      danger: true,
+      title: unsaved ? "Stream stoppen — ungesicherte Arbeit" : "Stream endgültig schließen?",
+      danger: unsaved,
       body: (
         <>
           <p>
-            <strong>{agent.label}</strong> hat ungesicherte Arbeit{" "}
-            {agent.dirty ? "(uncommittete/untracked Änderungen)" : `(${agent.ahead} Commit(s) ohne PR)`}.
+            {unsaved ? (
+              <>
+                <strong>{agent.label}</strong> hat ungesicherte Arbeit{" "}
+                {agent.dirty ? "(uncommittete/untracked Änderungen)" : `(${agent.ahead} Commit(s) ohne PR)`}.
+              </>
+            ) : (
+              <>
+                <strong>{agent.label}</strong> wird dauerhaft geschlossen — die Kachel kommt von selbst nicht
+                wieder.
+              </>
+            )}
           </p>
-          <p>
-            Stoppen entfernt Worktree + Branch — diese Arbeit geht dann <strong>verloren</strong>. Besser erst
-            „Committen" bzw. „PR erstellen".
-          </p>
+          {busy && (
+            <p className="modal-hint danger">
+              <strong>Der Stream arbeitet gerade.</strong> Stoppen bricht den laufenden Auftrag ab. Wenn du ihn nur
+              anhalten willst: „Unterbrechen" im Composer.
+            </p>
+          )}
+          {unsaved ? (
+            <p>
+              Stoppen entfernt Worktree + Branch — diese Arbeit geht dann <strong>verloren</strong>. Besser erst
+              „Committen" bzw. „PR erstellen".
+            </p>
+          ) : (
+            <p>
+              Der <strong>Dialogverlauf</strong> verschwindet damit aus der App. Die Code-Arbeit bleibt: Worktree
+              und Branch werden nur entfernt, wenn nichts Uncommittetes darin liegt und der Stand restlos auf{" "}
+              <code>main</code> ist.
+            </p>
+          )}
         </>
       ),
-      confirmLabel: "Trotzdem stoppen & verwerfen",
+      confirmLabel: unsaved ? "Trotzdem stoppen & verwerfen" : "Stream schließen",
       onConfirm: () => void stopAgent(selectedId, agent.role === "sub"),
     });
   };
@@ -402,7 +430,7 @@ export function Inspector() {
     else if (step.kind === "integrate") askMerge(true); // Default = mergen + Stream BEHALTEN
     else if (step.kind === "outsource") askOutsource();
     else if (step.kind === "commit_release") askCommitRelease(); // Deploy-Fall: Release-Commit ist primär
-    else if (step.kind === "cleanup") void stopAgent(selectedId, true); // bereits gemergt → sicher
+    else if (step.kind === "cleanup") askStop(); // „sicher" heißt nur: kein CODE-Verlust — trotzdem fragen
   };
 
   // Gespeicherten Prompt in den Composer-ENTWURF einfügen (nie automatisch senden — der
@@ -642,7 +670,7 @@ export function Inspector() {
             <button
               className="step-primary cleanup"
               title="Diesen (hängenden) Stream entfernen"
-              onClick={() => void stopAgent(selectedId, agent.role === "sub")}
+              onClick={askStop}
             >
               ✕ Abbrechen
             </button>
