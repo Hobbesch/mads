@@ -1808,7 +1808,14 @@ export class Orchestrator {
     } catch (e) {
       log(`[orchestrator] worktree-seed-Erkennung fehlgeschlagen: ${String(e)}`);
     }
-    await run("git", ["-C", repoRoot, "fetch", "origin", "--prune"], repoRoot);
+    // Das Ergebnis MUSS ausgewertet werden. Schlägt der Prune fehl (klassisch: eine verwaiste
+    // `refs/…/<name>.lock` aus einem abgebrochenen git-Lauf — „cannot lock ref … File exists"),
+    // bricht git das Aufräumen der Tracking-Refs KOMPLETT ab. `refs/remotes/origin/*` zeigt dann
+    // Branches, die es auf GitHub längst nicht mehr gibt. Wurde das ignoriert, baute das
+    // Aufräum-Angebot unten auf Phantomen: 38 angebotene Branches, jeder einzelne bereits gelöscht.
+    const refreshed = await run("git", ["-C", repoRoot, "fetch", "origin", "--prune"], repoRoot);
+    const refreshErr = refreshed.code === 0 ? null : (refreshed.stderr || refreshed.stdout).trim().split("\n")[0]?.slice(0, 300);
+    if (refreshErr) log(`[orchestrator] reconcile: fetch --prune fehlgeschlagen (${refreshErr}) — Remote-Sicht ist womöglich veraltet`);
     const defaultBranch = this.project?.defaultBranch ?? "main";
     const ff = await fastForwardMain(repoRoot, defaultBranch);
     const mainFastForwarded = ff.ff;
@@ -2005,6 +2012,11 @@ export class Orchestrator {
     //     schlösse den PR.
     let mergedRemoteBranches: string[] = [];
     try {
+      // Kein Angebot auf veralteter Sicht: `findMergedRemoteBranches` liest ausschließlich lokale
+      // Tracking-Refs. Konnte der Prune oben sie nicht auffrischen, wären die „Leichen" in Wahrheit
+      // Phantome — und ein Klick auf „Auf origin löschen" liefe in lauter „remote ref does not
+      // exist". Lieber nichts anbieten und den Grund nennen als etwas Falsches anbieten.
+      if (refreshErr) throw new Error(`Remote-Stand nicht auffrischbar: ${refreshErr}`);
       const openHeads = (await listOpenPrs(repoRoot)).map((p) => p.headRefName);
       const stale = await findMergedRemoteBranches(repoRoot, defaultBranch, openHeads);
       mergedRemoteBranches = stale.map((b) => b.branch);

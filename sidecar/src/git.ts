@@ -521,6 +521,10 @@ async function remoteBranchIsInBase(
  * Jeder Branch wird UNMITTELBAR VOR dem Löschen erneut geprüft (Präfix, nicht <default>, Inhalt
  * restlos in origin/<default>): zwischen Angebot und Klick können Minuten liegen, und in denen
  * kann ein Stream neue Commits gepusht haben. Was die Prüfung nicht besteht, bleibt stehen.
+ *
+ * Voraussetzung dieser Prüfungen ist ein GELUNGENER `fetch --prune` — sie lesen lokale
+ * Tracking-Refs, nicht GitHub. Scheitert er, wird gar nichts angefasst und jeder Branch kommt
+ * mit dem git-Fehler als Begründung zurück.
  */
 export async function deleteRemoteBranches(
   repoRoot: string,
@@ -529,7 +533,16 @@ export async function deleteRemoteBranches(
 ): Promise<{ deleted: string[]; kept: { branch: string; reason: string }[] }> {
   const deleted: string[] = [];
   const kept: { branch: string; reason: string }[] = [];
-  await run("git", ["-C", repoRoot, "fetch", "--prune", "origin"], repoRoot);
+  // Ohne frische Sicht wird NICHTS gelöscht. Die Existenz-Prüfung unten liest lokale
+  // Tracking-Refs; konnte der Prune sie nicht auffrischen (klassisch: eine verwaiste
+  // `refs/…/<name>.lock` aus einem abgebrochenen git-Lauf, die das Ref-Aufräumen KOMPLETT
+  // abbricht), hält sie längst gelöschte Branches für vorhanden — und `push --delete` läuft
+  // dann pro Stück in „remote ref does not exist". Genau diese Fehlerwand entstand im Feld.
+  const refreshed = await run("git", ["-C", repoRoot, "fetch", "--prune", "origin"], repoRoot);
+  if (refreshed.code !== 0) {
+    const why = (refreshed.stderr || refreshed.stdout).trim().split("\n")[0]?.slice(0, 200) ?? "unbekannt";
+    return { deleted, kept: branches.map((branch) => ({ branch, reason: `Remote-Stand nicht auffrischbar — ${why}` })) };
+  }
   const baseRef = `origin/${defaultBranch}`;
   const baseTree = (await git(["-C", repoRoot, "rev-parse", `${baseRef}^{tree}`], repoRoot)).stdout.trim();
   if (!baseTree) return { deleted, kept: branches.map((branch) => ({ branch, reason: `${baseRef} nicht lesbar` })) };
