@@ -26,7 +26,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { branchHasOwnCommits, deleteRemoteBranches, findMergedRemoteBranches, gitStatus, pushBranch, resyncWorktreeAfterMerge, syncBranch } from "./git";
 
 const results: string[] = [];
@@ -206,6 +206,57 @@ async function main(): Promise<void> {
       del.kept.some((k) => k.branch === "fremd/leiche" && /kein mads-Branch/.test(k.reason)),
   );
   check("Löschen: jeder nicht gelöschte Branch trägt einen Grund", del.kept.every((k) => k.reason.length > 0));
+
+  // ── Verwaiste .lock-Datei: die Remote-Sicht ist Phantom ────────────────────────────────────
+  // Im Feld blockierte eine 0-Byte-Datei `refs/remotes/origin/<name>.lock` aus einem
+  // abgebrochenen git-Lauf das Aufräumen der Tracking-Refs KOMPLETT: `fetch --prune` endet mit
+  // Exit 1 und löscht KEINEN einzigen Ref. Das Aufräum-Angebot zählte daraufhin 38 Branches, die
+  // auf GitHub längst weg waren — ein Klick lief in 38 × „remote ref does not exist".
+  {
+    const refExists = (r: string, ref: string): boolean => {
+      try {
+        return git(["-C", r, "rev-parse", "--verify", "-q", ref]).trim().length > 0;
+      } catch {
+        return false; // rev-parse -q endet bei fehlendem Ref mit Code 1 → execFileSync wirft
+      }
+    };
+
+    // Phantom bauen: Branch auf origin anlegen, lokal holen, auf origin wieder löschen.
+    git(["-C", gh, "checkout", "-qB", "mads/phantom", "main"]);
+    git(["-C", gh, "push", "-q", "origin", "mads/phantom"]);
+    git(["-C", repo, "fetch", "-q", "origin"]);
+    git(["-C", gh, "push", "-q", "origin", "--delete", "mads/phantom"]);
+    check("Aufbau: der Tracking-Ref überlebt die Löschung auf origin", refExists(repo, "origin/mads/phantom"));
+
+    // Die verwaiste Lock-Datei, die den Prune killt.
+    const lock = join(repo, ".git", "refs", "remotes", "origin", "mads", "phantom.lock");
+    mkdirSync(dirname(lock), { recursive: true });
+    writeFileSync(lock, "");
+
+    // Beleg, WARUM das Angebot ein Tor braucht: die Suche liest nur lokale Refs und hält das
+    // Phantom für einen Aufräum-Kandidaten. Deshalb gibt der Orchestrator das Angebot nur frei,
+    // wenn der Prune davor gelungen ist.
+    const phantomOffer = await findMergedRemoteBranches(repo, "main", []);
+    check(
+      "ohne frischen Prune gilt das Phantom als Aufräum-Kandidat (darum das Angebots-Tor)",
+      phantomOffer.map((b) => b.branch).includes("mads/phantom"),
+    );
+
+    // Das Löschen selbst muss die veraltete Sicht erkennen und NICHTS anfassen.
+    const blocked = await deleteRemoteBranches(repo, "main", ["mads/phantom"]);
+    check("verwaiste .lock → es wird nichts gelöscht", blocked.deleted.length === 0);
+    check(
+      "…und jeder Branch kommt mit dem git-Fehler als Begründung zurück",
+      blocked.kept.length === 1 && /nicht auffrischbar/.test(blocked.kept[0]?.reason ?? ""),
+    );
+
+    // Lock weg → Prune läuft → das Phantom ist als „auf origin nicht mehr vorhanden" erkannt,
+    // ohne dass je ein `push --delete` versucht wurde.
+    rmSync(lock, { force: true });
+    const after = await deleteRemoteBranches(repo, "main", ["mads/phantom"]);
+    check("ohne .lock: kein Löschversuch, sondern die Feststellung, dass er schon weg ist", after.deleted.length === 0 && /nicht mehr vorhanden/.test(after.kept[0]?.reason ?? ""));
+    check("…und der veraltete Tracking-Ref ist jetzt weggeräumt", !refExists(repo, "origin/mads/phantom"));
+  }
 }
 
 main()
