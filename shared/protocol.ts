@@ -847,6 +847,17 @@ export interface StatusUpdateMsg extends BaseMsg {
   /** Sandbox-Betriebsart, in der dieser Stream WIRKLICH läuft (der Sidecar hat den Prozess mit
    *  genau diesen Sandbox-Optionen gestartet — die Oberfläche spiegelt nur). */
   sandboxMode?: SandboxMode;
+  /**
+   * Angefordertes Modell, Effort und Permission-Modus dieses Streams — aus derselben Quelle wie
+   * `accountId`/`sandboxMode`: der Sidecar besitzt den Prozess.
+   *
+   * Das Desktop-Frontend SETZT diese Werte und kennt sie damit ohnehin; ein Remote-Client hat
+   * dagegen keine andere Quelle und zeigte sonst dauerhaft „unbekannt" an. `model` ist das
+   * ANGEFORDERTE Modell (Picker-Wunsch) — das reale meldet `model_active` (siehe ModelActiveMsg).
+   */
+  model?: string;
+  effort?: EffortMode;
+  permissionMode?: PermissionMode;
 }
 
 export interface CostUpdateMsg extends BaseMsg {

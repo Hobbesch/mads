@@ -56,18 +56,40 @@ const HOST_MESSAGE_TYPES: &[&str] = &[
     "cleanup_worktree", "create_pr", "sync_branch", "gate_task", "integrate_pr",
     "set_autonomy", "set_autopilot", "set_model_effort", "outsource_main", "update_main",
     "start_devserver", "stop_devserver", "shutdown", "request_snapshot",
+    "set_sandbox_mode", "set_account", "request_accounts",
 ];
 
-/// Permission-Modi, die ein Remote-Client setzen DARF — ALLOW-LISTE (fail-closed): alles andere
-/// (`auto`, `acceptEdits`, `bypassPermissions`, `dontAsk` und jeder künftige Auto-Freigabe-Modus)
-/// würde Agent-Tool-Calls automatisch freigeben = stille Remote-RCE. `auto` ist bei mads GENAU der
-/// unbeaufsichtigte Ausführungsmodus (RB-AUTH-1). Eine Deny-Liste übersähe neue Modi → Allow-Liste.
-const REMOTE_ALLOWED_PERMISSION_MODES: &[&str] = &["default", "plan"];
+/// Permission-Modi, die ein Remote-Client setzen darf — ALLOW-LISTE (fail-closed): ein unbekannter
+/// oder nicht-stringförmiger Wert wird weiterhin verworfen.
+///
+/// RB-AUTH-1, Stand 2026-09-23: die Liste umfasst jetzt ALLE Modi, die auch der Mac-Picker anbietet
+/// (`Inspector.tsx`). Vorher waren nur `default`/`plan` erlaubt — `auto`, `acceptEdits` und
+/// `bypassPermissions` galten als „stille Remote-RCE", weil sie Agent-Tool-Calls ohne Rückfrage
+/// freigeben. Das stimmt unverändert: WER DIESE MODI AUS DER FERNE SETZT, LÄSST AGENTEN
+/// UNBEAUFSICHTIGT AUSFÜHREN. Die Beschränkung wurde auf ausdrückliche Entscheidung des Besitzers
+/// aufgehoben, damit das gekoppelte Gerät volle Parität zum Mac hat.
+///
+/// Was die Grenze weiterhin trägt: die Kopplung selbst (PIN/QR am Mac, widerrufbares Geräte-Token,
+/// TLS mit SPKI-Pinning) — ein Angreifer ohne Token kommt gar nicht bis hierher. Und
+/// `answer_permission` bleibt entschärft: `updatedInput`/`remember` werden weiterhin gestrichen
+/// (siehe unten), eine EINZELNE Freigabe kann also nach wie vor weder den Tool-Input umschreiben
+/// noch sich selbst verewigen.
+const REMOTE_ALLOWED_PERMISSION_MODES: &[&str] =
+    &["default", "acceptEdits", "plan", "auto", "bypassPermissions", "dontAsk"];
+
+/// Sandbox-Betriebsarten, die ein Remote-Client setzen darf (`SandboxMode` in shared/protocol.ts).
+/// Eigene Liste, weil `set_sandbox_mode` dasselbe Feld `mode` benutzt wie `set_permission_mode` —
+/// eine gemeinsame Prüfung würde „off" als Permission-Modus lesen und den Frame verwerfen.
+///
+/// `off` ist der Freigang: Egress unbeschränkt, Secret-Ablagen erreichbar. Dasselbe Zugeständnis
+/// wie oben — mit dem Geländer, das der Sidecar ohnehin zieht: Freigang wird nie persistiert, der
+/// Autopilot pusht darin nicht, und nach 15 Min. Inaktivität fällt der Stream automatisch zurück.
+const REMOTE_ALLOWED_SANDBOX_MODES: &[&str] = &["on", "targets", "off"];
 
 /// Validiert ein rohes WS-Text-Frame (Envelope) und gibt die KANONISCH re-serialisierte
 /// HostMessage (nur `msg`, ohne Envelope) zurück, die an den Sidecar-stdin geht. Fehler = Grund
 /// (der Frame wird verworfen). Kontrollen: (1) Kanal muss `command` sein; (2) `msg.type` in der
-/// Allowlist; (3) `permissionMode`/`mode` nicht in der Deny-Liste. Die Re-Serialisierung
+/// Allowlist; (3) `permissionMode`/`mode` in der jeweils zum Typ passenden Allow-Liste. Die Re-Serialisierung
 /// normalisiert das JSON — u. a. keine eingebetteten rohen Newlines → keine NDJSON-Injection
 /// (ein Frame == genau eine stdin-Zeile).
 /// Test-Convenience (parst + validiert). Der Laufzeit-Pfad nutzt `validate_command_value` auf dem
@@ -76,6 +98,20 @@ const REMOTE_ALLOWED_PERMISSION_MODES: &[&str] = &["default", "plan"];
 fn validate_command(frame: &str) -> Result<String, String> {
     let env: serde_json::Value = serde_json::from_str(frame).map_err(|_| "kein gültiges JSON".to_string())?;
     validate_command_value(&env)
+}
+
+/// Ein optionales Enum-Feld gegen seine Allow-Liste prüfen. Fehlend/`null` = ok (der Sidecar setzt
+/// dann seinen Default); alles andere muss ein String AUS der Liste sein — ein Array, Objekt oder
+/// unbekannter String wird abgelehnt, nicht stillschweigend ignoriert.
+fn check_enum_field(msg: &serde_json::Value, field: &str, allowed: &[&str]) -> Result<(), String> {
+    match msg.get(field) {
+        None => Ok(()),
+        Some(v) if v.is_null() => Ok(()),
+        Some(v) => match v.as_str() {
+            Some(s) if allowed.contains(&s) => Ok(()),
+            _ => Err(format!("Feld '{field}' hat keinen erlaubten Wert (erlaubt: {})", allowed.join("/"))),
+        },
+    }
 }
 
 /// Wie `validate_command`, aber auf einem BEREITS geparsten Envelope (spart den Doppel-Parse im
@@ -92,21 +128,21 @@ fn validate_command_value(env: &serde_json::Value) -> Result<String, String> {
         return Err(format!("unbekannter HostMessage-Typ '{ty}'"));
     }
 
-    // permissionMode (start_agent) bzw. mode (set_permission_mode) gegen die ALLOW-Liste prüfen:
-    // nur `default`/`plan`; alles andere (auto/acceptEdits/bypassPermissions/dontAsk/…) ablehnen.
-    // Fail-CLOSED: ist das Feld vorhanden, aber kein String in der Allow-Liste (z. B. Array/Objekt
+    // Modus-Felder gegen die jeweilige ALLOW-Liste prüfen — TYP-BEWUSST, weil `set_sandbox_mode`
+    // und `set_permission_mode` beide ein Feld `mode` tragen, aber verschiedene Wertebereiche.
+    // Fail-CLOSED: ist das Feld vorhanden, aber kein String aus der Liste (z. B. Array/Objekt
     // ["bypassPermissions"], das `as_str()` durchrutschen ließe) → ablehnen. `null`/fehlend = ok
-    // (downstream Default „default").
-    for field in ["permissionMode", "mode"] {
-        match msg.get(field) {
-            None => {}
-            Some(v) if v.is_null() => {}
-            Some(v) => match v.as_str() {
-                Some(s) if REMOTE_ALLOWED_PERMISSION_MODES.contains(&s) => {}
-                _ => {
-                    return Err(format!("Feld '{field}' von Remote nicht erlaubt (nur default/plan; RCE-Schutz)"));
-                }
-            },
+    // (downstream Default).
+    check_enum_field(msg, "permissionMode", REMOTE_ALLOWED_PERMISSION_MODES)?;
+    match ty {
+        "set_permission_mode" => check_enum_field(msg, "mode", REMOTE_ALLOWED_PERMISSION_MODES)?,
+        "set_sandbox_mode" => check_enum_field(msg, "mode", REMOTE_ALLOWED_SANDBOX_MODES)?,
+        // Jede andere Nachricht darf gar kein `mode` mitbringen: sonst wäre ein künftiger
+        // HostMessage-Typ mit `mode`-Feld ungeprüft durch — Allow-Liste statt Deny-Liste.
+        _ => {
+            if msg.get("mode").is_some_and(|v| !v.is_null()) {
+                return Err(format!("Feld 'mode' bei '{ty}' nicht erwartet"));
+            }
         }
     }
 
@@ -1111,11 +1147,12 @@ mod tests {
         accept.abort();
     }
 
-    /// P0.3: ein gültiges `command` wird an die stdin-Senke geforwardet; ein `bypassPermissions`-
-    /// start_agent wird ÜBERSPRUNGEN (RCE-Schutz). Deterministisch: Frames werden in Reihenfolge
-    /// verarbeitet, also muss der nächste Forward NACH dem bypass das FOLGENDE gültige Command sein.
+    /// P0.3: ein gültiges `command` wird an die stdin-Senke geforwardet; ein Frame mit einem
+    /// UNBEKANNTEN Permission-Modus wird ÜBERSPRUNGEN (die Allow-Liste greift auch im Laufzeit-Pfad,
+    /// nicht nur in `validate_command`). Deterministisch: Frames werden in Reihenfolge verarbeitet,
+    /// also muss der nächste Forward NACH dem verworfenen das FOLGENDE gültige Command sein.
     #[tokio::test]
-    async fn command_forwards_but_bypass_permissions_is_blocked() {
+    async fn command_forwards_but_invalid_mode_is_blocked() {
         let auth = test_auth();
         let (tee, _keep) = broadcast::channel::<String>(64);
         let (fwd_tx, mut fwd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -1131,14 +1168,14 @@ mod tests {
         assert!(first.contains(r#""type":"poll_project""#), "geforwardet: {first}");
         assert!(!first.contains("channel"), "nur die HostMessage, nicht der Envelope: {first}");
 
-        // (2) bypassPermissions (muss übersprungen werden) gefolgt von (3) gültigem Command.
-        sink.send(Message::text(r#"{"channel":"command","msg":{"type":"start_agent","agentId":"x","prompt":"p","permissionMode":"bypassPermissions"}}"#)).await.unwrap();
+        // (2) unbekannter Permission-Modus (muss übersprungen werden) gefolgt von (3) gültigem Command.
+        sink.send(Message::text(r#"{"channel":"command","msg":{"type":"start_agent","agentId":"x","prompt":"p","permissionMode":"yolo"}}"#)).await.unwrap();
         sink.send(Message::text(r#"{"channel":"command","msg":{"type":"interrupt_agent","agentId":"z9"}}"#)).await.unwrap();
 
         // Der nächste (und einzige) Forward MUSS (3) sein — (2) wurde verworfen.
         let next = tokio::time::timeout(Duration::from_secs(5), fwd_rx.recv()).await.expect("timeout").expect("sender offen");
         assert!(next.contains("interrupt_agent") && next.contains("z9"), "nächster Forward ist (3): {next}");
-        assert!(!next.contains("bypassPermissions"), "bypassPermissions durfte nicht an stdin");
+        assert!(!next.contains("yolo"), "unbekannter Modus durfte nicht an stdin");
 
         accept.abort();
     }
@@ -1191,35 +1228,69 @@ mod tests {
         assert!(validate_command(r#"{"channel":"event","msg":{"type":"poll_project"}}"#).is_err());
     }
 
+    /// RB-AUTH-1 seit 2026-09-23: volle Parität zum Mac-Picker. Alle dort wählbaren Modi — auch die
+    /// unbeaufsichtigten — dürfen jetzt aus der Ferne gesetzt werden (Entscheidung des Besitzers,
+    /// siehe REMOTE_ALLOWED_PERMISSION_MODES). Dieser Test hält fest, DASS das so gewollt ist.
     #[test]
-    fn validate_rejects_bypass_permissions() {
-        let f = r#"{"channel":"command","msg":{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":"bypassPermissions"}}"#;
-        assert!(validate_command(f).is_err());
-    }
-
-    #[test]
-    fn validate_rejects_dont_ask_mode() {
-        let f = r#"{"channel":"command","msg":{"type":"set_permission_mode","agentId":"a","mode":"dontAsk"}}"#;
-        assert!(validate_command(f).is_err());
-    }
-
-    #[test]
-    fn validate_rejects_auto_and_accept_edits_modes() {
-        // RB-AUTH-1: `auto` (unbeaufsichtigte Ausführung) und `acceptEdits` (Auto-Datei-Writes)
-        // müssen von der Allow-Liste geblockt werden — nicht nur bypassPermissions/dontAsk.
-        for m in ["auto", "acceptEdits"] {
-            let f = format!(r#"{{"channel":"command","msg":{{"type":"set_permission_mode","agentId":"a","mode":"{m}"}}}}"#);
-            assert!(validate_command(&f).is_err(), "mode '{m}' hätte abgelehnt werden müssen");
-            let g = format!(r#"{{"channel":"command","msg":{{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":"{m}"}}}}"#);
-            assert!(validate_command(&g).is_err(), "permissionMode '{m}' hätte abgelehnt werden müssen");
+    fn validate_allows_every_mac_permission_mode() {
+        for m in ["default", "acceptEdits", "plan", "auto", "bypassPermissions", "dontAsk"] {
+            let f = format!(r#"{{"channel":"command","msg":{{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":"{m}"}}}}"#);
+            assert!(validate_command(&f).is_ok(), "permissionMode '{m}' hätte erlaubt sein müssen");
+            let g = format!(r#"{{"channel":"command","msg":{{"type":"set_permission_mode","agentId":"a","mode":"{m}"}}}}"#);
+            assert!(validate_command(&g).is_ok(), "mode '{m}' hätte erlaubt sein müssen");
         }
     }
 
+    /// Die Liste bleibt eine ALLOW-Liste: ein erfundener Modus geht nicht durch, nur weil die
+    /// bekannten jetzt alle erlaubt sind.
     #[test]
-    fn validate_allows_safe_permission_mode() {
-        for m in ["default", "plan"] {
-            let f = format!(r#"{{"channel":"command","msg":{{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":"{m}"}}}}"#);
-            assert!(validate_command(&f).is_ok(), "mode '{m}' hätte erlaubt sein müssen");
+    fn validate_rejects_unknown_permission_mode() {
+        let f = r#"{"channel":"command","msg":{"type":"set_permission_mode","agentId":"a","mode":"yolo"}}"#;
+        assert!(validate_command(f).is_err());
+    }
+
+    /// Fail-closed gegen Typ-Schmuggel: ein Array rutscht bei `as_str()` durch, wenn man nur auf
+    /// „ist kein verbotener String" prüft. Muss abgelehnt werden.
+    #[test]
+    fn validate_rejects_non_string_mode() {
+        let f = r#"{"channel":"command","msg":{"type":"set_permission_mode","agentId":"a","mode":["auto"]}}"#;
+        assert!(validate_command(f).is_err());
+        let g = r#"{"channel":"command","msg":{"type":"start_agent","agentId":"a","prompt":"p","permissionMode":{"x":"plan"}}}"#;
+        assert!(validate_command(g).is_err());
+    }
+
+    /// `set_sandbox_mode` trägt dasselbe Feld `mode`, aber einen anderen Wertebereich. Die Prüfung
+    /// muss typ-bewusst sein — sonst verwürfe sie „off" als unbekannten Permission-Modus.
+    #[test]
+    fn validate_sandbox_mode_uses_its_own_value_range() {
+        for m in ["on", "targets", "off"] {
+            let f = format!(r#"{{"channel":"command","msg":{{"type":"set_sandbox_mode","agentId":"a","mode":"{m}"}}}}"#);
+            assert!(validate_command(&f).is_ok(), "sandbox mode '{m}' hätte erlaubt sein müssen");
+        }
+        // Kein Permission-Modus in einem Sandbox-Frame …
+        let f = r#"{"channel":"command","msg":{"type":"set_sandbox_mode","agentId":"a","mode":"plan"}}"#;
+        assert!(validate_command(f).is_err());
+        // … und umgekehrt auch nicht.
+        let g = r#"{"channel":"command","msg":{"type":"set_permission_mode","agentId":"a","mode":"off"}}"#;
+        assert!(validate_command(g).is_err());
+    }
+
+    /// Ein `mode`-Feld an einer Nachricht, die gar keins kennt, wird verworfen statt ungeprüft
+    /// durchgereicht — sonst wäre jeder künftige HostMessage-Typ mit `mode` eine Lücke.
+    #[test]
+    fn validate_rejects_mode_on_messages_without_one() {
+        let f = r#"{"channel":"command","msg":{"type":"poll_project","mode":"bypassPermissions"}}"#;
+        assert!(validate_command(f).is_err());
+    }
+
+    /// Die neu freigegebenen Konto-Nachrichten müssen die Allowlist passieren.
+    #[test]
+    fn validate_allows_account_messages() {
+        for f in [
+            r#"{"channel":"command","msg":{"type":"set_account","accountId":"work","agentId":"a"}}"#,
+            r#"{"channel":"command","msg":{"type":"request_accounts"}}"#,
+        ] {
+            assert!(validate_command(f).is_ok(), "{f}");
         }
     }
 
