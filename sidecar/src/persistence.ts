@@ -236,3 +236,61 @@ export function mergeRegistry(
   }
   return [...byId.values()];
 }
+
+// ─── Geschlossene Streams (Tombstones) ──────────────────────────────────────
+// Warum es diese Datei gibt: „Stop" entfernte einen Stream zwar aus Pool + Registry, aber die
+// Absicht lag NUR im flüchtigen `removed`-Set des Orchestrators. Beim nächsten Öffnen kannten die
+// beiden anderen Entdeckungs-Quellen (verwaiste Worktrees, adoptierbare origin-Branches) diese
+// Absicht nicht mehr → längst abgeschlossene Streams standen wieder als Kacheln im Grid (Boba,
+// 2026-09: 9 Stück nach jedem Start). Ein Tombstone je geschlossenem Stream macht das Schließen
+// dauerhaft. Bewusst maschinen-lokal (wie die Registry) und aufhebbar: ein explizites `start_agent`
+// bzw. ein neuer Stream auf demselben Branch löscht den Eintrag wieder.
+export interface DismissedEntry {
+  agentId: string;
+  /** Branch (ohne „origin/"), damit auch die Branch-Adoption den Tombstone erkennt. */
+  branch?: string;
+  /** Label zum Nachvollziehen im Log. */
+  label?: string;
+  closedAt: number;
+}
+
+/** Obergrenze: der Tombstone-Speicher ist ein Gedächtnis, kein Archiv. Älteste fliegen raus. */
+const DISMISSED_MAX = 300;
+
+function dismissedPath(repoRoot: string): string {
+  return join(repoRoot, ".mads", "dismissed.json");
+}
+
+export function loadDismissed(repoRoot: string): DismissedEntry[] {
+  try {
+    const j = JSON.parse(readFileSync(dismissedPath(repoRoot), "utf8"));
+    return Array.isArray(j?.dismissed) ? (j.dismissed as DismissedEntry[]) : [];
+  } catch {
+    return []; // fehlend/kaputt → leere Liste (nie werfen)
+  }
+}
+
+export function saveDismissed(repoRoot: string, dismissed: DismissedEntry[]): void {
+  const p = dismissedPath(repoRoot);
+  ensureMadsDir(repoRoot);
+  const keep = [...dismissed].sort((a, b) => b.closedAt - a.closedAt).slice(0, DISMISSED_MAX);
+  const tmp = `${p}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ v: 1, dismissed: keep }, null, 2), "utf8");
+  renameSync(tmp, p); // atomar (write-temp + rename)
+}
+
+/** REIN: Tombstone setzen (idempotent — derselbe Stream überschreibt seinen alten Eintrag). */
+export function addDismissed(list: DismissedEntry[], entry: DismissedEntry): DismissedEntry[] {
+  return [...list.filter((e) => e.agentId !== entry.agentId && !(entry.branch && e.branch === entry.branch)), entry];
+}
+
+/** REIN: Tombstone aufheben — per agentId ODER Branch (ein neuer Stream auf demselben Branch
+ *  ist eine bewusste Wiederaufnahme und darf nicht stillschweigend unterdrückt werden). */
+export function clearDismissed(list: DismissedEntry[], agentId: string, branch?: string): DismissedEntry[] {
+  return list.filter((e) => e.agentId !== agentId && !(branch && e.branch === branch));
+}
+
+/** REIN: Ist dieser Stream (per agentId oder Branch) bewusst geschlossen worden? */
+export function isDismissed(list: readonly DismissedEntry[], agentId: string, branch?: string): boolean {
+  return list.some((e) => e.agentId === agentId || (branch !== undefined && e.branch === branch));
+}

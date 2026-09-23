@@ -469,6 +469,31 @@ export async function findMergedRemoteBranches(
 }
 
 /**
+ * Der Merge-Doppelcheck für EINEN Ref (lokaler Branch ODER `origin/<name>`): steckt sein Inhalt
+ * restlos in origin/<default>?
+ *
+ * Öffentliche Fassung von {@link remoteBranchIsInBase} samt Basis-Auflösung — dieselbe Erkennung,
+ * die das Aufräum-Angebot nutzt, jetzt auch für den lokalen Branch eines Worktrees. Zwei Stufen:
+ * `"ancestor"` (Spitze steckt in der Historie von <default>) und `"content"` (andere Commit-IDs,
+ * identischer Baum — squash-/rebase-gemergt, der Normalfall nach einem GitHub-Merge).
+ *
+ * Fail-CLOSED: lässt sich die Basis nicht auflösen oder scheitert der Merge-Baum (Konflikt,
+ * git < 2.38), lautet die Antwort `false` = „nicht nachweisbar gemergt". Der Aufrufer löscht dann
+ * NICHT. Hier ist Zurückhaltung richtig herum: ein zu viel behaltener Worktree kostet Plattenplatz,
+ * ein zu früh gelöschter kostet Arbeit.
+ */
+export async function branchMergedIntoDefault(
+  repoRoot: string,
+  ref: string,
+  defaultBranch: string,
+): Promise<"ancestor" | "content" | false> {
+  const baseRef = `origin/${defaultBranch}`;
+  const baseTree = await git(["-C", repoRoot, "rev-parse", `${baseRef}^{tree}`], repoRoot);
+  if (baseTree.code !== 0) return false; // Basis unbekannt → nichts behaupten, nichts löschen
+  return remoteBranchIsInBase(repoRoot, ref, baseRef, baseTree.stdout.trim());
+}
+
+/**
  * Liegt der Inhalt von `ref` restlos in `baseRef` (dessen Baum `baseTree` ist)? Antwortet mit dem
  * WIE: `"ancestor"` = die Spitze steckt schon in der Historie von <default> (die main-Kopie aus
  * dem Vorfall), `"content"` = andere Commit-IDs, gleicher Inhalt (squash-/rebase-gemergt),
@@ -957,6 +982,24 @@ export async function removeWorktree(repoRoot: string, path: string, branch?: st
   if (branch) await git(["-C", repoRoot, "branch", "-D", branch], repoRoot);
   await git(["-C", repoRoot, "worktree", "prune"], repoRoot);
   return salvage;
+}
+
+/**
+ * Der Branch, auf dem ein Worktree GERADE steht — direkt aus dem Worktree gelesen.
+ *
+ * Nötig für Kacheln, die allein aus der Worktree-Discovery stammen: die haben weder eine laufende
+ * Session noch einen Registry-Eintrag, ihr Branch war dem `stop`-Pfad darum unbekannt. Ohne ihn
+ * konnte {@link worktreeResidue} nicht urteilen, der Worktree blieb selbst dann liegen, wenn er
+ * restlos war — und genau diese Leichen bot die Discovery beim nächsten Öffnen erneut als Stream an.
+ *
+ * `undefined` heißt „kein Branch feststellbar" (detached HEAD oder kaputter Worktree) — der Aufrufer
+ * behandelt das wie „könnte Arbeit enthalten" und löscht NICHT.
+ */
+export async function worktreeBranch(worktree: string): Promise<string | undefined> {
+  const r = await git(["-C", worktree, "symbolic-ref", "-q", "--short", "HEAD"], worktree);
+  if (r.code !== 0) return undefined; // detached HEAD → kein Branch
+  const b = r.stdout.trim();
+  return b.length > 0 ? b : undefined;
 }
 
 /**

@@ -14,13 +14,13 @@ import { loadApprovedKinds, saveApprovedKinds, loadApprovedTools, saveApprovedTo
 import { killProcessesInWorktree } from "./worktree-procs.js";
 import type { CommandKind } from "../../shared/safe-command.js";
 import { send, log, envelope, timelineSnapshot, randomUUID } from "./io.js";
-import { adoptRemoteBranch, autoCommit, commitMainRelease, createPr, createReviewWorktree, deleteRemoteBranches, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverAdoptableBranches, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, findMergedRemoteBranches, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, resyncWorktreeAfterMerge, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
+import { adoptRemoteBranch, autoCommit, branchMergedIntoDefault, commitMainRelease, createPr, createReviewWorktree, deleteRemoteBranches, detectMainVersionBump, rebaseMainOntoOrigin, resetMainToOrigin, pushMainToOrigin, discoverAdoptableBranches, discoverWorktrees, ensureWorktreeSeedFile, fastForwardMain, finalizeAdrDrafts, findMergedRemoteBranches, getRepoInfo, gitStatus, isForeignMadsWorktree, listOpenPrs, mergePr, outsourceMainChanges, prStatus, pushBranch, reconcileAdrCollisions, relocateWorktree, removeWorktree, resyncWorktreeAfterMerge, run, seedLocalDevFiles, syncBranch, unpushedCount, worktreeBranch, worktreeFingerprint, worktreePathFor, worktreeResidue, type GitStatusResult } from "./git.js";
 import { runGate } from "./gate.js";
 import { LinkManager } from "./link.js";
 import { attributesArgs } from "./gitAttributes.js";
 import { DevServerRun, ensureRunManifest, loadRunManifest, runManifestPath } from "./devserver.js";
 import { autopilotDecision } from "../../shared/autopilot.js";
-import { acquireProjectLock, ensureMadsDir, loadPrompts, loadRegistry, loadTargets, mergeRegistry, releaseProjectLock, savePrompts, saveRegistry, saveTargets, type RegistryEntry } from "./persistence.js";
+import { acquireProjectLock, addDismissed, clearDismissed, ensureMadsDir, isDismissed, loadDismissed, loadPrompts, loadRegistry, loadTargets, mergeRegistry, releaseProjectLock, saveDismissed, savePrompts, saveRegistry, saveTargets, type DismissedEntry, type RegistryEntry } from "./persistence.js";
 import { preMergeGate } from "../../shared/merge.js";
 import { gateBlockedPrMarkdown } from "../../shared/gate-report.js";
 import { parseDiffRegions, detectCollisions, type AgentRegions } from "../../shared/collision.js";
@@ -107,6 +107,11 @@ export class Orchestrator {
   // Explizit entfernte Agenten (gestoppt/aufgeräumt/gemergt) — mergeRegistry darf sie NICHT
   // aus der Registry wiederbeleben (sonst hebt merge-persist ein bewusstes Entfernen auf).
   private readonly removed = new Set<string>();
+  // DAUERHAFTE Variante von `removed`: `removed` lebt nur bis zum nächsten App-Start, die
+  // Entdeckungs-Quellen beim Öffnen (verwaiste Worktrees, adoptierbare origin-Branches) laufen
+  // aber jedes Mal neu. Ohne Tombstone tauchten bewusst gestoppte Streams darum nach jedem Start
+  // wieder als Kacheln auf. Spiegel von `.mads/dismissed.json` (maschinen-lokal wie die Registry).
+  private dismissed: DismissedEntry[] = [];
   /** Freigang-Drift-Schutz (Sandbox "off"): seit wann der Stream RUHIG ist. Nach
    *  FREIGANG_IDLE_RESET_MS Inaktivität schaltet der Poll selbst zurück auf "on". */
   private readonly freigangQuietSince = new Map<string, number>();
@@ -200,6 +205,7 @@ export class Orchestrator {
           this.pool.clear();
           this.gitState.clear();
           this.removed.clear();
+          this.dismissed = []; // Tombstones gehören zum ALTEN Repo (unten wird die neue Liste geladen)
           this.autoSyncConflicted.clear();
           // Review-Streams gehören zum ALTEN Repo — Map leeren, sonst unterdrückt ein alter
           // `review-pr-<#>`-Key einen gleichnummerierten PR im neuen Projekt. (Worktree-Rest ist
@@ -210,6 +216,7 @@ export class Orchestrator {
         }
         this.project = { projectId: msg.projectId, repoRoot: msg.repoRoot, ...info };
         this.reloadApprovedKinds();
+        this.loadDismissedForProject(msg.repoRoot); // bewusst geschlossene Streams: NICHT wieder anbieten
         this.emitPrompts(); // gespeicherte Prompts des Projekts an die Clients
         this.emitTargets(); // Untersuchungsziele (Sandbox-Stufe A) an die Clients
         this.emit({ ...envelope(), type: "project_resolved", project: this.project });
@@ -225,6 +232,9 @@ export class Orchestrator {
           log(`[orchestrator] agent ${msg.agentId} existiert bereits`);
           return;
         }
+        // Ein ausdrücklicher Start ist die bewusste Wiederaufnahme: einen evtl. vorhandenen
+        // Tombstone (früher gestoppt) aufheben — sonst bliebe dieser Stream dauerhaft unterdrückt.
+        this.undismissStream(msg.agentId, msg.branch);
         const session = new AgentSession(msg.agentId, () => { this.persist(); this.schedulePollSoon(); }, this.permHooks(), () => this.activeStreamsSummary(msg.agentId), this.linkHooks());
         this.pool.set(msg.agentId, session);
         // Resume: den zuletzt gemerkten Auftrag aus agents.json in die frische Session vorladen. Sonst
@@ -360,15 +370,58 @@ export class Orchestrator {
           });
           break;
         }
-        const wt = s?.worktreePath;
+        // Worktree/Branch NICHT nur aus dem Pool ziehen: eine wiederhergestellte, noch nie
+        // fortgesetzte Kachel (Resume-Angebot/adoptierter Branch) hat gar keine Session — `s` ist
+        // dann undefined und der Worktree blieb bis dato liegen. Genau daraus entstand der
+        // „geschlossene Streams sind nach dem Neustart wieder offen"-Effekt: die Worktree-Discovery
+        // fand ihn beim nächsten Öffnen erneut. Registry-Eintrag bzw. Kanon-Pfad als Fallback.
+        const wt = s?.worktreePath ?? regEntry?.worktreePath ?? (this.project ? worktreePathFor(this.project.repoRoot, msg.agentId) : undefined);
+        // Dritter Fallback: den Branch AUS DEM WORKTREE lesen. Eine Kachel, die nur aus der
+        // Worktree-Discovery stammt, hat weder Session noch Registry-Eintrag — `stopBranch` blieb
+        // damit immer `undefined`, die Reste-Prüfung unten wurde übersprungen (hartkodiert auf
+        // „hat Reste") und der Worktree blieb auch dann liegen, wenn er restlos war. Die Discovery
+        // fand ihn beim nächsten Öffnen erneut → die Kachel war zurück, trotz „Stop".
+        const stopBranch = s?.branch ?? regEntry?.branch ?? (wt && existsSync(wt) ? await worktreeBranch(wt) : undefined);
         await this.stopDevServerIf(msg.agentId); // laufenden Dev-Server dieses Streams zuerst beenden
-        await s?.stop(msg.removeWorktree ?? false);
+        // `false`: hier wird NIE gelöscht. AgentSession.stop() entfernte den Worktree bedingungslos —
+        // ein „Stop" auf einem laufenden Sub-Stream (die UI schickt dafür removeWorktree=true) warf
+        // damit auch ungemergte, ungepushte Arbeit weg. Das Löschen hat jetzt EINE einzige Stelle,
+        // unten, hinter dem Doppelcheck — und erst, wenn Session und Prozesse wirklich unten sind
+        // (sonst prüft man einen Worktree, in den der Agent noch schreibt).
+        await s?.stop(false);
         // Vom AGENTEN selbst gestartete Prozesse (Repro-Server, Watcher, Headless-Browser) ueberleben
         // das Stream-Ende sonst und belegen Ports. Erst JETZT — der CLI-Prozess der Session laeuft
         // ebenfalls mit cwd = Worktree und wurde gerade regulaer beendet.
         await this.reapWorktreeProcesses(msg.agentId, wt);
+        // Der Doppelcheck vor dem Aufräumen — für JEDEN Stream, mit oder ohne Session.
+        if ((msg.removeWorktree ?? false) && this.project && wt && existsSync(wt)) {
+          const verdict = await this.worktreeRetirement(wt, stopBranch);
+          if (verdict.remove) {
+            try {
+              this.emitSeedReclaimed(msg.agentId, await removeWorktree(this.project.repoRoot, wt, stopBranch));
+              log(`[orchestrator] stop: Worktree ${stopBranch ?? msg.agentId} (${wt}) entfernt — ${verdict.reason}`);
+            } catch (e) {
+              log(`[orchestrator] stop: Worktree-Cleanup fehlgeschlagen: ${String(e)}`);
+            }
+          } else {
+            log(`[orchestrator] stop: Worktree ${wt} behalten — ${verdict.reason}`);
+            this.emit({
+              ...envelope(),
+              type: "agent_event",
+              agentId: msg.agentId,
+              event: {
+                kind: "system",
+                subtype: `⚠️ Der Worktree bleibt erhalten — ${verdict.reason}. Die Kachel ist geschlossen und kommt nicht wieder, die Arbeit ist nicht gelöscht (${wt}). Endgültig verwerfen: „Aufräumen" im Inspector.`,
+              },
+            });
+          }
+        }
         this.pool.delete(msg.agentId);
         this.removed.add(msg.agentId); // bewusst entfernt → merge-persist nicht wiederbeleben
+        // …und DAUERHAFT vermerken: ohne Tombstone böten Worktree-Discovery bzw. Branch-Adoption
+        // denselben Stream beim nächsten Öffnen erneut an (der eigentliche Grund für die
+        // „wieder offenen" Altlasten).
+        this.dismissStream(msg.agentId, stopBranch, s?.label ?? regEntry?.label);
         this.autoSyncConflicted.delete(msg.agentId); // kein Worktree mehr → kein offener Sync-Konflikt
         this.persist();
         break;
@@ -617,6 +670,7 @@ export class Orchestrator {
           await this.reapWorktreeProcesses(msg.agentId, path); // Agenten-Prozesse halten ihn ebenso offen
           this.emitSeedReclaimed(msg.agentId, await removeWorktree(root, path, msg.branch));
           this.removed.add(msg.agentId); // aufgeräumt → merge-persist nicht wiederbeleben
+          this.dismissStream(msg.agentId, msg.branch); // dauerhaft: Discovery/Adoption bieten ihn nicht neu an
           this.autoSyncConflicted.delete(msg.agentId); // kein Worktree mehr → kein offener Sync-Konflikt
           saveRegistry(root, loadRegistry(root).filter((e) => e.agentId !== msg.agentId));
           log(`[orchestrator] aufgeräumt: ${msg.branch ?? msg.agentId} (${path})`);
@@ -1637,6 +1691,95 @@ export class Orchestrator {
   }
 
   /**
+   * Der Doppelcheck vor dem Aufräumen: DARF der Worktree dieses endenden Streams weg?
+   *
+   * Zwei Tore, beide müssen offen sein:
+   *  1. **Nichts Ungespeichertes** ({@link worktreeResidue}): Änderungen ohne Commit steckten in
+   *     keiner Historie und wären unwiederbringlich weg.
+   *  2. **Die Arbeit ist angekommen** ({@link branchMergedIntoDefault}): der Inhalt des LOKALEN
+   *     Branches — inklusive ungepushter Commits — steckt restlos in origin/<default>, entweder
+   *     als Historie („ancestor") oder inhaltsgleich mit neuen Commit-IDs („content", der
+   *     Normalfall nach einem Squash-Merge auf GitHub).
+   *
+   * Tor 2 ersetzt die frühere „ist alles gepusht?"-Frage, weil die das Falsche maß: GitHub löscht
+   * den Head-Branch beim Merge, `origin/<branch>` ist danach weg, und „alles ungepusht" hätte
+   * ausgerechnet die fertigen Worktrees für immer blockiert. Umgekehrt genügt „gepusht" nicht —
+   * ein sauber gepushter, nie gemergter Branch verlöre seinen Worktree, obwohl die Arbeit
+   * nirgendwo gelandet ist. Ein gemergter Branch mit NEUEN Commits fällt automatisch durch Tor 2.
+   *
+   * Beide Tore sind fail-closed — was sich nicht beweisen lässt, wird nicht gelöscht. Der Grund
+   * geht als Klartext an den Menschen zurück, damit „bleibt liegen" nie stillschweigend passiert.
+   */
+  private async worktreeRetirement(wt: string, branch: string | undefined): Promise<{ remove: boolean; reason: string }> {
+    if (!this.project) return { remove: false, reason: "kein Projekt offen" };
+    if (!branch) return { remove: false, reason: "kein Branch feststellbar (detached HEAD) — der Inhalt lässt sich nicht gegen main prüfen" };
+    // Tor 1 — ungespeicherte Änderungen stecken in ÜBERHAUPT keinem Commit. Die kann auch der
+    // sauberste Merge nicht gerettet haben, also blockieren sie immer.
+    const res = await worktreeResidue(wt, branch);
+    if (res.dirty) return { remove: false, reason: "es gibt ungespeicherte Änderungen im Worktree" };
+    // Tor 2 — ist die Arbeit in <default> angekommen? Bewusst gegen den LOKALEN Branch geprüft:
+    // er enthält auch noch nicht gepushte Commits. Liegt sein Inhalt restlos in origin/<default>,
+    // geht beim Entfernen nichts verloren — unabhängig vom Push-Zustand. Das ist wichtig, weil
+    // GitHub den Head-Branch beim Merge löscht: „ungepusht" gegen ein verschwundenes
+    // origin/<branch> zu messen hätte gerade die erledigten Worktrees für immer blockiert.
+    const merged = await branchMergedIntoDefault(this.project.repoRoot, branch, this.project.defaultBranch);
+    if (!merged) {
+      const def = this.project.defaultBranch;
+      return {
+        remove: false,
+        reason:
+          res.unpushed === Number.MAX_SAFE_INTEGER
+            ? `${branch} ist nicht in ${def} angekommen und existiert auch nicht auf origin — die Arbeit liegt ausschließlich in diesem Worktree`
+            : res.unpushed > 0
+              ? `${branch} ist nicht in ${def} angekommen (und ${res.unpushed} Commit(s) sind nicht einmal gepusht)`
+              : `${branch} ist noch nicht in ${def} gemergt`,
+      };
+    }
+    return {
+      remove: true,
+      reason:
+        merged === "ancestor"
+          ? `${branch} steckt vollständig in der Historie von ${this.project.defaultBranch}`
+          : `der Inhalt von ${branch} liegt vollständig in ${this.project.defaultBranch} (squash-/rebase-gemergt)`,
+    };
+  }
+
+  // ─── Tombstones für bewusst geschlossene Streams ──────────────────────────
+  /** Tombstones des offenen Projekts laden und ins flüchtige `removed`-Set spiegeln, damit
+   *  merge-persist einen geschlossenen Stream auch in dieser Sitzung nicht wiederbelebt. */
+  private loadDismissedForProject(repoRoot: string): void {
+    this.dismissed = loadDismissed(repoRoot);
+    for (const e of this.dismissed) this.removed.add(e.agentId);
+    if (this.dismissed.length > 0) log(`[orchestrator] ${this.dismissed.length} geschlossene(r) Stream(s) aus .mads/dismissed.json übernommen`);
+  }
+
+  /** Einen Stream dauerhaft als geschlossen vermerken (überlebt den App-Neustart). */
+  private dismissStream(agentId: string, branch?: string, label?: string): void {
+    if (!this.project) return;
+    this.removed.add(agentId);
+    this.dismissed = addDismissed(this.dismissed, { agentId, ...(branch ? { branch } : {}), ...(label ? { label } : {}), closedAt: Date.now() });
+    try {
+      saveDismissed(this.project.repoRoot, this.dismissed);
+    } catch (e) {
+      log(`[orchestrator] dismissed.json schreiben fehlgeschlagen: ${String(e)}`);
+    }
+  }
+
+  /** Tombstone aufheben — der Mensch nimmt diesen Stream/Branch bewusst wieder auf. */
+  private undismissStream(agentId: string, branch?: string): void {
+    if (!this.project) return;
+    if (!isDismissed(this.dismissed, agentId, branch)) return;
+    this.removed.delete(agentId);
+    this.dismissed = clearDismissed(this.dismissed, agentId, branch);
+    try {
+      saveDismissed(this.project.repoRoot, this.dismissed);
+    } catch (e) {
+      log(`[orchestrator] dismissed.json schreiben fehlgeschlagen: ${String(e)}`);
+    }
+    log(`[orchestrator] Tombstone aufgehoben: ${branch ?? agentId} wird wieder als Stream geführt`);
+  }
+
+  /**
    * Beim Projekt-Öffnen den verwalteten Zustand gegen GitHub abgleichen (P7+).
    *
    * Problem: wird ein Stream auf einem anderen Rechner fertiggestellt & gemergt,
@@ -1686,6 +1829,7 @@ export class Orchestrator {
       // „erledigt" eingestuft, obwohl der Mensch bewusst weiterarbeiten wollte.
       if (e.suppressedPr) this.suppressedMergedPr.set(e.agentId, e.suppressedPr);
       if (!e.sessionId || this.pool.has(e.agentId)) continue;
+      if (isDismissed(this.dismissed, e.agentId, e.branch)) continue; // bewusst geschlossen → nicht anbieten
       if (e.worktreePath && !existsSync(e.worktreePath)) continue; // Worktree weg → überspringen
       candidates.push(e);
       seen.add(e.agentId);
@@ -1698,6 +1842,12 @@ export class Orchestrator {
       for (const wt of await discoverWorktrees(repoRoot)) {
         if (seen.has(wt.agentId) || this.pool.has(wt.agentId)) continue;
         if (wt.branch.startsWith("mads-review/")) continue; // Review-Worktree-Rest → kein Geister-Stream
+        // Bewusst gestoppter Stream, dessen Worktree (mit lokalen Resten) absichtlich stehen blieb:
+        // Er darf NICHT wieder als Kachel auftauchen — genau das war der wiederkehrende Befund.
+        if (isDismissed(this.dismissed, wt.agentId, wt.branch)) {
+          log(`[orchestrator] Discovery: ${wt.branch} übersprungen (vom Menschen geschlossen, Worktree bleibt unter ${wt.path})`);
+          continue;
+        }
 
         const known = reg.get(wt.agentId);
         candidates.push({
@@ -1730,10 +1880,15 @@ export class Orchestrator {
     const adopted: string[] = [];
     try {
       const taken = new Set<string>();
+      // Geschlossene Streams zuerst sperren: ihr origin-Branch lebt weiter (Löschen auf origin ist
+      // eine bewusste, außen sichtbare Aktion), die Adoption würde ihn sonst bei jedem Öffnen neu
+      // auschecken und die Kachel wiederbeleben.
+      for (const d of this.dismissed) if (d.branch) taken.add(d.branch);
       for (const e of registry) if (e.branch) taken.add(e.branch);
       for (const c of candidates) if (c.branch) taken.add(c.branch);
       for (const cand of await discoverAdoptableBranches(repoRoot, defaultBranch, taken)) {
         if (seen.has(cand.agentId) || this.pool.has(cand.agentId)) continue;
+        if (isDismissed(this.dismissed, cand.agentId, cand.branch)) continue; // bewusst geschlossen
         const res = await adoptRemoteBranch(repoRoot, cand.agentId, cand.branch);
         if (!res.ok) {
           log(`[orchestrator] adopt: ${cand.branch} konnte nicht übernommen werden: ${res.error}`);
