@@ -5,11 +5,23 @@ import { invoke } from "@tauri-apps/api/core";
  * Pairing-/Geräte-Verwaltung für die mads-Remote-App (iOS). Zeigt den Bridge-Status, gibt einen
  * einmaligen PIN + QR aus (60 s gültig) und listet gekoppelte Geräte mit Widerruf. Die Geräteliste
  * gehört dem HOST (globale Auth-DB), nicht dem offenen Projekt — eine Kopplung gilt überall.
- * Die Rust-Bridge (src-tauri/src/bridge.rs, auth.rs) läuft nur mit MADS_REMOTE_BRIDGE=1.
+ * Die Rust-Bridge (src-tauri/src/bridge.rs, auth.rs) folgt dem Schalter hier, der als Datei
+ * persistiert wird; `MADS_REMOTE_BRIDGE=1` ist nur noch der Default, solange es die Datei
+ * nicht gibt (lib.rs). Der Kommentar behauptete vorher, die Env-Var sei zwingend.
  * Schnittstellen-Vertrag: mads-remote/docs/mads-bridge.md.
  */
 type Device = { id: string; name: string; createdAt: number; lastSeen: number | null };
-type Status = { running: boolean; enabled?: boolean; port?: number; spkiFp?: string; project?: string };
+type Status = {
+  running: boolean;
+  enabled?: boolean;
+  port?: number;
+  spkiFp?: string;
+  project?: string;
+  /** IP, über die der mDNS-Daemon zuletzt WIRKLICH annonciert hat (null = nur lokal sichtbar). */
+  lanAnnouncedOn?: string | null;
+  mdnsError?: string | null;
+  mdnsRebuilds?: number;
+};
 type Pairing = { pin: string; qrSvg: string };
 
 export function RemotePairing() {
@@ -17,6 +29,12 @@ export function RemotePairing() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [pairing, setPairing] = useState<Pairing | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Seit wann läuft die Bridge, ohne über die LAN-IP annonciert zu haben? Die erste Ankündigung
+   * meldet der Daemon erst Augenblicke nach dem Start — ohne diese Schonfrist blitzte bei jedem
+   * Start eine Warnung auf, die sofort wieder verschwindet.
+   */
+  const [lanSilentSince, setLanSilentSince] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -26,6 +44,14 @@ export function RemotePairing() {
       setError(String(e));
     }
   }, []);
+
+  useEffect(() => {
+    if (status.running && !status.lanAnnouncedOn) {
+      setLanSilentSince((since) => since ?? Date.now());
+    } else {
+      setLanSilentSince(null);
+    }
+  }, [status.running, status.lanAnnouncedOn]);
 
   const toggleEnabled = async (on: boolean) => {
     setError(null);
@@ -66,6 +92,17 @@ export function RemotePairing() {
     }
   };
 
+  const lanSilentTooLong = lanSilentSince !== null && Date.now() - lanSilentSince > 20_000;
+  const rebuilds = status.mdnsRebuilds ?? 0;
+  const rebuiltSuffix =
+    rebuilds > 0 ? ` — ${rebuilds === 1 ? "einmal" : `${rebuilds}-mal`} neu aufgebaut` : "";
+  const lanReachHint = status.lanAnnouncedOn
+    ? `Im WLAN auffindbar über ${status.lanAnnouncedOn}${rebuiltSuffix}.`
+    : lanSilentTooLong
+      ? `Läuft, ist im WLAN aber NICHT auffindbar — die Ankündigung erreicht nur diesen Mac. Sie wird automatisch neu aufgebaut${rebuiltSuffix}.`
+      : "Ankündigung im WLAN wird geprüft …";
+  const lanReachHintClass = `settings-hint${lanSilentTooLong ? " remote-pair-error" : ""}`;
+
   return (
     <div className="settings-group">
       <div className="settings-group-title">Remote (iOS-App)</div>
@@ -88,6 +125,18 @@ export function RemotePairing() {
               ? `Bridge startet für ${status.project} …`
               : "Aktiviert, aber noch kein Projekt offen. Öffne ein Projekt, dann läuft die Bridge dafür."}
       </div>
+
+      {/*
+        „Läuft" und „im WLAN auffindbar" sind NICHT dasselbe: der mDNS-Daemon kann die
+        WLAN-Schnittstelle verlieren und dann nur noch auf Loopback annoncieren — die Bridge
+        lauscht weiter, aber kein Gerät findet sie mehr (Befund 24.09.2026). Genau das stand
+        vorher nirgends, also stand hier „Aktiv" und niemand wusste, warum nichts geht.
+      */}
+      {status.running && <div className={lanReachHintClass}>{lanReachHint}</div>}
+
+      {status.mdnsError && (
+        <div className="settings-hint remote-pair-error">mDNS meldete: {status.mdnsError}</div>
+      )}
 
       {error && <div className="settings-hint remote-pair-error">{error}</div>}
 
