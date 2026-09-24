@@ -276,16 +276,21 @@ pub struct Bridge {
     /// SHA-256 des SubjectPublicKeyInfo (hex, lowercase) — der Wert, den iOS pinnt (TOFU).
     pub spki_fp_hex: String,
     accept: tokio::task::JoinHandle<()>,
-    mdns: mdns_sd::ServiceDaemon,
-    /// Hält die annoncierte `addr` bei einem Netzwechsel aktuell (siehe `advertise`).
-    addr_refresh: tokio::task::JoinHandle<()>,
+    /// Hält die mDNS-Ankündigung am Leben und heilt sie, wenn sie das LAN verliert (siehe
+    /// `advertise`). Der `Drop` des Advertisers fährt den aktuellen Daemon herunter.
+    advertiser: Advertiser,
+}
+
+impl Bridge {
+    /// Zustand der Ankündigung — für `status()`: „läuft" heisst nicht „im WLAN sichtbar".
+    pub fn advertise_health(&self) -> Arc<std::sync::Mutex<AdvertiseHealth>> {
+        Arc::clone(&self.advertiser.health)
+    }
 }
 
 impl Drop for Bridge {
     fn drop(&mut self) {
         self.accept.abort();
-        self.addr_refresh.abort();
-        let _ = self.mdns.shutdown();
     }
 }
 
@@ -293,6 +298,9 @@ impl Drop for Bridge {
 pub struct BridgeRuntimeInfo {
     pub port: u16,
     pub spki_fp_hex: String,
+    /// Zustand der mDNS-Ankündigung — damit `status()` „läuft, aber nur lokal sichtbar" von
+    /// „läuft und im WLAN auffindbar" unterscheiden kann.
+    pub advertise_health: Arc<std::sync::Mutex<AdvertiseHealth>>,
 }
 
 /// In Tauri gemanagter Bridge-MANAGER: startet/stoppt die Bridge zur LAUFZEIT, getrieben vom
@@ -377,10 +385,16 @@ impl RemoteBridgeState {
     pub fn status(&self) -> serde_json::Value {
         let s = self.shared.lock().unwrap();
         match &s.info {
-            Some(i) => serde_json::json!({
-                "running": true, "enabled": s.enabled, "port": i.port,
-                "spkiFp": i.spki_fp_hex, "project": s.project_label,
-            }),
+            Some(i) => {
+                let h = i.advertise_health.lock().unwrap();
+                serde_json::json!({
+                    "running": true, "enabled": s.enabled, "port": i.port,
+                    "spkiFp": i.spki_fp_hex, "project": s.project_label,
+                    // Ohne diese drei sieht „nur auf Loopback annonciert" genauso aus wie „läuft".
+                    "lanAnnouncedOn": h.announced_lan_ip, "mdnsError": h.last_error,
+                    "mdnsRebuilds": h.rebuilds,
+                })
+            }
             None => serde_json::json!({ "running": false, "enabled": s.enabled }),
         }
     }
@@ -485,7 +499,11 @@ fn bridge_control_loop(
             Ok(b) => {
                 eprintln!("[mads:bridge] läuft auf Port {} (Host-fp {}) für {:?}", b.port, b.spki_fp_hex, root);
                 let mut s = shared.lock().unwrap();
-                s.info = Some(BridgeRuntimeInfo { port: b.port, spki_fp_hex: b.spki_fp_hex.clone() });
+                s.info = Some(BridgeRuntimeInfo {
+                    port: b.port,
+                    spki_fp_hex: b.spki_fp_hex.clone(),
+                    advertise_health: b.advertise_health(),
+                });
                 s.auth = Some(auth);
                 running = Some(b);
             }
@@ -540,9 +558,9 @@ pub async fn start(
     // Der File-RPC-Scope jeder Verbindung wird host-seitig aufs Projekt begrenzt (RB-FS-1).
     let (port, accept) = bind_and_serve(tls_config, tee, forward, auth, desired_port, Some(repo_root)).await?;
     persist_port(&port_dir, port);
-    let (mdns, addr_refresh) = advertise(port, &spki_fp_hex, &project, &instance_id)?;
+    let advertiser = advertise(port, &spki_fp_hex, &project, &instance_id)?;
 
-    Ok(Bridge { port, spki_fp_hex, accept, mdns, addr_refresh })
+    Ok(Bridge { port, spki_fp_hex, accept, advertiser })
 }
 
 /// Stabile Identität EINES PROJEKTS (der SPKI-fp identifiziert seit der Host-Umstellung den Mac,
@@ -721,13 +739,6 @@ fn service_info(
     .enable_addr_auto())
 }
 
-/// Service registrieren und die annoncierte `addr` aktuell HALTEN.
-///
-/// `addr` ist eine einmal berechnete TXT-Kopie der LAN-IP. Wechselt der Mac das Netz, zeigt sie ins
-/// Leere: die App wählt sie bevorzugt, bekommt aus einem fremden Subnetz nicht einmal ein RST und
-/// hängt bis in ihren Watchdog — während der A-Record hinter dem Hostnamen längst aktuell ist.
-/// Deshalb wird die IP periodisch verglichen und der Service bei Änderung neu registriert; das
-/// ersetzt den Eintrag und schickt eine Ankündigung raus.
 /// Wie viele Endpunkte einem Gerät höchstens gemeldet werden. Jeder kostet beim Verbinden einen
 /// Anklopf-Versuch — eine Maschine mit Docker-, VM- und VPN-Interfaces käme sonst auf ein Dutzend.
 const MAX_ENDPOINTS: usize = 8;
@@ -779,42 +790,202 @@ fn is_cgnat(ip: &Ipv4Addr) -> bool {
     a == 100 && (64..=127).contains(&b)
 }
 
+/// Zustand der mDNS-Ankündigung. Lebt getrennt vom Daemon, weil er dessen Neuaufbau überdauert
+/// und in `status()` sichtbar wird: „Bridge läuft" heisst nicht „im WLAN auffindbar".
+#[derive(Default)]
+pub struct AdvertiseHealth {
+    /// LAN-IP, über die der Daemon zuletzt WIRKLICH annonciert hat (aus `DaemonEvent::Announce`).
+    pub announced_lan_ip: Option<String>,
+    /// Letzte Fehlermeldung des mDNS-Daemons (fehlgeschlagener Multicast-Join, Socket-Fehler …).
+    pub last_error: Option<String>,
+    /// Wie oft der Daemon neu aufgebaut werden musste.
+    pub rebuilds: u32,
+}
+
+/// Laufende Ankündigung samt Selbstheilung. Beim Drop wird der aktuelle Daemon heruntergefahren.
+pub struct Advertiser {
+    /// Der AKTUELLE Daemon — beim Neuaufbau ersetzt, deshalb hinter einem Mutex statt als Feld.
+    current: Arc<std::sync::Mutex<Option<mdns_sd::ServiceDaemon>>>,
+    task: tokio::task::JoinHandle<()>,
+    health: Arc<std::sync::Mutex<AdvertiseHealth>>,
+}
+
+impl Drop for Advertiser {
+    fn drop(&mut self) {
+        self.task.abort();
+        let daemon = self.current.lock().unwrap().take();
+        if let Some(daemon) = daemon {
+            let _ = daemon.shutdown();
+        }
+    }
+}
+
+/// Obergrenze für den Abstand zwischen zwei Heilungsversuchen: ein dauerhaft kaputter Zustand
+/// (kein Netz, Multicast gesperrt) soll nicht alle 15 s einen neuen Daemon bauen.
+const MAX_HEAL_BACKOFF: Duration = Duration::from_secs(300);
+
+/// Einen frischen Daemon bauen und den Service registrieren.
+fn spawn_daemon(
+    port: u16, fp_hex: &str, project: &str, instance_id: &str, lan_ip: Option<&str>,
+) -> BridgeResult<mdns_sd::ServiceDaemon> {
+    let daemon = mdns_sd::ServiceDaemon::new()?;
+    daemon.register(service_info(port, fp_hex, project, instance_id, lan_ip)?)?;
+    Ok(daemon)
+}
+
+/// Service registrieren und die Ankündigung am Leben HALTEN.
+///
+/// Zwei Dinge können ihr zustossen, ohne dass es jemand merkt:
+///
+/// 1. **Der Mac wechselt das Netz.** Die TXT-Kopie `addr` zeigt dann ins Leere; die App wählt sie
+///    bevorzugt, bekommt aus einem fremden Subnetz nicht einmal ein RST und hängt bis in ihren
+///    Watchdog — während der A-Record hinter dem Hostnamen längst aktuell ist.
+/// 2. **Der Daemon verliert die LAN-Schnittstelle.** Befund 24.09.2026: mads lief seit Stunden,
+///    `dns-sd -B` fand den Dienst — aber ausschliesslich auf Interface-Index 1 (lo0). Jedes Gerät
+///    am selben Mac fand ihn, kein Gerät im WLAN. Ein frisch gestarteter Daemon derselben
+///    Bibliothek annoncierte sofort auch über en1; der Neuaufbau ist also die Kur.
+///
+/// Deshalb wird nicht nur die IP nachgezogen, sondern über `monitor()` mitgelesen, worüber der
+/// Daemon tatsächlich annonciert. Passt das nicht zur primären LAN-IP, wird er NEU AUFGEBAUT —
+/// ein blosses `register()` auf demselben Daemon genügt nicht, es erneuert den Record nur auf den
+/// Schnittstellen, die er ohnehin schon hat. Fehler des Daemons landen zusätzlich im Log und in
+/// `AdvertiseHealth`, statt wie bisher unbemerkt zu verpuffen.
 fn advertise(
     port: u16, fp_hex: &str, project: &str, instance_id: &str,
-) -> BridgeResult<(mdns_sd::ServiceDaemon, tokio::task::JoinHandle<()>)> {
-    use mdns_sd::ServiceDaemon;
+) -> BridgeResult<Advertiser> {
+    let lan_ip = primary_lan_ip();
+    let daemon = spawn_daemon(port, fp_hex, project, instance_id, lan_ip.as_deref())?;
 
-    let daemon = ServiceDaemon::new()?;
-    let mut current = primary_lan_ip();
-    daemon.register(service_info(port, fp_hex, project, instance_id, current.as_deref())?)?;
+    let health = Arc::new(std::sync::Mutex::new(AdvertiseHealth::default()));
+    let current = Arc::new(std::sync::Mutex::new(Some(daemon.clone())));
 
-    let refresher = {
-        let daemon = daemon.clone();
-        let (fp, project, iid) = (fp_hex.to_string(), project.to_string(), instance_id.to_string());
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(ADDR_REFRESH_INTERVAL).await;
-                let latest = primary_lan_ip();
-                if latest == current {
-                    continue;
-                }
-                match service_info(port, &fp, &project, &iid, latest.as_deref()) {
-                    Ok(info) => match daemon.register(info) {
-                        Ok(()) => {
-                            eprintln!("[mads:bridge] LAN-IP gewechselt, annonciert jetzt {latest:?}");
-                            current = latest;
+    let task = tokio::spawn(advertise_loop(
+        port,
+        fp_hex.to_string(),
+        project.to_string(),
+        instance_id.to_string(),
+        lan_ip,
+        daemon,
+        Arc::clone(&current),
+        Arc::clone(&health),
+    ));
+
+    Ok(Advertiser { current, task, health })
+}
+
+/// Steht `ip` in der Debug-Liste der Adressen, über die annonciert wurde? Die Liste kommt als
+/// `format!("{:?}", Vec<IpAddr>)` aus `DaemonEvent::Announce` — die Bibliothek bietet nichts
+/// Strukturierteres, also wird sie hier wieder in Adressen zerlegt.
+fn announced_over(addrs: &str, ip: &str) -> bool {
+    addrs
+        .trim_matches(|c| c == '[' || c == ']')
+        .split(',')
+        .any(|entry| entry.trim() == ip)
+}
+
+/// Der Takt hinter `advertise`: Daemon-Ereignisse mitlesen und die Ankündigung bei Bedarf heilen.
+#[allow(clippy::too_many_arguments)]
+async fn advertise_loop(
+    port: u16,
+    fp_hex: String,
+    project: String,
+    instance_id: String,
+    mut lan_ip: Option<String>,
+    daemon: mdns_sd::ServiceDaemon,
+    current: Arc<std::sync::Mutex<Option<mdns_sd::ServiceDaemon>>>,
+    health: Arc<std::sync::Mutex<AdvertiseHealth>>,
+) {
+    use mdns_sd::DaemonEvent;
+
+    let mut monitor = daemon.monitor().ok();
+    let mut backoff = ADDR_REFRESH_INTERVAL;
+    let mut last_attempt = std::time::Instant::now();
+    let mut ticker = tokio::time::interval(ADDR_REFRESH_INTERVAL);
+    ticker.tick().await; // der erste Tick eines `interval` kommt sofort
+
+    loop {
+        // Geklont, damit der `select!`-Borrow nicht verhindert, dass `monitor` im Arm ersetzt wird.
+        let rx = monitor.clone();
+        let ticked = match &rx {
+            Some(rx) => tokio::select! {
+                event = rx.recv_async() => {
+                    match event {
+                        Ok(DaemonEvent::Announce(name, addrs)) => {
+                            // `addrs` ist die Debug-Darstellung der `Vec<IpAddr>`, über die der
+                            // Daemon rausgegangen ist („[127.0.0.1, 10.0.0.24]"). Exakt vergleichen
+                            // statt `contains`: sonst gälte eine Ankündigung über 10.0.0.240 als
+                            // Beleg für 10.0.0.24 und die Heilung bliebe aus.
+                            if let Some(ip) = lan_ip.as_deref() {
+                                if announced_over(&addrs, ip) {
+                                    health.lock().unwrap().announced_lan_ip = Some(ip.to_string());
+                                }
+                            }
+                            eprintln!("[mads:bridge] mDNS annonciert {name} über {addrs}");
                         }
-                        // Nicht übernehmen: beim nächsten Takt erneut versuchen, statt den alten
-                        // Wert als „aktualisiert" zu verbuchen.
-                        Err(e) => eprintln!("[mads:bridge] mDNS-Update fehlgeschlagen: {e}"),
-                    },
-                    Err(e) => eprintln!("[mads:bridge] mDNS-Record nicht baubar: {e}"),
+                        Ok(DaemonEvent::Error(e)) => {
+                            eprintln!("[mads:bridge] mDNS-Fehler: {e}");
+                            health.lock().unwrap().last_error = Some(e.to_string());
+                        }
+                        Ok(DaemonEvent::IpAdd(ip)) => eprintln!("[mads:bridge] mDNS: Adresse dazu: {ip}"),
+                        Ok(DaemonEvent::IpDel(ip)) => eprintln!("[mads:bridge] mDNS: Adresse weg: {ip}"),
+                        Ok(_) => {}
+                        // Kanal tot (Daemon beendet) → im nächsten Takt fällt die Heilung darauf.
+                        Err(_) => monitor = None,
+                    }
+                    false
                 }
+                _ = ticker.tick() => true,
+            },
+            None => {
+                ticker.tick().await;
+                true
             }
-        })
-    };
+        };
+        if !ticked {
+            continue;
+        }
 
-    Ok((daemon, refresher))
+        let latest = primary_lan_ip();
+        let announced = health.lock().unwrap().announced_lan_ip.clone();
+        let switched = latest != lan_ip;
+        // Es gibt eine LAN-IP, aber der Daemon hat nie über sie annonciert → er sitzt auf der
+        // falschen Schnittstelle (der Loopback-Fall vom 24.09.2026).
+        let unseen = latest.is_some() && announced.as_deref() != latest.as_deref();
+
+        if !switched && !unseen {
+            backoff = ADDR_REFRESH_INTERVAL; // gesund → der nächste Fehler darf sofort heilen
+            continue;
+        }
+        // Ein Netzwechsel wird sofort beantwortet; ein hartnäckig stummer Daemon mit Abstand.
+        if !switched && last_attempt.elapsed() < backoff {
+            continue;
+        }
+        last_attempt = std::time::Instant::now();
+
+        let old = current.lock().unwrap().take();
+        if let Some(old) = old {
+            let _ = old.shutdown();
+        }
+        match spawn_daemon(port, &fp_hex, &project, &instance_id, latest.as_deref()) {
+            Ok(fresh) => {
+                eprintln!(
+                    "[mads:bridge] mDNS neu aufgebaut (LAN-IP {latest:?}, zuvor annonciert über {announced:?})"
+                );
+                monitor = fresh.monitor().ok();
+                *current.lock().unwrap() = Some(fresh);
+                lan_ip = latest;
+                let mut h = health.lock().unwrap();
+                h.announced_lan_ip = None;
+                h.rebuilds += 1;
+                backoff = ADDR_REFRESH_INTERVAL;
+            }
+            Err(e) => {
+                eprintln!("[mads:bridge] mDNS-Neuaufbau fehlgeschlagen: {e}");
+                health.lock().unwrap().last_error = Some(e.to_string());
+                backoff = (backoff * 2).min(MAX_HEAL_BACKOFF);
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────── Accept-Loop
@@ -1391,12 +1562,20 @@ mod tests {
     #[tokio::test]
     async fn advertise_starts_or_is_sandboxed() {
         match advertise(12345, "deadbeef".repeat(8).as_str(), "test", "0123456789ab") {
-            Ok((daemon, refresher)) => {
-                refresher.abort();
-                let _ = daemon.shutdown();
-            }
+            // Der `Drop` des Advertisers bricht den Takt ab und fährt den Daemon herunter.
+            Ok(advertiser) => drop(advertiser),
             Err(e) => eprintln!("[test] mDNS in dieser Umgebung nicht verfügbar (ok in Sandbox): {e}"),
         }
+    }
+
+    /// Eine Ankündigung über 10.0.0.240 darf nicht als Beleg für 10.0.0.24 durchgehen — sonst
+    /// bliebe die Heilung aus, obwohl der Daemon die LAN-Schnittstelle längst verloren hat.
+    #[test]
+    fn announced_over_matches_whole_addresses_only() {
+        assert!(announced_over("[127.0.0.1, 10.0.0.24]", "10.0.0.24"));
+        assert!(announced_over("[10.0.0.24]", "10.0.0.24"));
+        assert!(!announced_over("[127.0.0.1, 10.0.0.240]", "10.0.0.24"));
+        assert!(!announced_over("[127.0.0.1]", "10.0.0.24"));
     }
 
     /// LAN vor Overlay: zu Hause im WLAN soll der erste Kandidat sitzen. Das Overlay (CGNAT) ist
