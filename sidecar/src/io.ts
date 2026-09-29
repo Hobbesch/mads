@@ -70,8 +70,21 @@ function recordTimeline(obj: unknown): void {
 }
 
 /** Gepufferter agent_event-Verlauf eines Agenten (für den emitSnapshot-Replay). */
+// Ein Snapshot-Replay ist EINE WebSocket-Nachricht. Der iOS-Client (Network.framework) bricht die
+// Verbindung bei zu grossen Nachrichten mit „Message too long" (EMSGSIZE) ab — 500 Events à bis zu
+// 256 KB sprengen das leicht. Deshalb nur die NEUESTEN Events, die ins Byte-Budget passen.
+const TIMELINE_SNAPSHOT_MAX_BYTES = 512 * 1024;
+
 export function timelineSnapshot(agentId: string): unknown[] {
-  return timelineBuffers.get(agentId) ?? [];
+  const buf = timelineBuffers.get(agentId) ?? [];
+  let bytes = 0;
+  let start = buf.length;
+  while (start > 0) {
+    bytes += JSON.stringify(buf[start - 1]).length;
+    if (bytes > TIMELINE_SNAPSHOT_MAX_BYTES && start < buf.length) break;
+    start--;
+  }
+  return start === 0 ? buf : buf.slice(start);
 }
 
 /** Timeline eines entfernten/beendeten Agenten freigeben (kein unbegrenztes Wachstum). */
