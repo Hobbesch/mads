@@ -41,6 +41,7 @@ import type {
   AutopilotLevel,
   SandboxMode,
   PermissionMode,
+  EffortMode,
   PullRequestInfo,
 } from "../../shared/protocol.js";
 
@@ -317,7 +318,7 @@ export class AgentSession {
   label?: string;
   role?: "integrator" | "sub";
   model?: string;
-  effort?: string;
+  effort?: EffortMode;
   /** Claude-Konto dieses Streams (Profil-ID) — wird persistiert, damit ein Resume nach Neustart
    *  dasselbe Konto trifft (die Session liegt im `projects/` GENAU dieses Kontos). */
   accountId: string = DEFAULT_ACCOUNT_ID;
@@ -325,6 +326,10 @@ export class AgentSession {
   accountConfigDir: string = defaultClaudeConfigDir();
   /** Letzte gemeldete Kontingent-Lage — entprellt wiederholte Events desselben Fensters. */
   private lastRateLimitKey?: string;
+  /** Zuletzt gemeldete Plan-Nutzungslimits dieses Streams (5h/Woche/Woche-Opus). Gecacht, damit der
+   *  Snapshot sie einem frisch verbundenen Client mitgeben kann: `reportUsage()` läuft nur am Ende
+   *  eines Turns — bei ruhenden Streams stünde die Anzeige sonst beliebig lange leer. */
+  private lastUsage?: Record<string, unknown>;
   /** Doppel-Check: real vom SDK gelaufenes Modell (normalisiert, aus Init/Assistant-Nachrichten). */
   activeModel?: string;
   /** Fremd-Edit-Schutz: Worktree-Fingerprint zum ENDE des letzten Agent-Turns. Der Autopilot
@@ -1125,13 +1130,15 @@ export class AgentSession {
 
   /** Modell und/oder Effort LIVE umstellen (ohne query-Neustart): Modell via setModel(),
    *  Effort/Ultracode via applyFlagSettings() (Flag-Layer, sofort für den nächsten Turn). */
-  async setModelEffort(model?: string, effort?: string): Promise<void> {
+  async setModelEffort(model?: string, effort?: EffortMode): Promise<void> {
     if (model !== undefined && model !== "") {
       this.model = model;
       this.mismatchCorrectedFor = undefined; // frische Absicht → ein neuer Mismatch darf wieder warnen
       await this.q?.setModel?.(model);
     }
-    if (effort !== undefined && effort !== "") {
+    // Truthy statt `!== undefined`: die Nachricht kommt über die Leitung, der Typ ist nur ein
+    // Versprechen — ein leerer String würde sonst als Effort-Stufe an den SDK durchgereicht.
+    if (effort) {
       this.effort = effort;
       await this.q?.applyFlagSettings?.(effortFlagSettings(effort));
     }
@@ -1412,15 +1419,15 @@ export class AgentSession {
         `[${this.agentId}] Plan-Limits (${this.accountId}): 5h=${fiveHour?.utilization ?? "?"}% ` +
           `Woche=${sevenDay?.utilization ?? "?"}% Woche-Opus=${sevenDayOpus?.utilization ?? "?"}%`,
       );
-      this.emit({
-        ...envelope(),
+      this.lastUsage = {
         type: "account_usage",
         accountId: this.accountId,
         fiveHour,
         sevenDay,
         sevenDayOpus,
         subscription: typeof res.subscription_type === "string" ? res.subscription_type : undefined,
-      });
+      };
+      this.emit({ ...envelope(), ...this.lastUsage });
     } catch (e) {
       log(`[${this.agentId}] Plan-Limits nicht abrufbar: ${String(e)}`);
     }
@@ -1661,11 +1668,49 @@ export class AgentSession {
   }
   private setStatus(status: AgentStatus, currentStep?: string): void {
     this.status = status;
-    // `accountId` mitschicken: der Sidecar hat den Prozess gestartet und kennt das reale Konto,
-    // die Oberfläche kann es nur raten. Damit heilt jede Abweichung von selbst, statt bis zum
-    // nächsten Kontingent-Anschlag unbemerkt zu bleiben.
-    this.emit({ ...envelope(), type: "status_update", agentId: this.agentId, status, currentStep, label: this.label, role: this.role, accountId: this.accountId, sandboxMode: this.sandboxMode });
+    this.emit({ ...envelope(), ...this.statusPayload(), status, currentStep });
     this.onChange?.();
+  }
+
+  /**
+   * Die Stamm-Felder eines `status_update`. Ausgelagert, damit der Snapshot-Re-Emit (Orchestrator)
+   * exakt dieselben Felder schickt wie der Live-Pfad — vorher fehlten ihm `accountId`/`sandboxMode`,
+   * und ein frisch verbundener Remote-Client sah für diese Werte dauerhaft nichts.
+   *
+   * `accountId`/`sandboxMode`/`model`/`effort`/`permissionMode` kommen mit, weil der Sidecar den
+   * Prozess gestartet hat und die Wahrheit besitzt — die Oberfläche kann sie nur raten. Damit heilt
+   * jede Abweichung von selbst, statt bis zum nächsten Kontingent-Anschlag unbemerkt zu bleiben.
+   */
+  private statusPayload(): Record<string, unknown> {
+    return {
+      type: "status_update",
+      agentId: this.agentId,
+      label: this.label,
+      role: this.role,
+      accountId: this.accountId,
+      sandboxMode: this.sandboxMode,
+      model: this.model,
+      effort: this.effort,
+      permissionMode: this.permissionMode,
+    };
+  }
+
+  /** Aktuellen Status unverändert erneut senden — für den Snapshot an einen (wieder) verbundenen
+   *  Remote-Client. Ändert nichts, löst kein `onChange` aus. */
+  resnapshotStatus(): void {
+    this.emit({ ...envelope(), ...this.statusPayload(), status: this.status });
+  }
+
+  /** Zuletzt bekannte Plan-Nutzungslimits erneut senden (Snapshot). Nichts gemessen → nichts
+   *  gesendet: eine erfundene 0 %-Anzeige wäre schlechter als gar keine. */
+  resnapshotUsage(): void {
+    if (this.lastUsage) this.emit({ ...envelope(), ...this.lastUsage });
+  }
+
+  /** Konto, für das `resnapshotUsage()` Werte hätte — der Orchestrator entdoppelt damit über
+   *  mehrere Streams desselben Kontos. */
+  get usageAccountId(): string | undefined {
+    return this.lastUsage ? this.accountId : undefined;
   }
   private fail(code: string, message: string, recoverable: boolean): void {
     this.cancelPendingPermissions(); // Session stirbt → offene Rückfragen überall abräumen (wie interrupt/stop)

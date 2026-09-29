@@ -901,8 +901,16 @@ export class Orchestrator {
     // has()-Guard in handlePanicResolve.)
     this.emitPanicState();
     this.link.emitStatus(); // Verbund-Zustand (Pill, Tab, Settings) — idempotenter Spiegel
+    // Konten-Registry (Namen, Default, Cooldowns): ohne sie zeigt ein Remote-Client im Konto-Wähler
+    // nur rohe Profil-IDs und weiß nicht, welches Konto gerade das Default für neue Streams ist.
+    this.emitAccounts();
+    // Plan-Nutzungslimits je Konto EINMAL nachziehen (mehrere Streams teilen sich oft ein Konto).
+    const usageSeen = new Set<string>();
     for (const s of this.pool.values()) {
-      this.emit({ ...envelope(), type: "status_update", agentId: s.agentId, status: s.status, label: s.label, role: s.role });
+      // Vollständiger Status (inkl. accountId/sandboxMode/model/effort/permissionMode) über genau
+      // denselben Bauplan wie der Live-Pfad — ein von Hand nachgebautes status_update hatte hier
+      // jahrelang die halben Felder verloren.
+      s.resnapshotStatus();
       this.emit({
         ...envelope(),
         type: "cost_update",
@@ -922,6 +930,11 @@ export class Orchestrator {
       // Offene Permission-Requests erneut senden — sonst sieht ein (wieder) verbundener Remote-Client
       // eine noch wartende Rückfrage/Tool-Freigabe nicht und kann sie nicht beantworten.
       s.resnapshotPermissions();
+      const acc = s.usageAccountId;
+      if (acc && !usageSeen.has(acc)) {
+        usageSeen.add(acc);
+        s.resnapshotUsage();
+      }
     }
     // Live-Refresh (git/PR) asynchron nachschieben — blockiert den Snapshot nicht.
     void this.pollAll();
