@@ -1,11 +1,21 @@
 import type { EffortMode } from "../../shared/protocol";
-import { MODELS, EFFORT_LABEL, EFFORT_HINT, effortLevelsFor, modelLabel } from "../modelCatalog";
+import { useStore } from "../store";
+import { EFFORT_LABEL, EFFORT_HINT, effortLevelsFor, modelLabel } from "../modelCatalog";
+import type { ModelInfo } from "../../shared/models";
 
 /**
  * Modell- + Effort-Wähler. Wiederverwendet für den GLOBALEN Default (linke Navigation) und die
- * PRO-STREAM-Umschaltung (Inspector). Der Effort-Regler passt sich dem Modell an: Modelle ohne
- * Effort (Haiku) zeigen keinen Regler; Sonnet 4.6 nur bis „High"; Fable 5.1 / Fable 5 / Opus 5 /
- * Opus 4.8 / Sonnet 5 bis „Ultracode" (= xhigh + Workflow-Orchestrierung).
+ * PRO-STREAM-Umschaltung (Inspector).
+ *
+ * Die Modell-Liste kommt aus dem geprüften Katalog im Store (`model_catalog`, erhoben beim Start
+ * vom Sidecar) — nicht mehr aus einer hartcodierten Liste. Zwei Gruppen:
+ *
+ *  • „Immer das neuste" — Claude-Code-Aliase (`opus`, `sonnet`, …). Sie lösen bei jedem
+ *    Stream-Start selbst auf die neuste Generation auf und veralten deshalb nie.
+ *  • „Feste Generationen" — exakte Model-IDs, wenn man bewusst auf einer Generation bleiben will.
+ *
+ * Der Effort-Regler passt sich dem Modell an: Modelle ohne Effort (Haiku) zeigen keinen Regler,
+ * ältere Generationen ohne xhigh nur bis „High".
  */
 export function ModelEffortPicker({
   model,
@@ -28,22 +38,46 @@ export function ModelEffortPicker({
    */
   variant?: "inspector" | "rail" | "dialog";
 }) {
+  // Über den Store lesen (nicht über currentCatalog()), damit die Auswahl neu rendert, sobald die
+  // Prüfung beim Start durch ist.
+  const catalog = useStore((s) => s.modelCatalog);
   const levels = effortLevelsFor(model);
   const effVal = effort && levels.includes(effort) ? effort : levels[levels.length - 1];
+  const aliases = catalog.models.filter((m) => m.kind === "alias");
+  const exact = catalog.models.filter((m) => m.kind !== "alias");
+  // Ein gewähltes Modell, das der Katalog nicht (mehr) führt, bekommt eine eigene Zeile — sonst
+  // zeigte das Dropdown stumm den ersten Eintrag und der Stream liefe auf etwas anderem als angezeigt.
+  const orphan = catalog.models.some((m) => m.id === model) ? undefined : model;
+
   return (
     <div className={`model-effort${variant ? ` me-${variant}` : ""}`}>
       <select
         className="me-model"
         value={model}
         disabled={disabled}
-        title={`Modell: ${modelLabel(model)}`}
+        title={`Modell: ${modelLabel(model)}${catalog.note ? `\n${catalog.note}` : ""}`}
         onChange={(e) => onModel(e.target.value)}
       >
-        {MODELS.map((m) => (
-          <option key={m.id} value={m.id} title={m.hint}>
-            {m.label}
+        {orphan && (
+          <option value={orphan} title="Nicht im geprüften Katalog — bleibt wählbar, solange dieser Stream darauf läuft.">
+            {modelLabel(orphan)} (nicht geprüft)
           </option>
-        ))}
+        )}
+        <optgroup label="Immer das neuste">
+          {aliases.map((m) => (
+            <option key={m.id} value={m.id} title={m.hint}>
+              {m.label}
+            </option>
+          ))}
+        </optgroup>
+        <optgroup label="Feste Generationen">
+          {exact.map((m) => (
+            <option key={m.id} value={m.id} title={tooltip(m)} disabled={m.cliKnown === false}>
+              {m.label}
+              {m.cliKnown === false ? " — Update nötig" : ""}
+            </option>
+          ))}
+        </optgroup>
       </select>
       {levels.length > 0 ? (
         <select
@@ -66,4 +100,17 @@ export function ModelEffortPicker({
       )}
     </div>
   );
+}
+
+/** Tooltip inkl. der beiden Befunde aus der Start-Prüfung (Anthropic bzw. lokale CLI). */
+function tooltip(m: ModelInfo): string {
+  const lines = [m.hint];
+  if (m.cliKnown === false) {
+    lines.push(
+      "Die gebündelte Claude-Code-Version kennt dieses Modell nicht — die API weist es ab. " +
+        "Agent-SDK aktualisieren (npm --prefix sidecar install), dann erneut prüfen.",
+    );
+  }
+  if (m.contextWindow) lines.push(`Kontextfenster: ${Math.round(m.contextWindow / 1000)}k Tokens.`);
+  return lines.join("\n");
 }

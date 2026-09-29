@@ -1,46 +1,74 @@
 /**
- * Zentrale Modell-/Effort-Katalog (Single Source of Truth fürs UI): welche Modelle wählbar sind
- * und welche Effort-Stufen jedes Modell unterstützt. Genutzt von der linken Navigation (globaler
- * Default), dem New-Stream-Dialog und dem Inspector (pro-Stream-Umschaltung).
+ * Modell-/Effort-Katalog fürs UI: welche Modelle wählbar sind und welche Effort-Stufen jedes
+ * Modell unterstützt. Genutzt von der linken Navigation (globaler Default), dem New-Stream-Dialog
+ * und dem Inspector (pro-Stream-Umschaltung).
  *
- * Effort-Fakten (Stand claude-api-Skill): `xhigh` gibt es erst ab Fable 5/5.1 / Opus 4.7+ / Sonnet 5;
- * Haiku 4.5 kennt KEINEN Effort-Parameter; Sonnet 4.6 kann bis `high` (kein xhigh → kein Ultracode).
- * „Ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung (SDK-Session-Flag `ultracode`).
+ * WAS SICH GEÄNDERT HAT: Die Liste steht nicht mehr HIER, sondern in `shared/models.ts` (eingebaute
+ * Grundliste) und wird beim Start vom Sidecar gegen Anthropic und die gebündelte Claude-Code-CLI
+ * geprüft (`sidecar/src/modelDiscovery.ts` → `model_catalog`). Diese Datei ist nur noch der
+ * UI-nahe Zugriff darauf:
+ *
+ *   • `setRuntimeCatalog()` nimmt den geprüften Katalog entgegen (aus dem Store-Handler) und legt
+ *     ihn zusätzlich im localStorage ab — so zeigt schon der ERSTE Frame nach dem App-Start die
+ *     zuletzt bekannte Auswahl statt der ältesten eingebauten Liste.
+ *   • Alle Lese-Helfer (`availableModels`, `modelLabel`, `effortLevelsFor`, `clampEffort`) gehen
+ *     über diesen Spiegel und fallen ohne ihn auf die eingebaute Liste zurück.
+ *
+ * Effort-Fakten: `xhigh` gibt es erst ab den neueren Generationen (Fable 5/5.1, Opus 4.7+,
+ * Sonnet 5+); Haiku kennt KEINEN Effort-Parameter; Sonnet 4.6 kann bis `high` (kein xhigh → kein
+ * Ultracode). Wo die Models-API `capabilities` liefert, kommt die Ladder von dort — dann muss
+ * niemand mehr von Hand nachtragen. „Ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung
+ * (SDK-Session-Flag `ultracode`).
  */
 import type { EffortMode } from "../shared/protocol";
 import { DEFAULT_MODEL as SHARED_DEFAULT_MODEL } from "../shared/protocol";
+import {
+  builtinCatalog,
+  effortLevelsFor as effortLevelsIn,
+  labelFor,
+  findModel,
+  type ModelCatalog,
+  type ModelInfo,
+} from "../shared/models";
 
-export interface ModelOption {
-  id: string;
-  label: string;
-  /** Kurzbeschreibung fürs Tooltip. */
-  hint: string;
-  /** Effort-Stufen, die dieses Modell unterstützt (leer = kein Effort-Regler). */
-  effort: EffortMode[];
+export type { ModelInfo, ModelCatalog };
+
+const KEY = "mads.modelCatalog";
+
+/** Zuletzt bekannter, geprüfter Katalog. `undefined` = noch nie geprüft → eingebaute Liste. */
+let runtime: ModelCatalog | undefined = loadCached();
+
+function loadCached(): ModelCatalog | undefined {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return undefined;
+    const obj = JSON.parse(raw) as ModelCatalog;
+    return obj && Array.isArray(obj.models) && obj.models.length ? obj : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
-const FULL: EffortMode[] = ["low", "medium", "high", "xhigh", "ultracode"];
+/** Geprüften Katalog übernehmen (Store-Handler für `model_catalog`). */
+export function setRuntimeCatalog(catalog: ModelCatalog): void {
+  if (!catalog?.models?.length) return; // leere Antwort nie übernehmen — sonst stünde das Dropdown leer
+  runtime = catalog;
+  try {
+    localStorage.setItem(KEY, JSON.stringify(catalog));
+  } catch {
+    /* localStorage nicht verfügbar — gilt dann nur für diese Sitzung */
+  }
+}
 
-// Aktuelle Modell-Riege. Reihenfolge = Anzeige im Dropdown.
-export const MODELS: ModelOption[] = [
-  { id: "claude-fable-5-1", label: "Fable 5.1", hint: "Anthropics fähigstes Modell — Nachfolger von Fable 5, anspruchsvollste, lang laufende Agenten-Arbeit (teuerste Stufe: $10/$50 pro Mio.)", effort: FULL },
-  { id: "claude-fable-5", label: "Fable 5", hint: "Vorgänger-Fable (gleicher Preis wie Fable 5.1: $10/$50)", effort: FULL },
-  { id: "claude-opus-5", label: "Opus 5", hint: "Stärkster fürs agentische Coding — Standard/Empfehlung für den Integrator; halb so teuer wie Fable 5.1 ($5/$25)", effort: FULL },
-  {
-    id: "opusplan",
-    label: "Opus+Plan",
-    hint:
-      "Offizieller Claude-Code-Alias: Opus fürs Planen, automatischer Wechsel zu Sonnet für die Ausführung — " +
-      "kostet wie Opus 5 waehrend des Planens, wie Sonnet 5 waehrend des Umsetzens. Der Opus-Anteil greift nur, " +
-      "wenn die Session tatsächlich in Plan Mode läuft (Permission-Modus „Plan\" oder wenn der Agent selbst " +
-      "planend vorgeht) — bei durchgehend direkter Ausführung entspricht es schlicht Sonnet 5.",
-    effort: FULL,
-  },
-  { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Vorgänger-Opus (gleicher Preis wie Opus 5)", effort: FULL },
-  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Nahe Opus bei Coding/Agentik, ~40 % günstiger ($3/$15) — bestes Preis/Leistung für Sub-Agents", effort: FULL },
-  { id: "claude-sonnet-4-6", label: "Sonnet 4.6", hint: "Vorgänger-Sonnet (kein xhigh/Ultracode)", effort: ["low", "medium", "high"] },
-  { id: "claude-haiku-4-5", label: "Haiku 4.5", hint: "Schnell & günstig ($1/$5) — kein Effort-Regler; für Explore/Hilfsarbeit", effort: [] },
-];
+/** Der aktuell gültige Katalog (geprüft oder eingebaut). */
+export function currentCatalog(): ModelCatalog {
+  return runtime ?? builtinCatalog();
+}
+
+/** Wählbare Modelle in Anzeige-Reihenfolge. */
+export function availableModels(): ModelInfo[] {
+  return currentCatalog().models;
+}
 
 export const EFFORT_LABEL: Record<EffortMode, string> = {
   low: "Low",
@@ -65,13 +93,17 @@ export const DEFAULT_EFFORT: EffortMode = "high";
 export const DEFAULT_MODEL = SHARED_DEFAULT_MODEL;
 
 export function modelLabel(id: string | undefined): string {
-  if (!id) return "?";
-  return MODELS.find((m) => m.id === id)?.label ?? id;
+  return labelFor(currentCatalog(), id);
+}
+
+/** Ist diese Model-ID im aktuellen Katalog wählbar? */
+export function isKnownModel(id: string | undefined): boolean {
+  return !!findModel(currentCatalog(), id);
 }
 
 /** Vom Modell unterstützte Effort-Stufen (leer = Modell kennt keinen Effort). */
 export function effortLevelsFor(modelId: string | undefined): EffortMode[] {
-  return MODELS.find((m) => m.id === modelId)?.effort ?? [];
+  return effortLevelsIn(currentCatalog(), modelId);
 }
 
 /** Effort auf das gewählte Modell begrenzen: nicht unterstützte Stufe → höchste unterstützte

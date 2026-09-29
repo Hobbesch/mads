@@ -69,6 +69,7 @@ export function SettingsPanel() {
             </span>
           </label>
         </div>
+        <ModelCatalogSettings />
         <div className="settings-group">
           <div className="settings-group-title">Anthropic-Login</div>
           <div className="settings-hint">
@@ -125,9 +126,64 @@ export function SettingsPanel() {
         <InvestigationTargetsEditor />
         <LinkSettings />
         <RemotePairing />
-        {/* TODO(Post-MVP): Permission-Defaults, Modell-Auswahl, Update-Kanal (doc 10 §10). */}
+        {/* TODO(Post-MVP): Permission-Defaults, Update-Kanal (doc 10 §10). */}
       </div>
     </section>
+  );
+}
+
+/**
+ * Woher die Modell-Auswahl stammt — und ein Knopf, sie neu zu erheben.
+ *
+ * Sichtbar zu machen, WAS geprüft wurde, ist hier kein Beiwerk: die Auswahl kann aus drei sehr
+ * unterschiedlichen Quellen kommen (frisch bei Anthropic geprüft / letzter bekannter Stand / nur
+ * die eingebaute Liste). Ohne diese Zeile wäre für den Nutzer nicht unterscheidbar, ob ein Modell
+ * fehlt, weil Anthropic es nicht anbietet, oder weil mads gar nicht nachfragen konnte.
+ */
+function ModelCatalogSettings() {
+  const catalog = useStore((s) => s.modelCatalog);
+  const busy = useStore((s) => s.modelCheckBusy);
+  const refresh = useStore((s) => s.refreshModels);
+  const stale = catalog.models.filter((m) => m.cliKnown === false);
+  const label =
+    catalog.status === "live"
+      ? "bei Anthropic geprüft"
+      : catalog.status === "local"
+        ? "gegen die lokale Claude-Code-Version geprüft"
+        : catalog.status === "cache"
+          ? "zuletzt bekannter Stand"
+          : "eingebaute Liste (noch nicht geprüft)";
+
+  return (
+    <div className="settings-group">
+      <div className="settings-group-title">Modelle</div>
+      <div className="settings-hint">
+        mads prüft beim Start, welche Modelle Anthropic für dein Konto anbietet und welche die
+        gebündelte Claude-Code-Version unterstützt. Die Einträge „· neustes" (Opus, Sonnet, …) lösen
+        bei jedem Stream-Start selbst auf die neuste Generation auf und veralten nie.
+      </div>
+      <div className="settings-hint" style={{ marginTop: 6 }}>
+        <strong>{catalog.models.length} wählbar</strong> · {label}
+        {catalog.checkedAt ? ` · ${new Date(catalog.checkedAt).toLocaleString("de-CH")}` : ""}
+        {catalog.note ? ` · ${catalog.note}` : ""}
+      </div>
+      {stale.length > 0 && (
+        <div className="settings-hint" style={{ marginTop: 6 }}>
+          Nicht nutzbar mit der gebündelten Claude-Code-Version {catalog.cliVersion ?? ""}:{" "}
+          {stale.map((m) => m.label).join(", ")}. Die API weist sie ab — Agent-SDK aktualisieren
+          (<code>npm --prefix sidecar install</code>), mads neu starten, dann erneut prüfen.
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        <button
+          disabled={busy}
+          title="Modell-Liste jetzt neu bei Anthropic und gegen die lokale Claude-Code-Version prüfen"
+          onClick={() => refresh(true)}
+        >
+          {busy ? "Prüfe…" : "Jetzt prüfen"}
+        </button>
+      </div>
+    </div>
   );
 }
 

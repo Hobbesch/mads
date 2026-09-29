@@ -40,6 +40,8 @@ const SHARED_LANDFIRST_GLOBS = [
 import type { HostMessage, ProjectInfo, EscalationKind, AutonomyConfig, AutopilotLevel, ResumableAgent, SavedPrompt, OpenReviewStreamMsg, StartAgentMsg, SandboxMode, InvestigationTarget, GateStep } from "../../shared/protocol.js";
 import conflictPlaybook from "../playbooks/conflict-resolution.md";
 import { loadAccounts, pruneCooldowns, saveAccounts } from "./accounts.js";
+import { discoverModels } from "./modelDiscovery.js";
+import { builtinCatalog, type ModelCatalog } from "../../shared/models.js";
 import { AccountRelink } from "./accountRelink.js";
 
 /**
@@ -140,6 +142,11 @@ export class Orchestrator {
   // den Default — sonst würde ein bewusst manuell geführter Stream plötzlich autonom weiterlaufen.
   private panicStopped = new Map<string, AutopilotLevel>();
   private panicResolverId?: string;
+
+  /** Zuletzt erhobene Modell-Auswahl (Laufzeit-Spiegel; Quelle ist `~/.mads/models.json`). */
+  private modelCatalog?: ModelCatalog;
+  /** Läuft gerade eine Erhebung? Bündelt gleichzeitige Anfragen auf EINEN CLI-Scan. */
+  private modelCheck?: Promise<ModelCatalog>;
 
   /**
    * Projekt-Verbund (docs/design/12-project-link.md): koordiniert dieses Repo mit dem gekoppelten
@@ -315,6 +322,10 @@ export class Orchestrator {
 
       case "request_accounts":
         this.emitAccounts();
+        break;
+
+      case "request_models":
+        void this.emitModels(msg.force === true, msg.keep ?? []);
         break;
 
       case "account_relink":
@@ -2861,6 +2872,34 @@ export class Orchestrator {
   private emitAccounts(): void {
     const state = pruneCooldowns(loadAccounts());
     this.emit({ ...envelope(), type: "accounts_update", accounts: state });
+  }
+
+  /**
+   * Modell-Auswahl erheben und spiegeln (siehe `modelDiscovery.ts`).
+   *
+   * Der erhobene Katalog wird im Prozess gemerkt: ein zweites `request_models` (Fenster neu
+   * geladen, zweiter Client) soll die ~200 MB grosse CLI-Binärdatei nicht erneut scannen. Nur
+   * „Jetzt prüfen" (`force`) erhebt wirklich neu. Parallele Anfragen teilen sich denselben Lauf.
+   */
+  private async emitModels(force: boolean, keep: string[]): Promise<void> {
+    if (this.modelCatalog && !force) {
+      this.emit({ ...envelope(), type: "model_catalog", catalog: this.modelCatalog });
+      return;
+    }
+    if (!this.modelCheck) {
+      this.modelCheck = discoverModels({ force, keep, accounts: loadAccounts() })
+        .catch((e) => {
+          log(`[orchestrator] Modell-Pruefung fehlgeschlagen: ${String(e)}`);
+          return builtinCatalog();
+        })
+        .finally(() => {
+          this.modelCheck = undefined;
+        });
+    }
+    const catalog = await this.modelCheck;
+    this.modelCatalog = catalog;
+    log(`[orchestrator] Modelle: ${catalog.models.length} wählbar (${catalog.status}) — ${catalog.note ?? ""}`);
+    this.emit({ ...envelope(), type: "model_catalog", catalog });
   }
 
   /**

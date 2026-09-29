@@ -27,6 +27,7 @@ import {
 import { accountAgentEnv } from "./agentEnv.js";
 import { DEFAULT_ACCOUNT_ID, loadAccounts, pickFallback, readAccountToken, resolveProfile, saveAccounts, withCooldown } from "./accounts.js";
 import { sandboxOptions } from "./sandbox.js";
+import { ALIAS_IDS, parseModelId } from "../../shared/models.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1152,13 +1153,17 @@ export class AgentSession {
     const norm = normalizeModelId(actual);
     if (norm === this.activeModel) return; // nur bei echter Änderung — drosselt den Emit
     this.activeModel = norm;
-    // "opusplan" (Claude-Code-eigener Alias) lässt die Session ABSICHTLICH zwischen Opus (Plan
-    // Mode) und Sonnet (Ausführung) wechseln — reale ID gleicht nie dem angeforderten String
-    // "opusplan" selbst. Das ist kein Mismatch, sondern die Funktion des Alias; nur eine Abweichung
-    // AUSSERHALB dieser beiden Familien (z. B. stiller Fallback auf Haiku) zählt hier als echter.
-    const mismatch =
-      !!this.model &&
-      (this.model === "opusplan" ? !/opus|sonnet/.test(norm) : norm !== normalizeModelId(this.model));
+    // Aliase lösen sich ABSICHTLICH auf eine andere ID auf, als angefordert wurde — die reale ID
+    // gleicht nie dem angeforderten String selbst. Das ist kein Mismatch, sondern die Funktion des
+    // Alias; gezählt wird nur eine Abweichung AUSSERHALB der erwarteten Familie(n):
+    //   • "opusplan" wechselt zwischen Opus (Plan Mode) und Sonnet (Ausführung),
+    //   • "opus"/"sonnet"/"fable"/"haiku" zeigen immer auf die neuste Generation ihrer Familie.
+    // Ein stiller Fallback auf z. B. Haiku bleibt damit weiterhin ein echter Mismatch.
+    const requested = this.model ? normalizeModelId(this.model) : "";
+    const aliasFamilies = requested === "opusplan" ? ["opus", "sonnet"] : ALIAS_IDS.includes(requested) ? [requested] : [];
+    const mismatch = aliasFamilies.length
+      ? !aliasFamilies.includes(parseModelId(norm)?.family ?? "")
+      : !!requested && norm !== requested;
     this.emit({ ...envelope(), type: "model_active", agentId: this.agentId, active: norm, requested: this.model, mismatch });
     if (mismatch) {
       // Je konkretem Fehl-Modell EINMAL warnen+nachziehen; driftet der SDK auf ein ANDERES falsches
