@@ -101,6 +101,30 @@ selbst als „RCE-Schutz / Höchste Sicherheitspriorität" bezeichnet. **Verifiz
 (default-deny für alles Gegenwärtige/Zukünftige). Prüfung auf beiden Feldern beibehalten; Tests für
 `auto`/`acceptEdits`-Ablehnung ergänzen.
 
+> **Nachtrag 2026-09-23 — die Einschränkung wurde bewusst zurückgenommen.**
+>
+> Die Allowlist umfasst jetzt **alle** Modi, die auch der Mac-Picker anbietet (`default`,
+> `acceptEdits`, `plan`, `auto`, `bypassPermissions`, `dontAsk`); zusätzlich sind
+> `set_sandbox_mode`, `set_account` und `request_accounts` auf `HOST_MESSAGE_TYPES`. Entscheidung
+> des Besitzers: das gekoppelte Gerät soll **volle Parität** zum Mac haben, inklusive
+> „Sandbox aus" aus der Ferne.
+>
+> **Was das heisst, unverändert:** wer diese Modi aus der Ferne setzt, lässt Agenten unbeaufsichtigt
+> ausführen. Die oben beschriebene Wirkungskette (`auto` → `behavior:"allow"` ohne Host-Prompt)
+> besteht fort — sie ist jetzt gewollt, nicht übersehen.
+>
+> **Was die Grenze weiterhin trägt:** (1) die Kopplung selbst — PIN/QR am Mac, widerrufbares
+> Geräte-Token, TLS mit SPKI-Pinning; ohne Token kommt niemand bis zur Validierung. (2) Die Liste
+> bleibt strukturell eine **Allow-Liste**: ein unbekannter oder nicht-stringförmiger Wert wird
+> weiterhin verworfen, und ein `mode`-Feld an einer Nachricht, die keines kennt, ebenfalls.
+> (3) `answer_permission` bleibt entschärft — `updatedInput` und `remember` werden nach wie vor
+> gestrichen, eine einzelne Freigabe kann also weder den Tool-Input umschreiben noch sich selbst
+> verewigen. (4) Für „Sandbox aus" gelten die Sidecar-Geländer unverändert: nie persistiert, kein
+> Autopilot-Push, Rückfall nach 15 Min. Inaktivität.
+>
+> **Ersetzt** damit die Zeile „Permission-Mode-Allowlist" in §Fix-Matrix. Code:
+> `src-tauri/src/bridge.rs` → `REMOTE_ALLOWED_PERMISSION_MODES` / `REMOTE_ALLOWED_SANDBOX_MODES`.
+
 ### RB-FS-1 / TAU-2-über-Netz — `register_root` lässt einen Remote beliebige Roots wählen 🔴 High
 **Datei:** `src-tauri/src/files.rs:455-470` (via `bridge.rs:193-196`)
 
@@ -255,7 +279,7 @@ an der Wurzel entschärfen. Der `safe-command.ts`-Klassifizierer bleibt UX, kein
 | Symlink-Check in `canonicalize_allowing_missing` | TAU-1 | RB-FS-2 |
 | `.mads/` in `is_denied` + Dev-Server-Env reduzieren | RCE-1 | RB-RCE-1 |
 | `register_root` auf app-kontrollierte Roots | TAU-2 | RB-FS-1 |
-| Permission-Mode-Allowlist | — (neu) | RB-AUTH-1 |
+| Permission-Mode-Allowlist | — (neu) | RB-AUTH-1 — *2026-09-23 auf volle Mac-Parität geöffnet, siehe Nachtrag* |
 
 ---
 
