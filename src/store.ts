@@ -41,7 +41,8 @@ import type {
   LinkStatusMsg,
   ProjectLinkConfig,
 } from "../shared/protocol";
-import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultEffortForModel } from "./modelCatalog";
+import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultEffortForModel, currentCatalog, setRuntimeCatalog } from "./modelCatalog";
+import type { ModelCatalog } from "../shared/models";
 import type { Collision } from "../shared/collision";
 import { gateNoticeText } from "../shared/gate-report";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
@@ -396,6 +397,11 @@ export interface MadsState {
   defaultModel: string;
   /** Globaler Default für den Effort neuer Streams (persistiert). */
   defaultEffort: EffortMode;
+  /** Geprüfte Modell-Auswahl (Quelle: Sidecar `model_catalog`; hier nur gespiegelt). Bis die
+   *  Prüfung durch ist, steht hier der zwischengespeicherte bzw. eingebaute Katalog. */
+  modelCatalog: ModelCatalog;
+  /** true, solange eine Prüfung läuft (Knopf „Jetzt prüfen" im Einstellungs-Panel). */
+  modelCheckBusy: boolean;
   /** Claude-Konten + Cooldowns. Quelle ist der Sidecar (`accounts_update`) — hier nur gespiegelt.
    *  undefined = noch nicht geladen (dann bleibt die Konto-Auswahl schlicht unsichtbar). */
   accounts?: AccountsState;
@@ -501,6 +507,8 @@ export interface MadsState {
   setAutopilot: (id: string, level: AutopilotLevel) => Promise<void>;
   /** Globalen Default (linke Navigation) setzen — gilt für NEU eröffnete Streams. */
   setDefaultModel: (model: string) => void;
+  /** Modell-Auswahl neu erheben lassen (`force` umgeht den Zwischenspeicher im Sidecar). */
+  refreshModels: (force?: boolean) => void;
   setDefaultEffort: (effort: EffortMode) => void;
   /** Modell/Effort eines bestehenden Streams LIVE umstellen (Inspector). */
   setStreamModel: (id: string, model: string) => Promise<void>;
@@ -924,6 +932,10 @@ export const useStore = create<MadsState>((set) => {
         });
         // Konten-Registry anfordern (Quelle ist der Sidecar; die UI hält nur ein Spiegelbild).
         void sendHost({ ...envelope(), type: "request_accounts" });
+        // Modell-Auswahl prüfen lassen: welche Modelle bietet Anthropic für dieses Konto an und
+        // welche unterstützt die gebündelte Claude-Code-Version? Ohne diese Prüfung stünde im
+        // Dropdown nur die eingebaute Liste — genau die veraltet mit jeder neuen Generation.
+        useStore.getState().refreshModels();
         // Beim Start das zuletzt geöffnete Projekt automatisch wiederöffnen, damit man
         // nach App-Neustart/Release nicht jedes Mal neu suchen muss.
         const st = useStore.getState();
@@ -1231,6 +1243,21 @@ export const useStore = create<MadsState>((set) => {
         // Anzeige richtet sich hiernach, nicht nach dem Picker-Wunsch — so kann ein stiller
         // Fable-Default nicht mehr unbemerkt Tokens verbrennen.
         patchAgent(msg.agentId, { activeModel: msg.active, modelMismatch: msg.mismatch });
+        break;
+
+      case "model_catalog":
+        // Der Sidecar besitzt die Prüfung (er hat Netz, CLI und Konto-Token) — die UI spiegelt nur.
+        // `setRuntimeCatalog` legt den Stand zusätzlich im localStorage ab, damit der nächste
+        // App-Start nicht wieder bei der eingebauten Liste beginnt.
+        setRuntimeCatalog(msg.catalog);
+        set((s) => {
+          // Effort gegen die (womöglich neu erfahrene) Ladder des gewählten Modells nachziehen:
+          // meldet die Models-API z. B. „kein xhigh", darf der Default nicht auf Ultracode stehen
+          // bleiben und jeden neuen Stream mit einer ungültigen Stufe starten.
+          const effort = clampEffort(s.defaultModel, s.defaultEffort) ?? s.defaultEffort;
+          if (effort !== s.defaultEffort) saveUiPrefs({ defaultEffort: effort });
+          return { modelCatalog: msg.catalog, modelCheckBusy: false, defaultEffort: effort };
+        });
         break;
 
       case "accounts_update":
@@ -1598,6 +1625,8 @@ export const useStore = create<MadsState>((set) => {
     railCollapsed: loadUiPrefs().railCollapsed,
     defaultModel: loadUiPrefs().defaultModel,
     defaultEffort: loadUiPrefs().defaultEffort,
+    modelCatalog: currentCatalog(),
+    modelCheckBusy: false,
     accountUsage: {},
     changeOverviewOn: false,
     editsByFile: {},
@@ -2018,6 +2047,17 @@ export const useStore = create<MadsState>((set) => {
     },
 
     // ── Modell/Effort: globaler Default (linke Navigation) + pro-Stream-Umschaltung ──
+    refreshModels: (force = false) => {
+      // `keep`: alles, was gerade in Benutzung ist, muss im Katalog bleiben — sonst verschwände
+      // die aktive Wahl aus dem eigenen Dropdown, sobald zwei neuere Generationen erschienen sind.
+      const st = useStore.getState();
+      const keep = [st.defaultModel, ...Object.values(st.agents).map((a) => a.model)].filter(
+        (m): m is string => !!m,
+      );
+      if (force) set({ modelCheckBusy: true });
+      void sendHost({ ...envelope(), type: "request_models", force, keep: [...new Set(keep)] });
+    },
+
     setDefaultModel: (model) => {
       const effort = clampEffort(model, useStore.getState().defaultEffort) ?? DEFAULT_EFFORT;
       set({ defaultModel: model, defaultEffort: effort });

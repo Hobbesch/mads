@@ -14,6 +14,8 @@ import type { CommandKind } from "./safe-command.js";
 
 import type { Collision } from "./collision";
 
+import type { ModelCatalog } from "./models.js";
+
 export const PROTOCOL_VERSION = 1 as const;
 
 export type AgentStatus =
@@ -103,6 +105,7 @@ export type HostMessage =
   | RequestSnapshotMsg
   | SetAccountMsg
   | RequestAccountsMsg
+  | RequestModelsMsg
   | AccountRelinkMsg
   | SetSandboxModeMsg
   | TargetsSaveMsg
@@ -187,7 +190,29 @@ export interface ReviewStreamMsg extends BaseMsg {
  * er still sein Flaggschiff (Fable 5) — das verbrennt teure Tokens „blind", ohne dass die UI es zeigt
  * (der Picker spiegelt den WUNSCH, nicht das Ist). Deshalb nie undefined an den SDK. Siehe ModelActiveMsg.
  */
-export const DEFAULT_MODEL = "claude-opus-5";
+export const DEFAULT_MODEL = "claude-opus-5-5";
+
+/**
+ * Die AUSWAHL selbst ist nicht mehr hartcodiert: `shared/models.ts` hält die eingebaute Liste,
+ * `sidecar/src/modelDiscovery.ts` prüft beim Start, was Anthropic für dieses Konto anbietet und
+ * was die gebündelte Claude-Code-CLI unterstützt. Das Ergebnis kommt als `model_catalog` herüber.
+ */
+export interface ModelCatalogMsg extends BaseMsg {
+  type: "model_catalog";
+  catalog: ModelCatalog;
+}
+
+/** „Jetzt prüfen" aus den Einstellungen — `force` umgeht den Zwischenspeicher. */
+export interface RequestModelsMsg extends BaseMsg {
+  type: "request_models";
+  force?: boolean;
+  /**
+   * Modelle, die im Katalog bleiben MÜSSEN, auch wenn sie längst überholt sind: der globale
+   * Default und alles, worauf offene Streams laufen. Ohne das verschwände die gerade aktive Wahl
+   * des Nutzers aus seinem eigenen Dropdown, sobald zwei neuere Generationen erschienen sind.
+   */
+  keep?: string[];
+}
 
 /**
  * Doppel-Check gegen „blindes Fahren auf dem falschen Modell": Der Sidecar liest aus JEDER
@@ -638,6 +663,7 @@ export type SidecarMessage =
   | AccountUsageMsg
   | RateLimitNoticeMsg
   | ModelActiveMsg
+  | ModelCatalogMsg
   | LinkStatusMsg
   | PeerMessageMsg
   | PeerProposalMsg

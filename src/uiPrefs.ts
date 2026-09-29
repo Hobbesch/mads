@@ -14,7 +14,8 @@
 export type ViewId = "streams" | "files" | "settings";
 
 import type { EffortMode } from "../shared/protocol";
-import { DEFAULT_MODEL, DEFAULT_EFFORT, MODELS, clampEffort } from "./modelCatalog";
+import { DEFAULT_MODEL, DEFAULT_EFFORT, clampEffort, isKnownModel } from "./modelCatalog";
+import { parseModelId } from "../shared/models";
 
 export interface UiPrefs {
   activeView: ViewId;
@@ -83,8 +84,13 @@ export function loadUiPrefs(): UiPrefs {
     const activeView: ViewId = VALID_VIEWS.includes(obj.activeView) ? obj.activeView : DEFAULTS.activeView;
     const railCollapsed = typeof obj.railCollapsed === "boolean" ? obj.railCollapsed : DEFAULTS.railCollapsed;
     const devLogOpen = typeof obj.devLogOpen === "boolean" ? obj.devLogOpen : DEFAULTS.devLogOpen;
-    // Nur bekannte Modelle akzeptieren; Effort auf das Modell begrenzen.
-    const defaultModel = MODELS.some((m) => m.id === obj.defaultModel) ? (obj.defaultModel as string) : DEFAULTS.defaultModel;
+    // Modell übernehmen, wenn es der geprüfte Katalog kennt ODER es wie eine echte Model-ID
+    // aussieht. Die zweite Bedingung ist wichtig, seit der Katalog beim Start erhoben wird: die
+    // Prüfung läuft ASYNCHRON, hier ist erst der zwischengespeicherte Stand da. Ohne sie fiele
+    // eine bewusste Wahl beim ersten Start nach einem Katalog-Wechsel still auf den Default
+    // zurück — und der Nutzer säße unbemerkt auf einem anderen (teureren) Modell.
+    const wanted = typeof obj.defaultModel === "string" ? obj.defaultModel : "";
+    const defaultModel = wanted && (isKnownModel(wanted) || !!parseModelId(wanted)) ? wanted : DEFAULTS.defaultModel;
     const defaultEffort = clampEffort(defaultModel, obj.defaultEffort as EffortMode) ?? DEFAULTS.defaultEffort;
     return {
       activeView,
