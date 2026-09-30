@@ -11,14 +11,24 @@ name: CI
 permissions:
   contents: read
 
+# Kosten: ein Lauf pro PR-Stand (concurrency bricht veraltete ab), Draft-PRs laufen erst bei
+# „Ready for review", jeder Job hat ein Zeitlimit (hängender Test ≠ 6 h Abrechnung).
+# Hinweis: macOS-Minuten zählen 10× — auf privaten Repos teuer, auf öffentlichen gratis.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
     types: [checks_requested]
 
 jobs:
   quality:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    timeout-minutes: 30
     runs-on: macos-14
     permissions:
       contents: read
@@ -48,7 +58,8 @@ jobs:
 
   # Secret-Scan: verhindert, dass Secrets ins (öffentliche) Repo gelangen.
   secret-scan:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     permissions:
       contents: read
