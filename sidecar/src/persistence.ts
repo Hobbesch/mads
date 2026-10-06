@@ -3,9 +3,11 @@
  * Liegt unter <repoRoot>/.mads/agents.json (via .mads/.gitignore selbst-ignoriert),
  * atomar geschrieben.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, renameSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { log } from "./io.js";
 import type { InvestigationTarget, ResumableAgent, SavedPrompt } from "../../shared/protocol.js";
 
 export interface RegistryEntry extends ResumableAgent {
@@ -45,10 +47,72 @@ export function ensureMadsDir(repoRoot: string): void {
 // würden beide parallel `<repoRoot>/.mads/agents.json` + dieselben Worktrees schreiben → Korruption.
 // Ein pid-basierter Lock in `<repoRoot>/.mads/instance.lock` verhindert das. Crash-sicher: stirbt
 // eine Instanz, bleibt die Lock-Datei liegen, aber ihre pid ist tot → die nächste Instanz übernimmt.
+//
+// „pid ist tot" ist dabei NICHT dasselbe wie `kill(pid,0)`: pids werden wiederverwendet. Vorfall
+// 2026-10-06: ein Lock vom Vortag (pid 1224) blockierte das Projekt, weil nach einem Reboot
+// dieselbe pid an einen Apple-Hintergrunddienst gegangen war — `pidAlive` sagte „lebt", obwohl
+// kein mads mehr lief. Darum wird die pid zusätzlich über `ps` verifiziert (Kommandozeile +
+// Startzeit): ein recycelter Fremdprozess und ein Prozess, der NACH dem Lock-Schreiben gestartet
+// ist, können den Lock unmöglich halten.
 interface LockInfo {
   pid: number;
   startedAt: string;
   host: string;
+}
+
+/** Was `ps` über eine pid weiß: Startzeit (ms seit Epoch) und Kommandozeile. */
+export interface ProcInfo {
+  startedAt: number;
+  command: string;
+}
+
+/** Kommandozeile, hinter der ein mads-Sidecar stecken kann (dev: `node …/sidecar/dist/index.js`). */
+const SIDECAR_CMD = /sidecar[/\\]dist[/\\]index\.js|mads/i;
+
+/**
+ * Toleranz beim Vergleich „Prozess-Start ≤ Lock-Zeitpunkt". Beide Zeiten kommen von der Wanduhr
+ * dieses Rechners; NTP-Sprünge und die Sekunden-Granularität von `ps -o etime` dürfen einen
+ * echten, lebenden Halter nicht fälschlich als verwaist einstufen (das wäre der gefährliche
+ * Fehler: zwei Instanzen im selben Projekt). Recycelte pids liegen praktisch immer weit darüber.
+ */
+const CLOCK_SKEW_MS = 60_000;
+
+/** `ps`-Laufzeit `[[dd-]hh:]mm:ss` → Sekunden. Locale-unabhängig, anders als `lstart`. */
+export function parseEtime(s: string): number | null {
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(s.trim());
+  if (!m) return null;
+  return Number(m[1] ?? 0) * 86400 + Number(m[2] ?? 0) * 3600 + Number(m[3]) * 60 + Number(m[4]);
+}
+
+/** Startzeit + Kommandozeile einer pid; `null`, wenn `ps` nichts hergibt (pid weg / Ausgabe fremd). */
+export function procInfo(pid: number, now = Date.now()): ProcInfo | null {
+  try {
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "etime=,command="], { encoding: "utf8", timeout: 2000 }).trim();
+    const m = /^(\S+)\s+(.+)$/.exec(out);
+    const secs = m ? parseEtime(m[1]) : null;
+    return m && secs !== null ? { startedAt: now - secs * 1000, command: m[2] } : null;
+  } catch {
+    return null; // `ps` endet mit 1, wenn die pid weg ist — oder es gibt gar kein `ps`
+  }
+}
+
+/**
+ * Gehört der laufende Prozess mit dieser pid wirklich zu DIESEM Lock? Zwei Ausschlussgründe:
+ *  - die Kommandozeile ist kein mads (recycelte pid, z. B. ein System-Dienst nach Reboot),
+ *  - der Prozess startete NACH dem Lock-Eintrag — dann kann er ihn nicht geschrieben haben.
+ * `proc === null` (ps schweigt) → konservativ „ja": lieber einen Hinweis zu viel als zwei
+ * Instanzen im selben Projekt; der „Trotzdem hier öffnen"-Knopf bleibt der Notausgang.
+ */
+export function lockHolderMatches(prev: LockInfo, proc: ProcInfo | null): boolean {
+  if (!proc) return true;
+  if (!SIDECAR_CMD.test(proc.command)) return false;
+  const wrote = Date.parse(prev.startedAt);
+  return !Number.isFinite(wrote) || proc.startedAt <= wrote + CLOCK_SKEW_MS;
+}
+
+/** Hält die im Lock notierte Instanz ihn noch? (pid lebt UND der Prozess ist wirklich sie.) */
+export function lockHolderAlive(prev: LockInfo): boolean {
+  return pidAlive(prev.pid) && lockHolderMatches(prev, procInfo(prev.pid));
 }
 
 function lockPath(repoRoot: string): string {
@@ -67,8 +131,9 @@ export function pidAlive(pid: number): boolean {
 }
 
 /**
- * Projekt-Lock übernehmen. Erfolg, wenn frei / von uns / verwaist (tote pid). Andernfalls
- * `{ ok:false, byPid }` — das Projekt ist in einer anderen, lebenden Instanz offen.
+ * Projekt-Lock übernehmen. Erfolg, wenn frei / von uns / verwaist (pid tot ODER die pid gehört
+ * längst einem anderen Prozess). Andernfalls `{ ok:false, byPid }` — das Projekt ist in einer
+ * anderen, lebenden Instanz offen.
  */
 export function acquireProjectLock(repoRoot: string, force = false): { ok: true } | { ok: false; byPid: number } {
   ensureMadsDir(repoRoot);
@@ -102,8 +167,9 @@ export function acquireProjectLock(repoRoot: string, force = false): { ok: true 
     }
     // Nur eine andere, lebende Instanz AUF DIESEM HOST hält gültig — pids sind host-lokal; eine
     // fremder-Host- oder recycelte pid darf nicht dauerhaft aussperren (Notausgang: force).
-    if (prev && prev.pid !== process.pid && prev.host === hostname() && pidAlive(prev.pid)) {
-      return { ok: false, byPid: prev.pid };
+    if (prev && prev.pid !== process.pid && prev.host === hostname()) {
+      if (lockHolderAlive(prev)) return { ok: false, byPid: prev.pid };
+      log(`[lock] verwaister Projekt-Lock übernommen: pid ${prev.pid} (geschrieben ${prev.startedAt}) ist kein laufender mads-Sidecar mehr — ${p}`);
     }
     try {
       rmSync(p, { force: true }); // verwaist/uns → entfernen, dann atomar neu versuchen (Schleife)

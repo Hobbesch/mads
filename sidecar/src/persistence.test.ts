@@ -1,8 +1,15 @@
 /**
- * Tests für mergeRegistry (persistence.ts). Via `npm run test:persist`.
+ * Tests für mergeRegistry + den Multi-Instanz-Projekt-Lock (persistence.ts). Via `npm run test:persist`.
  * Regression-Schutz für „main verschwindet": der passiv wiederhergestellte Integrator
  * (nicht im Pool, kein Worktree) darf beim Persistieren NICHT aus der Registry fliegen.
+ * Und für „Projekt bereits in anderem Fenster offen", obwohl kein mads lief: eine recycelte pid
+ * darf ein Projekt nicht aussperren (Vorfall 2026-10-06).
  */
+import { spawn } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
+import { acquireProjectLock, ensureMadsDir, lockHolderMatches, parseEtime, procInfo } from "./persistence";
 import { mergeRegistry } from "./persistence";
 import type { RegistryEntry } from "./persistence";
 
@@ -87,6 +94,93 @@ const exists = (p: string) => p === "/wt/a2"; // nur /wt/a2 existiert noch
 {
   const out = mergeRegistry([], [subLive], new Set(), exists);
   check("neuer Pool-Agent landet in der Registry", out.some((e) => e.agentId === "sub-live"));
+}
+
+// ─── Projekt-Lock: pid-Recycling ────────────────────────────────────────────────────────────
+// `ps`-Laufzeit parsen (locale-unabhängig, anders als lstart)
+{
+  check("etime mm:ss", parseEtime("36:11") === 36 * 60 + 11);
+  check("etime hh:mm:ss", parseEtime("02:03:04") === 2 * 3600 + 3 * 60 + 4);
+  check("etime dd-hh:mm:ss", parseEtime("1-02:03:04") === 86400 + 2 * 3600 + 3 * 60 + 4);
+  check("etime Müll → null", parseEtime("keine-zeit") === null);
+}
+
+// Die Kern-Entscheidung: gehört der lebende Prozess wirklich zu diesem Lock?
+{
+  const wroteAt = new Date("2026-10-05T22:24:59.750Z");
+  const lock = { pid: 1224, startedAt: wroteAt.toISOString(), host: hostname() };
+  const sidecarCmd = "/opt/homebrew/bin/node /Users/x/coding/mads/src-tauri/../sidecar/dist/index.js";
+
+  check(
+    "echter Sidecar, vor dem Lock gestartet → hält",
+    lockHolderMatches(lock, { startedAt: wroteAt.getTime() - 5_000, command: sidecarCmd }),
+  );
+  check(
+    "recycelte pid (Fremdprozess) → hält NICHT",
+    !lockHolderMatches(lock, {
+      startedAt: wroteAt.getTime() - 5_000,
+      command: "/System/Library/PrivateFrameworks/IMTransferServices.framework/…/IMTransferAgent",
+    }),
+  );
+  check(
+    "Sidecar, aber erst NACH dem Lock gestartet → hält NICHT (pid-Wrap)",
+    !lockHolderMatches(lock, { startedAt: wroteAt.getTime() + 5 * 60_000, command: sidecarCmd }),
+  );
+  check(
+    "Sekunden-Rauschen/NTP innerhalb der Toleranz → hält weiterhin",
+    lockHolderMatches(lock, { startedAt: wroteAt.getTime() + 30_000, command: sidecarCmd }),
+  );
+  check("ohne ps-Auskunft bleibt es konservativ beim Lock", lockHolderMatches(lock, null));
+}
+
+// procInfo gegen den echten eigenen Prozess
+{
+  const me = procInfo(process.pid);
+  check("procInfo findet den eigenen Prozess", !!me);
+  check("eigene Kommandozeile enthält node", /node/i.test(me?.command ?? ""));
+  check("eigene Startzeit liegt in der Vergangenheit", (me?.startedAt ?? Infinity) <= Date.now());
+  check("procInfo auf tote pid → null", procInfo(0x7fffffff) === null);
+}
+
+// Ende-zu-Ende: Lock-Datei zeigt auf eine LEBENDE, aber projektfremde pid → übernehmbar.
+// Genau der Vorfall: nach dem Reboot gehörte pid 1224 einem Systemdienst.
+{
+  const repo = mkdtempSync(join(tmpdir(), "mads-locktest-"));
+  const foreign = spawn("sleep", ["30"], { stdio: "ignore" });
+  try {
+    ensureMadsDir(repo);
+    writeFileSync(
+      join(repo, ".mads", "instance.lock"),
+      JSON.stringify({ pid: foreign.pid, startedAt: new Date().toISOString(), host: hostname() }),
+    );
+    const got = acquireProjectLock(repo);
+    check("recycelte pid sperrt das Projekt NICHT aus", got.ok);
+    const after = JSON.parse(readFileSync(join(repo, ".mads", "instance.lock"), "utf8"));
+    check("Lock gehört danach uns", after.pid === process.pid);
+  } finally {
+    foreign.kill("SIGKILL");
+  }
+}
+
+// Gegenprobe — der Schutz muss stehen bleiben: ein lebender Prozess, dessen Kommandozeile nach
+// mads aussieht und der VOR dem Lock startete, hält ihn. Sonst öffneten zwei Fenster dasselbe Repo.
+{
+  const repo = mkdtempSync(join(tmpdir(), "mads-locktest-"));
+  const fakeDir = mkdtempSync(join(tmpdir(), "mads-sidecar-"));
+  const fake = join(fakeDir, "index.js");
+  writeFileSync(fake, "setTimeout(() => {}, 30000);\n");
+  const holder = spawn(process.execPath, [fake], { stdio: "ignore" });
+  try {
+    ensureMadsDir(repo);
+    writeFileSync(
+      join(repo, ".mads", "instance.lock"),
+      JSON.stringify({ pid: holder.pid, startedAt: new Date().toISOString(), host: hostname() }),
+    );
+    const got = acquireProjectLock(repo);
+    check("lebende mads-Instanz hält den Lock weiterhin", !got.ok && got.byPid === holder.pid);
+  } finally {
+    holder.kill("SIGKILL");
+  }
 }
 
 // eslint-disable-next-line no-console
