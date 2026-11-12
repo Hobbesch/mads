@@ -4,6 +4,7 @@ import type { AgentRole } from "../store";
 import type { PermissionMode, EffortMode, ImageInput, SandboxMode } from "../../shared/protocol";
 import { ModelEffortPicker } from "./ModelEffortPicker";
 import { clampEffort, defaultEffortForModel } from "../modelCatalog";
+import { clampAdvisor, parseAdvisor } from "../../shared/models";
 import { loadNewStreamDraft, saveNewStreamDraft, clearNewStreamDraft, draftHasContent } from "../newStreamDraft";
 import { blobToBase64, makeThumbnail } from "../blob";
 
@@ -14,6 +15,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const hasIntegrator = useStore((s) => Object.values(s.agents).some((a) => a.role === "integrator"));
   const defaultModel = useStore((s) => s.defaultModel);
   const defaultEffort = useStore((s) => s.defaultEffort);
+  const defaultAdvisor = useStore((s) => s.defaultAdvisor);
   const accounts = useStore((s) => s.accounts);
   const accountUsage = useStore((s) => s.accountUsage);
   const investigationTargets = useStore((s) => s.investigationTargets);
@@ -32,6 +34,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   const [effort, setEffort] = useState<EffortMode | undefined>(
     draft?.effort ?? defaultEffortForModel(initialModel, defaultEffort),
   );
+  const [advisor, setAdvisor] = useState(clampAdvisor(initialModel, parseAdvisor(draft?.advisor) ?? defaultAdvisor));
   const [branch, setBranch] = useState(draft?.branch ?? "");
   const [mode, setMode] = useState<PermissionMode>(draft?.mode ?? "auto");
   // Sandbox-Betriebsart schon beim Start festlegen (Untersuchungs-Freigabe, Stufe A/B) — statt den
@@ -60,6 +63,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
     setRole(r);
     setModel(defaultModel);
     setEffort(defaultEffortForModel(defaultModel, defaultEffort));
+    setAdvisor(clampAdvisor(defaultModel, defaultAdvisor));
     setMode("auto");
     setSandbox("on");
     clearNewStreamDraft();
@@ -69,8 +73,8 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
   // Auto-Speichern: jede Feldänderung sichert den Entwurf sofort in localStorage. So kostet KEIN
   // Schließweg (Backdrop, Escape, Abbrechen, App-Neustart) den Text — erst der Submit räumt ihn ab.
   useEffect(() => {
-    saveNewStreamDraft({ label, prompt, role, model, effort, branch, mode });
-  }, [label, prompt, role, model, effort, branch, mode]);
+    saveNewStreamDraft({ label, prompt, role, model, effort, advisor, branch, mode });
+  }, [label, prompt, role, model, effort, advisor, branch, mode]);
 
   const dirty = draftHasContent({ label, prompt, branch }) || images.length > 0;
 
@@ -88,6 +92,7 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
       mock,
       model,
       effort,
+      advisor,
       branch: branch.trim() || undefined,
       permissionMode: mode,
       images: images.length ? images : undefined,
@@ -277,15 +282,18 @@ export function NewStreamDialog({ onClose }: { onClose: () => void }) {
         </label>
 
         <label className="field">
-          <span>Modell &amp; Effort</span>
+          <span>Modell, Effort &amp; Advisor</span>
           <ModelEffortPicker
             model={model}
             effort={effort}
             onModel={(m) => {
               setModel(m);
               setEffort(clampEffort(m, effort));
+              setAdvisor(clampAdvisor(m, advisor));
             }}
             onEffort={setEffort}
+            advisor={advisor}
+            onAdvisor={setAdvisor}
             variant="dialog"
           />
         </label>

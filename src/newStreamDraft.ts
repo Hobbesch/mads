@@ -6,7 +6,7 @@
  * Erst ein erfolgreicher „Stream starten"-Submit räumt ihn ab (dann ist er ja verbraucht).
  */
 import type { AgentRole } from "./store";
-import type { PermissionMode, EffortMode } from "../shared/protocol";
+import type { PermissionMode, EffortMode, AdvisorChoice } from "../shared/protocol";
 
 export interface NewStreamDraft {
   label: string;
@@ -14,6 +14,7 @@ export interface NewStreamDraft {
   role: AgentRole;
   model: string;
   effort?: EffortMode;
+  advisor?: AdvisorChoice;
   branch: string;
   mode: PermissionMode;
 }

@@ -28,6 +28,8 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
   const defaultEffort = useStore((s) => s.defaultEffort);
   const setDefaultModel = useStore((s) => s.setDefaultModel);
   const setDefaultEffort = useStore((s) => s.setDefaultEffort);
+  const defaultAdvisor = useStore((s) => s.defaultAdvisor);
+  const setDefaultAdvisor = useStore((s) => s.setDefaultAdvisor);
   const link = useStore((s) => s.link);
   const peerWaiting = link ? pendingThreads(link.threads).length : 0;
   const accounts = useStore((s) => s.accounts);
@@ -170,12 +172,14 @@ export function ActivityRail({ onNewStream, onAbout }: { onNewStream: () => void
           ausgeklappten Zustand — im Icon-Modus fehlt die Breite für Dropdowns. */}
       {!railCollapsed && (
         <div className="rail-modeleffort">
-          <div className="rail-me-label">Modell &amp; Effort · Default</div>
+          <div className="rail-me-label">Modell, Effort &amp; Advisor · Default</div>
           <ModelEffortPicker
             model={defaultModel}
             effort={defaultEffort}
             onModel={setDefaultModel}
             onEffort={setDefaultEffort}
+            advisor={defaultAdvisor}
+            onAdvisor={setDefaultAdvisor}
             variant="rail"
           />
         </div>

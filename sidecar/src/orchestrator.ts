@@ -312,7 +312,7 @@ export class Orchestrator {
         break;
 
       case "set_model_effort":
-        await this.pool.get(msg.agentId)?.setModelEffort(msg.model, msg.effort);
+        await this.pool.get(msg.agentId)?.setModelEffort(msg.model, msg.effort, msg.advisor);
         this.persist(); // Modell/Effort in agents.json festhalten (Resume-fest)
         break;
 
@@ -1024,6 +1024,7 @@ export class Orchestrator {
       role: prev.role,
       model: prev.model,
       effort: prev.effort as StartAgentMsg["effort"],
+      advisor: prev.advisor,
       mock: false,
       permissionMode: prev.permissionMode,
       autopilot: prev.autopilot,
@@ -1687,6 +1688,7 @@ export class Orchestrator {
         status: s.status,
         model: s.model,
         effort: s.effort as ResumableAgent["effort"],
+        advisor: s.advisor,
         // Konto mitschreiben: die Claude-Session liegt im `projects/` GENAU dieses Kontos —
         // ohne diese Angabe würde ein Resume nach Neustart im falschen Konto suchen, nichts finden
         // und still frisch starten (= Kontextverlust).
@@ -1892,6 +1894,7 @@ export class Orchestrator {
           status: "queued",
           model: known?.model,
           effort: known?.effort,
+          advisor: known?.advisor,
           mock: false,
           updatedAt: Date.now(),
         });
@@ -3021,6 +3024,7 @@ export class Orchestrator {
       role: s.role,
       model: s.model,
       effort: s.effort as StartAgentMsg["effort"],
+      advisor: s.advisor,
       mock: false,
       permissionMode: s.permissionMode,
       autopilot: s.autopilot,

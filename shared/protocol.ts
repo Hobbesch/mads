@@ -32,8 +32,14 @@ export type PermissionMode = "default" | "acceptEdits" | "plan" | "auto" | "bypa
 
 /** Reasoning-Effort eines Streams. "ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung
  *  (SDK-Session-Flag `ultracode`; oberstes Ende der Skala wie in Claude Code). Sidecar mappt:
- *  low/medium/high/xhigh → options.effort; ultracode → effort "xhigh" + settings.ultracode. */
-export type EffortMode = "low" | "medium" | "high" | "xhigh" | "ultracode";
+ *  low/medium/high/xhigh/max → options.effort; ultracode → effort "xhigh" + settings.ultracode. */
+export type EffortMode = "low" | "medium" | "high" | "xhigh" | "max" | "ultracode";
+
+/** Advisor eines Streams: ein zweites, meist stärkeres Modell, das der Agent an Entscheidungs-
+ *  punkten selbst um Rat fragt (Claude-Code-Setting `advisorModel`, serverseitiges Advisor-Tool).
+ *  Die Werte sind Claude-Code-Aliase und zeigen immer auf die neuste Generation der Familie.
+ *  "off" = kein Advisor. Welche Paarung zulässig ist, regelt `advisorChoicesFor` (shared/models.ts). */
+export type AdvisorChoice = "off" | "sonnet" | "opus" | "fable";
 
 /** Bild-Eingabe (z.B. eingefügter Screenshot) für einen Agenten. */
 export interface ImageInput {
@@ -351,6 +357,8 @@ export interface StartAgentMsg extends BaseMsg {
   baseRef?: string; // P3: i.d.R. "origin/<defaultBranch>"
   model?: string;
   effort?: EffortMode;
+  /** Advisor-Modell; fehlt oder "off" = kein Advisor. */
+  advisor?: AdvisorChoice;
   permissionMode?: PermissionMode;
   allowedTools?: string[];
   disallowedTools?: string[];
@@ -447,13 +455,15 @@ export interface SetAutopilotMsg extends BaseMsg {
   agentId: string;
   level: AutopilotLevel;
 }
-/** Modell und/oder Effort eines laufenden Streams LIVE umstellen. Sidecar wendet es ohne Neustart
- *  an: Modell via query.setModel(), Effort/Ultracode via query.applyFlagSettings(). */
+/** Modell, Effort und/oder Advisor eines laufenden Streams LIVE umstellen. Sidecar wendet es ohne
+ *  Neustart an: Modell via query.setModel(), Effort/Ultracode und Advisor via
+ *  query.applyFlagSettings(). Fehlt ein Feld, bleibt es unverändert. */
 export interface SetModelEffortMsg extends BaseMsg {
   type: "set_model_effort";
   agentId: string;
   model?: string;
   effort?: EffortMode;
+  advisor?: AdvisorChoice;
 }
 /** Uncommittete Änderungen im Main-Checkout (Integrator) in einen NEUEN Sub-Stream auslagern
  *  (main bleibt sauber; die Änderungen gehen über den normalen PR-Fluss). */
@@ -883,6 +893,7 @@ export interface StatusUpdateMsg extends BaseMsg {
    */
   model?: string;
   effort?: EffortMode;
+  advisor?: AdvisorChoice;
   permissionMode?: PermissionMode;
 }
 
@@ -1004,6 +1015,7 @@ export interface ResumableAgent {
   status: AgentStatus;
   model?: string;
   effort?: EffortMode;
+  advisor?: AdvisorChoice;
   mock: boolean;
   /**
    * GitHub-PR-Zustand des Branches beim Öffnen abgeglichen. Verlässliche „fertig"-

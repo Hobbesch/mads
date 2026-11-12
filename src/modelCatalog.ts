@@ -14,9 +14,10 @@
  *   • Alle Lese-Helfer (`availableModels`, `modelLabel`, `effortLevelsFor`, `clampEffort`) gehen
  *     über diesen Spiegel und fallen ohne ihn auf die eingebaute Liste zurück.
  *
- * Effort-Fakten: `xhigh` gibt es erst ab den neueren Generationen (Fable 5/5.1, Opus 4.7+,
- * Sonnet 5+); Haiku kennt KEINEN Effort-Parameter; Sonnet 4.6 kann bis `high` (kein xhigh → kein
- * Ultracode). Wo die Models-API `capabilities` liefert, kommt die Ladder von dort — dann muss
+ * Effort-Fakten: `xhigh` und `max` gibt es ab den neueren Generationen (Fable 5+, Opus 4.7+,
+ * Sonnet 5+, Haiku 5.5); Haiku 4.5 kennt KEINEN Effort-Parameter; Sonnet 4.6 kann bis `high` (kein
+ * xhigh → kein Ultracode). Die 5.5-Modelle stehen bei Anthropic ab Werk auf `medium` — mads setzt
+ * den Effort immer ausdrücklich (Standard `high`), damit das Verhalten nicht still mitwandert. Wo die Models-API `capabilities` liefert, kommt die Ladder von dort — dann muss
  * niemand mehr von Hand nachtragen. „Ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung
  * (SDK-Session-Flag `ultracode`).
  */
@@ -75,15 +76,18 @@ export const EFFORT_LABEL: Record<EffortMode, string> = {
   medium: "Medium",
   high: "High",
   xhigh: "Xhigh",
+  max: "Max",
   ultracode: "Ultracode",
 };
 
+/** Einsatzempfehlungen nach Anthropics Claude-Code-Doku (Stand 2026-11). */
 export const EFFORT_HINT: Record<EffortMode, string> = {
-  low: "Minimales Nachdenken, schnellste Antworten",
-  medium: "Moderates Nachdenken",
-  high: "Tiefes Reasoning (Standard)",
-  xhigh: "Tiefer als High — für Coding/Agentik",
-  ultracode: "xhigh + stehende Workflow-Orchestrierung (oberstes Ende)",
+  low: "Schnelle Runden, bei denen du jedes Ergebnis prüfst: Skizze, Brainstorming, kleines Umbenennen",
+  medium: "Alltägliche Arbeit mit klarem Umfang, z. B. ein neues Feature (Anthropic-Standard der 5.5-Modelle)",
+  high: "Wo Prüfen zählt und Randfälle wahrscheinlich sind, z. B. Bugfix im Bestand (mads-Standard)",
+  xhigh: "Tieferes Reasoning bei deutlich mehr Tokens — nur wo es messbar mehr bringt",
+  max: "Harte Probleme, die der Agent allein durcharbeiten soll; neigt zum Überdenken — erst testen",
+  ultracode: "xhigh + stehende Workflow-Orchestrierung (oberstes Ende, teuerste Stufe)",
 };
 
 /** Standard-Effort für neue Streams. */
@@ -125,7 +129,7 @@ export function clampEffort(modelId: string | undefined, effort: EffortMode | un
  * Vorhersagbarkeit schlägt hier die automatische Kostenbremse — wer Sub-Streams günstig will, stellt
  * den Rail-Default auf opusplan/low (oder ändert Modell/Effort im Dialog-Picker direkt darunter).
  *
- * Effort wird nur noch auf das gewählte Modell begrenzt (clampEffort) — Haiku z. B. kennt gar keinen
+ * Effort wird nur noch auf das gewählte Modell begrenzt (clampEffort) — Haiku 4.5 z. B. kennt gar keinen
  * Effort-Regler, Sonnet 4.6 kein xhigh.
  */
 export function defaultEffortForModel(

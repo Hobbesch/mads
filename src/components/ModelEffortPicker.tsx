@@ -1,7 +1,7 @@
-import type { EffortMode } from "../../shared/protocol";
+import type { AdvisorChoice, EffortMode } from "../../shared/protocol";
 import { useStore } from "../store";
 import { EFFORT_LABEL, EFFORT_HINT, effortLevelsFor, modelLabel } from "../modelCatalog";
-import type { ModelInfo } from "../../shared/models";
+import { ADVISOR_OPTIONS, advisorChoicesFor, type ModelInfo } from "../../shared/models";
 
 /**
  * Modell- + Effort-Wähler. Wiederverwendet für den GLOBALEN Default (linke Navigation) und die
@@ -14,14 +14,19 @@ import type { ModelInfo } from "../../shared/models";
  *    Stream-Start selbst auf die neuste Generation auf und veralten deshalb nie.
  *  • „Feste Generationen" — exakte Model-IDs, wenn man bewusst auf einer Generation bleiben will.
  *
- * Der Effort-Regler passt sich dem Modell an: Modelle ohne Effort (Haiku) zeigen keinen Regler,
+ * Der Effort-Regler passt sich dem Modell an: Modelle ohne Effort (Haiku 4.5) zeigen keinen Regler,
  * ältere Generationen ohne xhigh nur bis „High".
+ *
+ * Optional ein dritter Wähler für den Advisor (nur wenn `onAdvisor` übergeben wird). Er bietet nur
+ * Paarungen an, die Claude Code zum gewählten Modell tatsächlich anhängt (`advisorChoicesFor`).
  */
 export function ModelEffortPicker({
   model,
   effort,
   onModel,
   onEffort,
+  advisor,
+  onAdvisor,
   disabled = false,
   variant,
 }: {
@@ -29,6 +34,8 @@ export function ModelEffortPicker({
   effort?: EffortMode;
   onModel: (m: string) => void;
   onEffort: (e: EffortMode) => void;
+  advisor?: AdvisorChoice;
+  onAdvisor?: (a: AdvisorChoice) => void;
   disabled?: boolean;
   /**
    * Layout-Variante. Wird bewusst als `me-<variant>` gesetzt statt einen rohen Klassennamen
@@ -98,6 +105,9 @@ export function ModelEffortPicker({
           kein Effort
         </span>
       )}
+      {onAdvisor && (
+        <AdvisorSelect model={model} advisor={advisor} onAdvisor={onAdvisor} disabled={disabled} />
+      )}
     </div>
   );
 }
@@ -113,4 +123,38 @@ function tooltip(m: ModelInfo): string {
   }
   if (m.contextWindow) lines.push(`Kontextfenster: ${Math.round(m.contextWindow / 1000)}k Tokens.`);
   return lines.join("\n");
+}
+
+function AdvisorSelect({
+  model,
+  advisor,
+  onAdvisor,
+  disabled,
+}: {
+  model: string;
+  advisor?: AdvisorChoice;
+  onAdvisor: (a: AdvisorChoice) => void;
+  disabled: boolean;
+}) {
+  const allowed = advisorChoicesFor(model);
+  const value = advisor && allowed.includes(advisor) ? advisor : "off";
+  return (
+    <select
+      className="me-advisor"
+      value={value}
+      disabled={disabled}
+      title={
+        "Advisor — ein zweites, stärkeres Modell, das der Agent an Entscheidungspunkten selbst um Rat " +
+        "fragt (vor einem Ansatz, bei wiederkehrenden Fehlern, vor „fertig\"). Kostet Tokens des " +
+        "Advisor-Modells nur bei diesen Aufrufen. Empfehlung für Sub-Streams: Sonnet mit Opus-Advisor."
+      }
+      onChange={(e) => onAdvisor(e.target.value as AdvisorChoice)}
+    >
+      {ADVISOR_OPTIONS.filter((o) => allowed.includes(o.id)).map((o) => (
+        <option key={o.id} value={o.id} title={o.hint}>
+          {o.id === "off" ? "ohne Advisor" : `+ ${o.label}-Advisor`}
+        </option>
+      ))}
+    </select>
+  );
 }

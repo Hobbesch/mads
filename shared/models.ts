@@ -21,7 +21,7 @@
  * Alles hier ist REIN (keine I/O, kein Netz) — damit es beide Schichten importieren können und
  * `shared/models.test.ts` es ohne Netz prüfen kann.
  */
-import type { EffortMode } from "./protocol.js";
+import type { AdvisorChoice, EffortMode } from "./protocol.js";
 
 /** Modell-Familien, die mads kennt. `unknown` = neue Familie, die nach mads' Release kam. */
 export type ModelFamily = "fable" | "mythos" | "opus" | "sonnet" | "haiku" | "unknown";
@@ -74,7 +74,7 @@ export interface ModelCatalog {
   cliVersion?: string;
 }
 
-export const FULL_EFFORT: EffortMode[] = ["low", "medium", "high", "xhigh", "ultracode"];
+export const FULL_EFFORT: EffortMode[] = ["low", "medium", "high", "xhigh", "max", "ultracode"];
 /** Ohne xhigh gibt es auch kein Ultracode (Ultracode = xhigh + stehende Workflow-Orchestrierung). */
 export const BASE_EFFORT: EffortMode[] = ["low", "medium", "high"];
 
@@ -83,18 +83,18 @@ export const BASE_EFFORT: EffortMode[] = ["low", "medium", "high"];
  * zusätzlich anbietet, kommt beim Start dazu. Sie liefert vor allem das, was keine API weiss:
  * Preis und Einsatzempfehlung im Tooltip.
  *
- * Preise pro Mio. Tokens (Ein-/Ausgabe), Stand 2026-09-29.
+ * Preise pro Mio. Tokens (Ein-/Ausgabe), Stand 2026-11-13. Je Familie die aktuelle und die
+ * Vorgänger-Generation (wie `KEEP_GENERATIONS`); Ältere kommen nur über die Live-Prüfung herein.
  */
 export const BUILTIN_MODELS: ModelInfo[] = [
-  entry("claude-fable-5-1", "Anthropics fähigstes Modell — anspruchsvollste, lang laufende Agenten-Arbeit (teuerste Stufe: $10/$50 pro Mio.)", FULL_EFFORT),
-  entry("claude-fable-5", "Vorgänger-Fable (gleicher Preis wie Fable 5.1: $10/$50)", FULL_EFFORT),
-  entry("claude-opus-5-5", "Aktueller Opus — stärkster fürs agentische Coding und Standard für den Integrator; günstiger als Opus 5 ($4/$20)", FULL_EFFORT),
+  entry("claude-fable-5-2", "Anthropics fähigstes Modell — schwierigste, lang laufende Arbeit: Ursachensuche, Architektur, mehrdeutige Probleme. Ziel beschreiben, nicht die Schritte. Teuerste Stufe ($8/$40 pro Mio.); Effort ab High, Xhigh nur wo messbar besser", FULL_EFFORT),
+  entry("claude-fable-5-1", "Vorgänger-Fable ($10/$50 — teurer als Fable 5.2)", FULL_EFFORT),
+  entry("claude-opus-5-5", "Aktueller Opus — komplexes agentisches Coding und Standard für den Integrator ($4/$20)", FULL_EFFORT),
   entry("claude-opus-5", "Vorgänger-Opus ($5/$25)", FULL_EFFORT),
-  entry("claude-opus-4-8", "Ältere Opus-Generation ($5/$25)", FULL_EFFORT),
-  entry("claude-sonnet-5-5", "Aktueller Sonnet — nahe Opus bei Coding/Agentik, deutlich günstiger ($2/$10); bestes Preis/Leistung für Sub-Agents", FULL_EFFORT),
+  entry("claude-sonnet-5-5", "Aktueller Sonnet — alltägliches Coding, halber Opus-Preis ($2/$10); gute Wahl für Sub-Streams", FULL_EFFORT),
   entry("claude-sonnet-5", "Vorgänger-Sonnet ($2/$10)", FULL_EFFORT),
-  entry("claude-sonnet-4-6", "Ältere Sonnet-Generation ($3/$15) — kein xhigh/Ultracode", BASE_EFFORT),
-  entry("claude-haiku-4-5", "Schnell & günstig ($1/$5) — kein Effort-Regler; für Explore/Hilfsarbeit", []),
+  entry("claude-haiku-5-5", "Aktueller Haiku — sehr schnell und sehr günstig ($0.10/$0.50) für Hilfs- und Sucharbeit; hat jetzt einen Effort-Regler", FULL_EFFORT),
+  entry("claude-haiku-4-5", "Vorgänger-Haiku ($1/$5) — kein Effort-Regler", []),
 ];
 
 /**
@@ -175,8 +175,8 @@ export function normalizeModelId(id: string): string {
 
 /**
  * Effort-Ladder aus den `capabilities` der Models-API ableiten. Die API kennt low/medium/high/
- * xhigh/max; mads kennt kein `max`, dafür `ultracode` (= xhigh + stehende Workflow-Orchestrierung)
- * — es wird genau dann angeboten, wenn das Modell xhigh kann. Fehlen die Angaben (ältere
+ * xhigh/max; mads ergänzt `ultracode` (= xhigh + stehende Workflow-Orchestrierung) als oberstes
+ * Ende — es wird genau dann angeboten, wenn das Modell xhigh kann. Fehlen die Angaben (ältere
  * API-Antwort), gibt die Funktion `undefined` zurück: dann gilt die eingebaute/abgeleitete Ladder.
  */
 export function effortFromCapabilities(caps: unknown): EffortMode[] | undefined {
@@ -190,8 +190,8 @@ export function effortFromCapabilities(caps: unknown): EffortMode[] | undefined 
     return !!leaf && typeof leaf === "object" && (leaf as Record<string, unknown>).supported === true;
   };
   const levels: EffortMode[] = [];
-  for (const lvl of ["low", "medium", "high"] as const) if (can(lvl)) levels.push(lvl);
-  if (can("xhigh")) levels.push("xhigh", "ultracode");
+  for (const lvl of ["low", "medium", "high", "xhigh", "max"] as const) if (can(lvl)) levels.push(lvl);
+  if (can("xhigh")) levels.push("ultracode");
   return levels.length ? levels : [];
 }
 
@@ -367,4 +367,64 @@ export function effortLevelsFor(catalog: ModelCatalog | undefined, id: string | 
   if (hit) return hit.effort;
   // Unbekanntes (z. B. per Hand gesetztes) Modell: lieber die volle Ladder anbieten als gar keine.
   return id ? FULL_EFFORT : [];
+}
+
+// ── Advisor ───────────────────────────────────────────────────────────────────
+
+/** Wählbare Advisor-Werte mit Anzeige. Claude-Code-Aliase: sie zeigen immer auf die neuste
+ *  Generation (opus → Opus 5.5, fable → Fable 5.2, sonnet → Sonnet 5.5). Haiku fehlt bewusst —
+ *  ein Haiku-Advisor ist nie stärker als das Hauptmodell und lohnt sich nicht. */
+export const ADVISOR_OPTIONS: { id: AdvisorChoice; label: string; hint: string }[] = [
+  { id: "off", label: "Kein Advisor", hint: "Der Agent arbeitet allein." },
+  {
+    id: "opus",
+    label: "Opus",
+    hint:
+      "Opus prüft an Entscheidungspunkten: vor einem Ansatz, bei einem Fehler, der wiederkehrt, und bevor " +
+      "der Agent eine Aufgabe für erledigt erklärt. Kostet nur bei diesen Aufrufen Opus-Tokens.",
+  },
+  {
+    id: "fable",
+    label: "Fable",
+    hint:
+      "Fable als Ratgeber für die schwierigsten Entscheidungen. Braucht Fable-Zugang; auf manchen Abos " +
+      "laufen Fable-Aufrufe über Usage-Credits statt über das Abo-Kontingent.",
+  },
+  {
+    id: "sonnet",
+    label: "Sonnet",
+    hint: "Günstige zweite Meinung, die Routine-Versehen auffängt.",
+  },
+];
+
+/**
+ * Welche Advisor zum Hauptmodell passen. Regel von Anthropic: der Advisor muss mindestens so fähig
+ * sein wie das Hauptmodell; Claude Code hängt eine schwächere Paarung gar nicht erst an (still).
+ * mads bietet deshalb nur an, was greift — vereinfacht auf Familien, Stand Claude Code 2.1.323:
+ *
+ *   Fable/Mythos           → nur Fable
+ *   Opus (auch opusplan)   → Opus, Fable
+ *   Sonnet, Haiku, unbek.  → Sonnet, Opus, Fable
+ *
+ * Zwei seltene Ausnahmen der offiziellen Tabelle lässt die Vereinfachung weg (Sonnet 5.5 als
+ * Advisor für Opus 4.7/4.8, Haiku 5.5 als Advisor) — beides sind keine sinnvollen Paarungen.
+ */
+export function advisorChoicesFor(modelId: string | undefined): AdvisorChoice[] {
+  const id = modelId ? normalizeModelId(modelId) : "";
+  const family: ModelFamily =
+    id === "opusplan" ? "opus" : (["fable", "opus", "sonnet", "haiku"].includes(id) ? (id as ModelFamily) : parseModelId(id)?.family ?? "unknown");
+  if (family === "fable" || family === "mythos") return ["off", "fable"];
+  if (family === "opus") return ["off", "opus", "fable"];
+  return ["off", "opus", "fable", "sonnet"];
+}
+
+/** Advisor auf das Hauptmodell begrenzen: unzulässige Paarung → "off" (statt still wirkungslos). */
+export function clampAdvisor(modelId: string | undefined, advisor: AdvisorChoice | undefined): AdvisorChoice {
+  if (!advisor || advisor === "off") return "off";
+  return advisorChoicesFor(modelId).includes(advisor) ? advisor : "off";
+}
+
+/** Eingehender Wert über die Leitung → gültiger AdvisorChoice (unbekanntes → undefined). */
+export function parseAdvisor(v: unknown): AdvisorChoice | undefined {
+  return v === "off" || v === "sonnet" || v === "opus" || v === "fable" ? v : undefined;
 }

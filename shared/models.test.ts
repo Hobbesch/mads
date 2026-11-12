@@ -12,6 +12,9 @@
  *     weist es ab, ein stiller Eintrag im Dropdown wäre eine Falle.
  */
 import {
+  advisorChoicesFor,
+  clampAdvisor,
+  parseAdvisor,
   BUILTIN_MODELS,
   buildCatalog,
   builtinCatalog,
@@ -61,6 +64,11 @@ function check(name: string, cond: boolean): void {
   check(
     "ohne xhigh gibt es kein Ultracode",
     JSON.stringify(effortFromCapabilities(caps())) === JSON.stringify(["low", "medium", "high"]),
+  );
+  check(
+    "max wird übernommen und steht vor Ultracode",
+    JSON.stringify(effortFromCapabilities(caps({ xhigh: { supported: true }, max: { supported: true } }))) ===
+      JSON.stringify(["low", "medium", "high", "xhigh", "max", "ultracode"]),
   );
   check("Modell ohne Effort liefert leere Ladder", effortFromCapabilities({ effort: { supported: false } })?.length === 0);
   check("fehlende capabilities lassen die Ladder offen", effortFromCapabilities({}) === undefined);
@@ -138,6 +146,9 @@ function check(name: string, cond: boolean): void {
   check("…enthält die aktuelle Riege", cat.models.some((m) => m.id === "claude-opus-5-5") && cat.models.some((m) => m.id === "claude-sonnet-5-5"));
   check("…und die Aliase", cat.models.some((m) => m.id === "opus" && m.kind === "alias"));
   check("Status ist ehrlich", cat.status === "builtin");
+  check("…kennt Fable 5.2 und Haiku 5.5", cat.models.some((m) => m.id === "claude-fable-5-2") && cat.models.some((m) => m.id === "claude-haiku-5-5"));
+  check("Haiku 5.5 hat einen Effort-Regler", effortLevelsFor(cat, "claude-haiku-5-5").includes("high"));
+  check("Alias haiku zeigt auf Haiku 5.5", cat.models.find((m) => m.id === "haiku")?.hint.includes("Haiku 5.5") === true);
 }
 
 // ── Lese-Helfer für die UI ─────────────────────────────────────────────────────
@@ -145,7 +156,22 @@ function check(name: string, cond: boolean): void {
   const cat: ModelCatalog = { models: buildCatalog([{ id: "claude-haiku-4-5", capabilities: { effort: { supported: false } } }], []), status: "live" };
   check("Haiku zeigt keinen Effort-Regler", effortLevelsFor(cat, "claude-haiku-4-5").length === 0);
   check("unbekannte ID bekommt trotzdem ein lesbares Label", labelFor(cat, "claude-opus-9-9") === "Opus 9.9");
-  check("opusplan behält seine eigene Ladder — der Alias IST das Verhalten", effortLevelsFor(cat, "opusplan").length === 5);
+  check("opusplan behält seine eigene Ladder — der Alias IST das Verhalten", effortLevelsFor(cat, "opusplan").includes("max"));
+}
+
+// ── Advisor: nur Paarungen anbieten, die Claude Code wirklich anhängt ─────────
+{
+  check("Sonnet-Hauptmodell darf Opus fragen", advisorChoicesFor("claude-sonnet-5-5").includes("opus"));
+  check("…und Fable", advisorChoicesFor("sonnet").includes("fable"));
+  check("Opus-Hauptmodell bekommt keinen Sonnet-Advisor", !advisorChoicesFor("claude-opus-5-5").includes("sonnet"));
+  check("opusplan zählt als Opus", !advisorChoicesFor("opusplan").includes("sonnet") && advisorChoicesFor("opusplan").includes("opus"));
+  check("Fable nimmt nur Fable", JSON.stringify(advisorChoicesFor("claude-fable-5-2")) === JSON.stringify(["off", "fable"]));
+  check("Haiku darf Opus fragen", advisorChoicesFor("claude-haiku-5-5").includes("opus"));
+  check("„aus\" ist immer wählbar", advisorChoicesFor(undefined).includes("off"));
+  check("unzulässige Paarung fällt auf aus", clampAdvisor("claude-fable-5-2", "opus") === "off");
+  check("zulässige Paarung bleibt", clampAdvisor("claude-sonnet-5-5", "opus") === "opus");
+  check("fehlender Advisor heisst aus", clampAdvisor("claude-sonnet-5-5", undefined) === "off");
+  check("Müll über die Leitung wird verworfen", parseAdvisor("claude-opus-5-5") === undefined && parseAdvisor("opus") === "opus");
 }
 
 console.log(results.join("\n"));
