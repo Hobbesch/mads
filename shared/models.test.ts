@@ -62,6 +62,11 @@ function check(name: string, cond: boolean): void {
     "ohne xhigh gibt es kein Ultracode",
     JSON.stringify(effortFromCapabilities(caps())) === JSON.stringify(["low", "medium", "high"]),
   );
+  check(
+    "max wird übernommen und steht vor Ultracode",
+    JSON.stringify(effortFromCapabilities(caps({ xhigh: { supported: true }, max: { supported: true } }))) ===
+      JSON.stringify(["low", "medium", "high", "xhigh", "max", "ultracode"]),
+  );
   check("Modell ohne Effort liefert leere Ladder", effortFromCapabilities({ effort: { supported: false } })?.length === 0);
   check("fehlende capabilities lassen die Ladder offen", effortFromCapabilities({}) === undefined);
 }
@@ -138,6 +143,9 @@ function check(name: string, cond: boolean): void {
   check("…enthält die aktuelle Riege", cat.models.some((m) => m.id === "claude-opus-5-5") && cat.models.some((m) => m.id === "claude-sonnet-5-5"));
   check("…und die Aliase", cat.models.some((m) => m.id === "opus" && m.kind === "alias"));
   check("Status ist ehrlich", cat.status === "builtin");
+  check("…kennt Fable 5.2 und Haiku 5.5", cat.models.some((m) => m.id === "claude-fable-5-2") && cat.models.some((m) => m.id === "claude-haiku-5-5"));
+  check("Haiku 5.5 hat einen Effort-Regler", effortLevelsFor(cat, "claude-haiku-5-5").includes("high"));
+  check("Alias haiku zeigt auf Haiku 5.5", cat.models.find((m) => m.id === "haiku")?.hint.includes("Haiku 5.5") === true);
 }
 
 // ── Lese-Helfer für die UI ─────────────────────────────────────────────────────
@@ -145,7 +153,7 @@ function check(name: string, cond: boolean): void {
   const cat: ModelCatalog = { models: buildCatalog([{ id: "claude-haiku-4-5", capabilities: { effort: { supported: false } } }], []), status: "live" };
   check("Haiku zeigt keinen Effort-Regler", effortLevelsFor(cat, "claude-haiku-4-5").length === 0);
   check("unbekannte ID bekommt trotzdem ein lesbares Label", labelFor(cat, "claude-opus-9-9") === "Opus 9.9");
-  check("opusplan behält seine eigene Ladder — der Alias IST das Verhalten", effortLevelsFor(cat, "opusplan").length === 5);
+  check("opusplan behält seine eigene Ladder — der Alias IST das Verhalten", effortLevelsFor(cat, "opusplan").includes("max"));
 }
 
 console.log(results.join("\n"));

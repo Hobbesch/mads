@@ -134,7 +134,7 @@ interface QueryHandle extends AsyncIterable<unknown> {
   close?: () => void;
 }
 
-/** mads-Effort ("low".."xhigh"|"ultracode") → SDK-Query-Optionen. Ultracode = xhigh + stehende
+/** mads-Effort ("low".."max"|"ultracode") → SDK-Query-Optionen. Ultracode = xhigh + stehende
  *  Workflow-Orchestrierung (Settings-Flag `ultracode`). Ohne Effort (undefined) → SDK-Default. */
 function effortOptions(effort?: string): Record<string, unknown> {
   if (!effort) return {};
@@ -713,8 +713,9 @@ export class AgentSession {
           cwd,
           env: agentEnv.env,
           model: this.model, // coerciert (nie undefined) — siehe DEFAULT_MODEL-Zuweisung in start()
-          // Effort/Ultracode (SDK-nativ): low/medium/high/xhigh → options.effort;
-          // ultracode → effort xhigh + settings.ultracode. Ohne Effort → SDK-Default (high).
+          // Effort/Ultracode (SDK-nativ): low/medium/high/xhigh/max → options.effort;
+          // ultracode → effort xhigh + settings.ultracode. Ohne Effort → Modell-Default
+          // (bei den 5.5-Modellen `medium`, sonst meist `high`).
           ...effortOptions(msg.effort),
           // OS-Sandbox für Agenten-Bash (siehe sandbox.ts): Schreiben nur in Worktree/.git/Caches,
           // Netz-Egress nur zu Paketquellen, Secret-Ablagen (~/.ssh, ~/.aws …) kernel-seitig dicht.
