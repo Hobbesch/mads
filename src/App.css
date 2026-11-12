@@ -1511,6 +1511,10 @@ button:disabled:hover {
   flex: 0 0 auto;
   min-width: 78px;
 }
+.model-effort.me-inspector .me-advisor {
+  flex: 0 0 auto;
+  min-width: 96px;
+}
 /* Kleines „Stream"-Label vor dem Pro-Stream-Picker (Gegenstück zum „· DEFAULT" der linken Leiste). */
 .insp-me {
   display: inline-flex;
@@ -2180,7 +2184,8 @@ button:disabled:hover {
   flex: 1 1 auto;
   min-width: 0;
 }
-.model-effort .me-effort {
+.model-effort .me-effort,
+.model-effort .me-advisor {
   flex: 0 0 auto;
 }
 .model-effort .me-effort-na {
@@ -2208,7 +2213,8 @@ button:disabled:hover {
   padding: 4px 6px;
 }
 .model-effort.me-rail .me-model,
-.model-effort.me-rail .me-effort {
+.model-effort.me-rail .me-effort,
+.model-effort.me-rail .me-advisor {
   flex: 1 1 100%;
 }
 /* Dialog-Variante: volle Breite im Formularfeld, Modell breiter als Effort. */
@@ -2218,7 +2224,8 @@ button:disabled:hover {
 .model-effort.me-dialog .me-model {
   flex: 2 1 0;
 }
-.model-effort.me-dialog .me-effort {
+.model-effort.me-dialog .me-effort,
+.model-effort.me-dialog .me-advisor {
   flex: 1 1 0;
 }
 

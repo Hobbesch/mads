@@ -12,6 +12,9 @@
  *     weist es ab, ein stiller Eintrag im Dropdown wäre eine Falle.
  */
 import {
+  advisorChoicesFor,
+  clampAdvisor,
+  parseAdvisor,
   BUILTIN_MODELS,
   buildCatalog,
   builtinCatalog,
@@ -154,6 +157,21 @@ function check(name: string, cond: boolean): void {
   check("Haiku zeigt keinen Effort-Regler", effortLevelsFor(cat, "claude-haiku-4-5").length === 0);
   check("unbekannte ID bekommt trotzdem ein lesbares Label", labelFor(cat, "claude-opus-9-9") === "Opus 9.9");
   check("opusplan behält seine eigene Ladder — der Alias IST das Verhalten", effortLevelsFor(cat, "opusplan").includes("max"));
+}
+
+// ── Advisor: nur Paarungen anbieten, die Claude Code wirklich anhängt ─────────
+{
+  check("Sonnet-Hauptmodell darf Opus fragen", advisorChoicesFor("claude-sonnet-5-5").includes("opus"));
+  check("…und Fable", advisorChoicesFor("sonnet").includes("fable"));
+  check("Opus-Hauptmodell bekommt keinen Sonnet-Advisor", !advisorChoicesFor("claude-opus-5-5").includes("sonnet"));
+  check("opusplan zählt als Opus", !advisorChoicesFor("opusplan").includes("sonnet") && advisorChoicesFor("opusplan").includes("opus"));
+  check("Fable nimmt nur Fable", JSON.stringify(advisorChoicesFor("claude-fable-5-2")) === JSON.stringify(["off", "fable"]));
+  check("Haiku darf Opus fragen", advisorChoicesFor("claude-haiku-5-5").includes("opus"));
+  check("„aus\" ist immer wählbar", advisorChoicesFor(undefined).includes("off"));
+  check("unzulässige Paarung fällt auf aus", clampAdvisor("claude-fable-5-2", "opus") === "off");
+  check("zulässige Paarung bleibt", clampAdvisor("claude-sonnet-5-5", "opus") === "opus");
+  check("fehlender Advisor heisst aus", clampAdvisor("claude-sonnet-5-5", undefined) === "off");
+  check("Müll über die Leitung wird verworfen", parseAdvisor("claude-opus-5-5") === undefined && parseAdvisor("opus") === "opus");
 }
 
 console.log(results.join("\n"));

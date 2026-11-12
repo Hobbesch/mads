@@ -30,6 +30,7 @@ import type {
   PermissionMode,
   AutopilotLevel,
   EffortMode,
+  AdvisorChoice,
   ImageInput,
   TimelineAttachment,
   SavedPrompt,
@@ -42,7 +43,7 @@ import type {
   ProjectLinkConfig,
 } from "../shared/protocol";
 import { DEFAULT_EFFORT, clampEffort, modelLabel, EFFORT_LABEL, defaultEffortForModel, currentCatalog, setRuntimeCatalog } from "./modelCatalog";
-import type { ModelCatalog } from "../shared/models";
+import { clampAdvisor, ADVISOR_OPTIONS, type ModelCatalog } from "../shared/models";
 import type { Collision } from "../shared/collision";
 import { gateNoticeText } from "../shared/gate-report";
 import { loadRecentProjects, rememberProject, forgetProject, type RecentProject } from "./recent";
@@ -159,6 +160,7 @@ export interface AgentVM {
   activeModel?: string; // REAL vom SDK gelaufenes Modell (Doppel-Check) — maßgeblich für die Anzeige
   modelMismatch?: boolean; // true = SDK lief auf einem anderen Modell als angefordert (mads zieht nach)
   effort?: EffortMode; // Reasoning-Effort dieses Streams (undefined = Modell ohne Effort, z. B. Haiku)
+  advisor?: AdvisorChoice; // Advisor dieses Streams (undefined/"off" = keiner) — Sidecar meldet den Ist-Stand
   accountId?: string; // Claude-Konto dieses Streams (Profil-ID der Account-Registry)
   /** Sandbox-Betriebsart (Untersuchungs-Freigabe) — der Sidecar meldet den REALEN Zustand des
    *  laufenden Prozesses via status_update; die UI spiegelt nur (nie optimistisch setzen). */
@@ -397,6 +399,8 @@ export interface MadsState {
   defaultModel: string;
   /** Globaler Default für den Effort neuer Streams (persistiert). */
   defaultEffort: EffortMode;
+  /** Globaler Default für den Advisor neuer Streams (persistiert). */
+  defaultAdvisor: AdvisorChoice;
   /** Geprüfte Modell-Auswahl (Quelle: Sidecar `model_catalog`; hier nur gespiegelt). Bis die
    *  Prüfung durch ist, steht hier der zwischengespeicherte bzw. eingebaute Katalog. */
   modelCatalog: ModelCatalog;
@@ -451,6 +455,7 @@ export interface MadsState {
     mock: boolean;
     model?: string;
     effort?: EffortMode;
+    advisor?: AdvisorChoice;
     branch?: string;
     permissionMode?: PermissionMode;
     images?: ImageInput[];
@@ -510,9 +515,11 @@ export interface MadsState {
   /** Modell-Auswahl neu erheben lassen (`force` umgeht den Zwischenspeicher im Sidecar). */
   refreshModels: (force?: boolean) => void;
   setDefaultEffort: (effort: EffortMode) => void;
+  setDefaultAdvisor: (advisor: AdvisorChoice) => void;
   /** Modell/Effort eines bestehenden Streams LIVE umstellen (Inspector). */
   setStreamModel: (id: string, model: string) => Promise<void>;
   setStreamEffort: (id: string, effort: EffortMode) => Promise<void>;
+  setStreamAdvisor: (id: string, advisor: AdvisorChoice) => Promise<void>;
   /** Konto eines Streams wechseln (startet den Claude-Prozess im Zielkonto per Resume neu). */
   setStreamAccount: (id: string, accountId: string) => Promise<void>;
   /** Standard-Konto für NEU eröffnete Streams. Laufende Streams bleiben unberührt. */
@@ -1013,10 +1020,12 @@ export const useStore = create<MadsState>((set) => {
           // Sandbox-Modus: wie das Konto meldet der Sidecar den REALEN Zustand des Prozesses —
           // er gewinnt immer gegen den lokalen Stand (die UI setzt ihn nie optimistisch).
           const sandboxMode = msg.sandboxMode ?? a.sandboxMode;
+          // Advisor: der Sidecar hat ihn aufs Modell begrenzt — sein Stand gewinnt.
+          const advisor = msg.advisor ?? a.advisor;
           return {
             agents: {
               ...s.agents,
-              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now(), subAgents, accountId, sandboxMode },
+              [msg.agentId]: { ...a, status: msg.status, currentStep: msg.currentStep, workStartedAt, lastEventAt: Date.now(), subAgents, accountId, sandboxMode, advisor },
             },
           };
         });
@@ -1625,6 +1634,7 @@ export const useStore = create<MadsState>((set) => {
     railCollapsed: loadUiPrefs().railCollapsed,
     defaultModel: loadUiPrefs().defaultModel,
     defaultEffort: loadUiPrefs().defaultEffort,
+    defaultAdvisor: loadUiPrefs().defaultAdvisor,
     modelCatalog: currentCatalog(),
     modelCheckBusy: false,
     accountUsage: {},
@@ -1720,7 +1730,7 @@ export const useStore = create<MadsState>((set) => {
       set((s) => ({ recentProjects: forgetProject(s.recentProjects, repoRoot) }));
     },
 
-    createAgent: async ({ label, prompt, role, mock, model, effort, branch, permissionMode, images, accountId, sandboxMode }) => {
+    createAgent: async ({ label, prompt, role, mock, model, effort, advisor, branch, permissionMode, images, accountId, sandboxMode }) => {
       const id = crypto.randomUUID();
       const mode: PermissionMode = permissionMode ?? "auto";
       const st0 = useStore.getState();
@@ -1737,6 +1747,7 @@ export const useStore = create<MadsState>((set) => {
         effort !== undefined
           ? clampEffort(finalModel, effort)
           : defaultEffortForModel(finalModel, st0.defaultEffort);
+      const finalAdvisor = clampAdvisor(finalModel, advisor ?? st0.defaultAdvisor);
       const project = st0.project;
       const agent: AgentVM = {
         id,
@@ -1752,6 +1763,7 @@ export const useStore = create<MadsState>((set) => {
         autopilot: "assisted",
         model: finalModel,
         effort: finalEffort,
+        advisor: finalAdvisor,
         accountId: finalAccount,
         createdAt: Date.now(),
         lastEventAt: Date.now(),
@@ -1780,6 +1792,7 @@ export const useStore = create<MadsState>((set) => {
         role,
         model: finalModel,
         effort: finalEffort,
+        advisor: finalAdvisor,
         mock,
         permissionMode: mode,
         autopilot: "assisted",
@@ -2015,6 +2028,7 @@ export const useStore = create<MadsState>((set) => {
           // lief nach dem Fortsetzen still auf SDK-Default weiter („warum ist das so langsam?").
           model: a.model,
           effort: clampEffort(a.model, a.effort),
+          advisor: clampAdvisor(a.model, a.advisor),
           // Konto MITSENDEN: die Claude-Session liegt im `projects/` genau dieses Kontos — ohne
           // die Angabe suchte der Resume im falschen Konto und startete still frisch.
           accountId: a.accountId,
@@ -2060,8 +2074,14 @@ export const useStore = create<MadsState>((set) => {
 
     setDefaultModel: (model) => {
       const effort = clampEffort(model, useStore.getState().defaultEffort) ?? DEFAULT_EFFORT;
-      set({ defaultModel: model, defaultEffort: effort });
-      saveUiPrefs({ defaultModel: model, defaultEffort: effort });
+      const advisor = clampAdvisor(model, useStore.getState().defaultAdvisor);
+      set({ defaultModel: model, defaultEffort: effort, defaultAdvisor: advisor });
+      saveUiPrefs({ defaultModel: model, defaultEffort: effort, defaultAdvisor: advisor });
+    },
+    setDefaultAdvisor: (advisor) => {
+      const a = clampAdvisor(useStore.getState().defaultModel, advisor);
+      set({ defaultAdvisor: a });
+      saveUiPrefs({ defaultAdvisor: a });
     },
     setDefaultEffort: (effort) => {
       const e = clampEffort(useStore.getState().defaultModel, effort) ?? effort;
@@ -2071,9 +2091,19 @@ export const useStore = create<MadsState>((set) => {
     setStreamModel: async (id, model) => {
       // Modellwechsel → Effort auf das neue Modell begrenzen (z. B. Haiku hat keinen Effort).
       const effort = clampEffort(model, useStore.getState().agents[id]?.effort);
-      patchAgent(id, { model, effort });
+      // Advisor mitbegrenzen: passt er nicht zum neuen Modell, hängt Claude Code ihn still ab.
+      const before = useStore.getState().agents[id]?.advisor ?? "off";
+      const advisor = clampAdvisor(model, before);
+      patchAgent(id, { model, effort, advisor });
       notice(id, "accent", `⚙ Modell: ${modelLabel(model)}`);
-      await sendHost({ ...envelope(), type: "set_model_effort", agentId: id, model, effort });
+      if (advisor !== before) notice(id, "accent", "⚙ Advisor aus — passt nicht zum neuen Modell");
+      await sendHost({ ...envelope(), type: "set_model_effort", agentId: id, model, effort, advisor });
+    },
+    setStreamAdvisor: async (id, advisor) => {
+      const a = clampAdvisor(useStore.getState().agents[id]?.model, advisor);
+      patchAgent(id, { advisor: a });
+      notice(id, "accent", `⚙ Advisor: ${ADVISOR_OPTIONS.find((o) => o.id === a)?.label ?? a}`);
+      await sendHost({ ...envelope(), type: "set_model_effort", agentId: id, advisor: a });
     },
     setStreamEffort: async (id, effort) => {
       const e = clampEffort(useStore.getState().agents[id]?.model, effort) ?? effort;
@@ -2419,6 +2449,7 @@ export const useStore = create<MadsState>((set) => {
             autopilot: "assisted",
             model: r.model,
             effort: clampEffort(r.model, r.effort),
+            advisor: clampAdvisor(r.model, r.advisor),
             accountId: r.accountId,
             createdAt: Date.now(),
             lastEventAt: Date.now(),
@@ -2565,6 +2596,7 @@ export const useStore = create<MadsState>((set) => {
         // bis er an dessen Limit lief.
         model: r.model ?? existing?.model,
         effort: clampEffort(r.model ?? existing?.model, r.effort ?? existing?.effort),
+        advisor: clampAdvisor(r.model ?? existing?.model, r.advisor ?? existing?.advisor),
         accountId: r.accountId ?? existing?.accountId,
         // Auftrag über das Resume hinweg behalten — der automatische „Fortsetzen"-Nudge ersetzt ihn nicht.
         lastPrompt: r.lastPrompt ?? existing?.lastPrompt,
@@ -2618,6 +2650,7 @@ export const useStore = create<MadsState>((set) => {
         role: r.role,
         model: r.model,
         effort: clampEffort(r.model, r.effort),
+        advisor: clampAdvisor(r.model, r.advisor),
         // Konto MITSENDEN (wie im Resume aus sendInput): die Claude-Session liegt im `projects/`
         // GENAU dieses Kontos. Ohne die Angabe fällt der Sidecar zwar auf agents.json zurück, die
         // Kachel hier aber auf das globale Standardkonto — genau diese Asymmetrie war die Ursache

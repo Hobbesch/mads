@@ -67,6 +67,7 @@ export function Inspector() {
   const setAutopilot = useStore((s) => s.setAutopilot);
   const setStreamModel = useStore((s) => s.setStreamModel);
   const setStreamEffort = useStore((s) => s.setStreamEffort);
+  const setStreamAdvisor = useStore((s) => s.setStreamAdvisor);
   const setStreamAccount = useStore((s) => s.setStreamAccount);
   const setSandboxMode = useStore((s) => s.setSandboxMode);
   const investigationTargets = useStore((s) => s.investigationTargets);
@@ -532,6 +533,8 @@ export function Inspector() {
                 effort={agent.effort}
                 onModel={(m) => void setStreamModel(selectedId, m)}
                 onEffort={(e) => void setStreamEffort(selectedId, e)}
+                advisor={agent.advisor}
+                onAdvisor={(a) => void setStreamAdvisor(selectedId, a)}
                 variant="inspector"
               />
             </div>

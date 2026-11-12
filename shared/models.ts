@@ -21,7 +21,7 @@
  * Alles hier ist REIN (keine I/O, kein Netz) — damit es beide Schichten importieren können und
  * `shared/models.test.ts` es ohne Netz prüfen kann.
  */
-import type { EffortMode } from "./protocol.js";
+import type { AdvisorChoice, EffortMode } from "./protocol.js";
 
 /** Modell-Familien, die mads kennt. `unknown` = neue Familie, die nach mads' Release kam. */
 export type ModelFamily = "fable" | "mythos" | "opus" | "sonnet" | "haiku" | "unknown";
@@ -367,4 +367,64 @@ export function effortLevelsFor(catalog: ModelCatalog | undefined, id: string | 
   if (hit) return hit.effort;
   // Unbekanntes (z. B. per Hand gesetztes) Modell: lieber die volle Ladder anbieten als gar keine.
   return id ? FULL_EFFORT : [];
+}
+
+// ── Advisor ───────────────────────────────────────────────────────────────────
+
+/** Wählbare Advisor-Werte mit Anzeige. Claude-Code-Aliase: sie zeigen immer auf die neuste
+ *  Generation (opus → Opus 5.5, fable → Fable 5.2, sonnet → Sonnet 5.5). Haiku fehlt bewusst —
+ *  ein Haiku-Advisor ist nie stärker als das Hauptmodell und lohnt sich nicht. */
+export const ADVISOR_OPTIONS: { id: AdvisorChoice; label: string; hint: string }[] = [
+  { id: "off", label: "Kein Advisor", hint: "Der Agent arbeitet allein." },
+  {
+    id: "opus",
+    label: "Opus",
+    hint:
+      "Opus prüft an Entscheidungspunkten: vor einem Ansatz, bei einem Fehler, der wiederkehrt, und bevor " +
+      "der Agent eine Aufgabe für erledigt erklärt. Kostet nur bei diesen Aufrufen Opus-Tokens.",
+  },
+  {
+    id: "fable",
+    label: "Fable",
+    hint:
+      "Fable als Ratgeber für die schwierigsten Entscheidungen. Braucht Fable-Zugang; auf manchen Abos " +
+      "laufen Fable-Aufrufe über Usage-Credits statt über das Abo-Kontingent.",
+  },
+  {
+    id: "sonnet",
+    label: "Sonnet",
+    hint: "Günstige zweite Meinung, die Routine-Versehen auffängt.",
+  },
+];
+
+/**
+ * Welche Advisor zum Hauptmodell passen. Regel von Anthropic: der Advisor muss mindestens so fähig
+ * sein wie das Hauptmodell; Claude Code hängt eine schwächere Paarung gar nicht erst an (still).
+ * mads bietet deshalb nur an, was greift — vereinfacht auf Familien, Stand Claude Code 2.1.323:
+ *
+ *   Fable/Mythos           → nur Fable
+ *   Opus (auch opusplan)   → Opus, Fable
+ *   Sonnet, Haiku, unbek.  → Sonnet, Opus, Fable
+ *
+ * Zwei seltene Ausnahmen der offiziellen Tabelle lässt die Vereinfachung weg (Sonnet 5.5 als
+ * Advisor für Opus 4.7/4.8, Haiku 5.5 als Advisor) — beides sind keine sinnvollen Paarungen.
+ */
+export function advisorChoicesFor(modelId: string | undefined): AdvisorChoice[] {
+  const id = modelId ? normalizeModelId(modelId) : "";
+  const family: ModelFamily =
+    id === "opusplan" ? "opus" : (["fable", "opus", "sonnet", "haiku"].includes(id) ? (id as ModelFamily) : parseModelId(id)?.family ?? "unknown");
+  if (family === "fable" || family === "mythos") return ["off", "fable"];
+  if (family === "opus") return ["off", "opus", "fable"];
+  return ["off", "opus", "fable", "sonnet"];
+}
+
+/** Advisor auf das Hauptmodell begrenzen: unzulässige Paarung → "off" (statt still wirkungslos). */
+export function clampAdvisor(modelId: string | undefined, advisor: AdvisorChoice | undefined): AdvisorChoice {
+  if (!advisor || advisor === "off") return "off";
+  return advisorChoicesFor(modelId).includes(advisor) ? advisor : "off";
+}
+
+/** Eingehender Wert über die Leitung → gültiger AdvisorChoice (unbekanntes → undefined). */
+export function parseAdvisor(v: unknown): AdvisorChoice | undefined {
+  return v === "off" || v === "sonnet" || v === "opus" || v === "fable" ? v : undefined;
 }

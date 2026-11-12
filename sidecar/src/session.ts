@@ -27,7 +27,7 @@ import {
 import { accountAgentEnv } from "./agentEnv.js";
 import { DEFAULT_ACCOUNT_ID, loadAccounts, pickFallback, readAccountToken, resolveProfile, saveAccounts, withCooldown } from "./accounts.js";
 import { sandboxOptions } from "./sandbox.js";
-import { ALIAS_IDS, parseModelId } from "../../shared/models.js";
+import { ALIAS_IDS, clampAdvisor, parseAdvisor, parseModelId } from "../../shared/models.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -43,6 +43,7 @@ import type {
   SandboxMode,
   PermissionMode,
   EffortMode,
+  AdvisorChoice,
   PullRequestInfo,
 } from "../../shared/protocol.js";
 
@@ -134,12 +135,19 @@ interface QueryHandle extends AsyncIterable<unknown> {
   close?: () => void;
 }
 
-/** mads-Effort ("low".."max"|"ultracode") → SDK-Query-Optionen. Ultracode = xhigh + stehende
- *  Workflow-Orchestrierung (Settings-Flag `ultracode`). Ohne Effort (undefined) → SDK-Default. */
-function effortOptions(effort?: string): Record<string, unknown> {
-  if (!effort) return {};
-  if (effort === "ultracode") return { effort: "xhigh", settings: { ultracode: true } };
-  return { effort };
+/** mads-Effort ("low".."max"|"ultracode") und Advisor → SDK-Query-Optionen. Ultracode = xhigh +
+ *  stehende Workflow-Orchestrierung (Settings-Flag `ultracode`); der Advisor ist das Settings-Feld
+ *  `advisorModel`. Ohne Effort (undefined) → Modell-Default.
+ *
+ *  Der Advisor wird IMMER gesetzt, auch als "off": die globalen Nutzer-Settings werden geladen
+ *  (settingSources ["user"]), und ein dort gespeichertes `advisorModel` (z. B. aus `/advisor opus`
+ *  im Terminal) liefe sonst still mit, während mads „ohne Advisor" anzeigt. */
+export function effortOptions(effort?: string, advisor?: AdvisorChoice): Record<string, unknown> {
+  const settings: Record<string, unknown> = { advisorModel: advisor ?? "off" };
+  if (effort === "ultracode") settings.ultracode = true;
+  const out: Record<string, unknown> = { settings };
+  if (effort) out.effort = effort === "ultracode" ? "xhigh" : effort;
+  return out;
 }
 /**
  * Modell-IDs fürs Gegenprüfen kanonisieren: Region-Präfix (`us.`/`eu.`/`anthropic.`) und
@@ -159,6 +167,13 @@ export function normalizeModelId(id: string): string {
  */
 function isMainLoop(m: Record<string, unknown>): boolean {
   return m.parent_tool_use_id == null; // deckt null UND undefined (fehlt) ab
+}
+/** Advisor live umstellen (Flag-Layer). Abschalten geht NUR mit dem Wert "off": `null` räumt den
+ *  Flag-Eintrag bloss ab, und Claude Code fällt dann auf den Startwert aus `options.settings`
+ *  zurück (geprüft gegen Claude Code 2.1.323 mit `/advisor`). Einen einmal von der API
+ *  abgewiesenen Advisor nimmt Claude Code erst nach /clear oder /compact wieder auf. */
+export function advisorFlagSettings(advisor: AdvisorChoice): Record<string, unknown> {
+  return { advisorModel: advisor };
 }
 /** Live-Variante fürs applyFlagSettings (Flag-Layer). */
 function effortFlagSettings(effort: string): Record<string, unknown> {
@@ -320,6 +335,8 @@ export class AgentSession {
   role?: "integrator" | "sub";
   model?: string;
   effort?: EffortMode;
+  /** Advisor dieses Streams (immer auf das Modell begrenzt, siehe clampAdvisor). */
+  advisor: AdvisorChoice = "off";
   /** Claude-Konto dieses Streams (Profil-ID) — wird persistiert, damit ein Resume nach Neustart
    *  dasselbe Konto trifft (die Session liegt im `projects/` GENAU dieses Kontos). */
   accountId: string = DEFAULT_ACCOUNT_ID;
@@ -470,6 +487,7 @@ export class AgentSession {
     // Deckt auch den Auslagern-Flow ab (outsource_main), der keinen Model-Picker durchläuft.
     this.model = msg.model || DEFAULT_MODEL;
     this.effort = msg.effort;
+    this.advisor = clampAdvisor(this.model, parseAdvisor(msg.advisor));
     // Konto auflösen, BEVOR irgendetwas den Config-Pfad braucht (Session-Suche beim Resume).
     this.applyAccount(msg.accountId);
     // Die automatische „Setze die Arbeit fort"-Anweisung beim Resume ist KEIN Nutzer-Auftrag: sie darf
@@ -715,8 +733,8 @@ export class AgentSession {
           model: this.model, // coerciert (nie undefined) — siehe DEFAULT_MODEL-Zuweisung in start()
           // Effort/Ultracode (SDK-nativ): low/medium/high/xhigh/max → options.effort;
           // ultracode → effort xhigh + settings.ultracode. Ohne Effort → Modell-Default
-          // (bei den 5.5-Modellen `medium`, sonst meist `high`).
-          ...effortOptions(msg.effort),
+          // (bei den 5.5-Modellen `medium`, sonst meist `high`). Advisor → settings.advisorModel.
+          ...effortOptions(msg.effort, this.advisor),
           // OS-Sandbox für Agenten-Bash (siehe sandbox.ts): Schreiben nur in Worktree/.git/Caches,
           // Netz-Egress nur zu Paketquellen, Secret-Ablagen (~/.ssh, ~/.aws …) kernel-seitig dicht.
           // Begrenzt den Schadensradius VORAB, statt jede Zeile per Regex vorher zu bewerten.
@@ -1130,9 +1148,9 @@ export class AgentSession {
     await this.q?.setPermissionMode?.(mode === "auto" ? "default" : mode);
   }
 
-  /** Modell und/oder Effort LIVE umstellen (ohne query-Neustart): Modell via setModel(),
-   *  Effort/Ultracode via applyFlagSettings() (Flag-Layer, sofort für den nächsten Turn). */
-  async setModelEffort(model?: string, effort?: EffortMode): Promise<void> {
+  /** Modell, Effort und/oder Advisor LIVE umstellen (ohne query-Neustart): Modell via setModel(),
+   *  Effort/Ultracode und Advisor via applyFlagSettings() (Flag-Layer, ab dem nächsten Turn). */
+  async setModelEffort(model?: string, effort?: EffortMode, advisor?: AdvisorChoice): Promise<void> {
     if (model !== undefined && model !== "") {
       this.model = model;
       this.mismatchCorrectedFor = undefined; // frische Absicht → ein neuer Mismatch darf wieder warnen
@@ -1143,6 +1161,14 @@ export class AgentSession {
     if (effort) {
       this.effort = effort;
       await this.q?.applyFlagSettings?.(effortFlagSettings(effort));
+    }
+    // Advisor nach einem Modellwechsel neu begrenzen: eine Paarung, die zum neuen Modell nicht
+    // passt, hängte Claude Code still ab — mads zeigt dann ehrlich „kein Advisor".
+    const wanted = parseAdvisor(advisor) ?? this.advisor;
+    const next = clampAdvisor(this.model, wanted);
+    if (next !== this.advisor || parseAdvisor(advisor) !== undefined) {
+      this.advisor = next;
+      await this.q?.applyFlagSettings?.(advisorFlagSettings(next));
     }
   }
 
@@ -1697,6 +1723,7 @@ export class AgentSession {
       sandboxMode: this.sandboxMode,
       model: this.model,
       effort: this.effort,
+      advisor: this.advisor,
       permissionMode: this.permissionMode,
     };
   }

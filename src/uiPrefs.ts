@@ -13,9 +13,9 @@
  *  (`changeOverviewOn`, docs/design/09-change-overview.md / §2.3 von Doc 10). */
 export type ViewId = "streams" | "files" | "settings";
 
-import type { EffortMode } from "../shared/protocol";
+import type { AdvisorChoice, EffortMode } from "../shared/protocol";
 import { DEFAULT_MODEL, DEFAULT_EFFORT, clampEffort, isKnownModel } from "./modelCatalog";
-import { parseModelId } from "../shared/models";
+import { clampAdvisor, parseAdvisor, parseModelId } from "../shared/models";
 
 export interface UiPrefs {
   activeView: ViewId;
@@ -30,6 +30,9 @@ export interface UiPrefs {
   defaultModel: string;
   /** Globaler Default für den Effort neuer Streams. */
   defaultEffort: EffortMode;
+  /** Globaler Default für den Advisor neuer Streams ("off" = keiner; bewusst der Ausgangswert,
+   *  damit sich nichts still verteuert). */
+  defaultAdvisor: AdvisorChoice;
   /** Ob der Dev-Server-Log-Bereich im Inspector auf-/zugeklappt ist (folgt der Nutzer-Einstellung,
    *  klappt NICHT bei neuen Log-Zeilen selbständig auf). */
   devLogOpen: boolean;
@@ -51,6 +54,7 @@ const DEFAULTS: UiPrefs = {
   treePaneWidth: 200,
   defaultModel: DEFAULT_MODEL,
   defaultEffort: DEFAULT_EFFORT,
+  defaultAdvisor: "off",
   devLogOpen: true,
 };
 
@@ -92,6 +96,7 @@ export function loadUiPrefs(): UiPrefs {
     const wanted = typeof obj.defaultModel === "string" ? obj.defaultModel : "";
     const defaultModel = wanted && (isKnownModel(wanted) || !!parseModelId(wanted)) ? wanted : DEFAULTS.defaultModel;
     const defaultEffort = clampEffort(defaultModel, obj.defaultEffort as EffortMode) ?? DEFAULTS.defaultEffort;
+    const defaultAdvisor = clampAdvisor(defaultModel, parseAdvisor(obj.defaultAdvisor));
     return {
       activeView,
       railCollapsed,
@@ -100,6 +105,7 @@ export function loadUiPrefs(): UiPrefs {
       treePaneWidth: clampTreePaneWidth(obj.treePaneWidth),
       defaultModel,
       defaultEffort,
+      defaultAdvisor,
       devLogOpen,
     };
   } catch {
