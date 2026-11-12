@@ -32,8 +32,8 @@ export type PermissionMode = "default" | "acceptEdits" | "plan" | "auto" | "bypa
 
 /** Reasoning-Effort eines Streams. "ultracode" = xhigh-Effort + stehende Workflow-Orchestrierung
  *  (SDK-Session-Flag `ultracode`; oberstes Ende der Skala wie in Claude Code). Sidecar mappt:
- *  low/medium/high/xhigh → options.effort; ultracode → effort "xhigh" + settings.ultracode. */
-export type EffortMode = "low" | "medium" | "high" | "xhigh" | "ultracode";
+ *  low/medium/high/xhigh/max → options.effort; ultracode → effort "xhigh" + settings.ultracode. */
+export type EffortMode = "low" | "medium" | "high" | "xhigh" | "max" | "ultracode";
 
 /** Bild-Eingabe (z.B. eingefügter Screenshot) für einen Agenten. */
 export interface ImageInput {

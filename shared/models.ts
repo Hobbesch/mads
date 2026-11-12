@@ -74,7 +74,7 @@ export interface ModelCatalog {
   cliVersion?: string;
 }
 
-export const FULL_EFFORT: EffortMode[] = ["low", "medium", "high", "xhigh", "ultracode"];
+export const FULL_EFFORT: EffortMode[] = ["low", "medium", "high", "xhigh", "max", "ultracode"];
 /** Ohne xhigh gibt es auch kein Ultracode (Ultracode = xhigh + stehende Workflow-Orchestrierung). */
 export const BASE_EFFORT: EffortMode[] = ["low", "medium", "high"];
 
@@ -83,18 +83,18 @@ export const BASE_EFFORT: EffortMode[] = ["low", "medium", "high"];
  * zusätzlich anbietet, kommt beim Start dazu. Sie liefert vor allem das, was keine API weiss:
  * Preis und Einsatzempfehlung im Tooltip.
  *
- * Preise pro Mio. Tokens (Ein-/Ausgabe), Stand 2026-09-29.
+ * Preise pro Mio. Tokens (Ein-/Ausgabe), Stand 2026-11-13. Je Familie die aktuelle und die
+ * Vorgänger-Generation (wie `KEEP_GENERATIONS`); Ältere kommen nur über die Live-Prüfung herein.
  */
 export const BUILTIN_MODELS: ModelInfo[] = [
-  entry("claude-fable-5-1", "Anthropics fähigstes Modell — anspruchsvollste, lang laufende Agenten-Arbeit (teuerste Stufe: $10/$50 pro Mio.)", FULL_EFFORT),
-  entry("claude-fable-5", "Vorgänger-Fable (gleicher Preis wie Fable 5.1: $10/$50)", FULL_EFFORT),
-  entry("claude-opus-5-5", "Aktueller Opus — stärkster fürs agentische Coding und Standard für den Integrator; günstiger als Opus 5 ($4/$20)", FULL_EFFORT),
+  entry("claude-fable-5-2", "Anthropics fähigstes Modell — schwierigste, lang laufende Arbeit: Ursachensuche, Architektur, mehrdeutige Probleme. Ziel beschreiben, nicht die Schritte. Teuerste Stufe ($8/$40 pro Mio.); Effort ab High, Xhigh nur wo messbar besser", FULL_EFFORT),
+  entry("claude-fable-5-1", "Vorgänger-Fable ($10/$50 — teurer als Fable 5.2)", FULL_EFFORT),
+  entry("claude-opus-5-5", "Aktueller Opus — komplexes agentisches Coding und Standard für den Integrator ($4/$20)", FULL_EFFORT),
   entry("claude-opus-5", "Vorgänger-Opus ($5/$25)", FULL_EFFORT),
-  entry("claude-opus-4-8", "Ältere Opus-Generation ($5/$25)", FULL_EFFORT),
-  entry("claude-sonnet-5-5", "Aktueller Sonnet — nahe Opus bei Coding/Agentik, deutlich günstiger ($2/$10); bestes Preis/Leistung für Sub-Agents", FULL_EFFORT),
+  entry("claude-sonnet-5-5", "Aktueller Sonnet — alltägliches Coding, halber Opus-Preis ($2/$10); gute Wahl für Sub-Streams", FULL_EFFORT),
   entry("claude-sonnet-5", "Vorgänger-Sonnet ($2/$10)", FULL_EFFORT),
-  entry("claude-sonnet-4-6", "Ältere Sonnet-Generation ($3/$15) — kein xhigh/Ultracode", BASE_EFFORT),
-  entry("claude-haiku-4-5", "Schnell & günstig ($1/$5) — kein Effort-Regler; für Explore/Hilfsarbeit", []),
+  entry("claude-haiku-5-5", "Aktueller Haiku — sehr schnell und sehr günstig ($0.10/$0.50) für Hilfs- und Sucharbeit; hat jetzt einen Effort-Regler", FULL_EFFORT),
+  entry("claude-haiku-4-5", "Vorgänger-Haiku ($1/$5) — kein Effort-Regler", []),
 ];
 
 /**
@@ -175,8 +175,8 @@ export function normalizeModelId(id: string): string {
 
 /**
  * Effort-Ladder aus den `capabilities` der Models-API ableiten. Die API kennt low/medium/high/
- * xhigh/max; mads kennt kein `max`, dafür `ultracode` (= xhigh + stehende Workflow-Orchestrierung)
- * — es wird genau dann angeboten, wenn das Modell xhigh kann. Fehlen die Angaben (ältere
+ * xhigh/max; mads ergänzt `ultracode` (= xhigh + stehende Workflow-Orchestrierung) als oberstes
+ * Ende — es wird genau dann angeboten, wenn das Modell xhigh kann. Fehlen die Angaben (ältere
  * API-Antwort), gibt die Funktion `undefined` zurück: dann gilt die eingebaute/abgeleitete Ladder.
  */
 export function effortFromCapabilities(caps: unknown): EffortMode[] | undefined {
@@ -190,8 +190,8 @@ export function effortFromCapabilities(caps: unknown): EffortMode[] | undefined 
     return !!leaf && typeof leaf === "object" && (leaf as Record<string, unknown>).supported === true;
   };
   const levels: EffortMode[] = [];
-  for (const lvl of ["low", "medium", "high"] as const) if (can(lvl)) levels.push(lvl);
-  if (can("xhigh")) levels.push("xhigh", "ultracode");
+  for (const lvl of ["low", "medium", "high", "xhigh", "max"] as const) if (can(lvl)) levels.push(lvl);
+  if (can("xhigh")) levels.push("ultracode");
   return levels.length ? levels : [];
 }
 
