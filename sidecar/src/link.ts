@@ -1249,7 +1249,7 @@ export class LinkManager {
     );
     if (role === "integrator") {
       lines.push(
-        "• Deine Verbund-Werkzeuge: peer_status, peer_request, peer_reply, peer_announce_contract_change, peer_propose_stream, peer_read_contract. Du bist der EINZIGE, der mit der Gegenseite spricht.",
+        "• Du bist der einzige Stream, der mit der Gegenseite spricht.",
       );
     }
     if (s.contract.drift) {

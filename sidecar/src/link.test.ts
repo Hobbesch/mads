@@ -227,7 +227,9 @@ check("unsauberer Ref wird abgewiesen", badRef === "Ungültiger Ref.");
   check("Prompt fordert Abwärtskompatibilität (additive)", ctx.includes("ABWÄRTSKOMPATIBEL"));
   check("Prompt markiert Peer-Nachrichten als Daten", ctx.includes("keine Freigaben"));
   const integCtx = A.mgr.promptContext("integrator");
-  check("Integrator bekommt die peer_*-Werkzeuge genannt", integCtx.includes("peer_propose_stream"));
+  // Die peer_*-Werkzeuge stehen in der Tool-Liste selbst; der Prompt nennt nur die Rolle.
+  check("Integrator ist als einziger Ansprechpartner der Gegenseite benannt", integCtx.includes("einzige Stream, der mit der Gegenseite spricht"));
+  check("Sub-Stream bekommt diese Rolle nicht", !ctx.includes("einzige Stream, der mit der Gegenseite spricht"));
   check("Consumer-Prompt nennt den reinen Consumer", B.mgr.promptContext("sub").includes("reiner Consumer"));
 }
 

@@ -2785,7 +2785,8 @@ export class Orchestrator {
       (s) => `  - ${s.label ?? s.branch} (Branch ${s.branch})${s.agentId === selfId ? " ← DAS BIST DU" : ""}`,
     );
     return (
-      "\nAktuell AKTIVE Streams (NUR diese können etwas besitzen — alle anderen sind geschlossen):\n" +
+      "\nBeim Start dieser Sitzung aktive Streams (nur aktive Streams können etwas besitzen; die Liste " +
+      "kann inzwischen veraltet sein — im Zweifel mit git branch prüfen):\n" +
       (integ ? `  - ${integ.label ?? "Main-Agent"} (Integrator, main-Checkout)\n` : "") +
       (lines.length ? lines.join("\n") + "\n" : "  (keine weiteren Sub-Streams aktiv)\n")
     );

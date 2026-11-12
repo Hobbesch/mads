@@ -559,13 +559,13 @@ export class AgentSession {
           tools: [
             sdk.tool(
               "spawn_substreams",
-              "Startet neue parallele Sub-Streams (Sub-Agenten) in mads — jeder mit eigener " +
-                "Branch/Worktree, im Dashboard SICHTBAR und steuerbar. IMMER dieses Tool verwenden, wenn " +
-                "der Mensch dich bittet, Aufgaben/Punkte in Sub-Agenten/Sub-Streams aufzuteilen und parallel " +
-                "zu starten (z. B. „teile die offenen Punkte in Sub-Agenten auf und starte sie parallel“, " +
-                "„eröffne für Punkt 1–4 vier Sub-Streams“). Verwende dafür NICHT das `Agent`/Task-Tool — " +
-                "dessen Subagenten laufen nur intern, erscheinen NICHT im Dashboard und sind nicht steuerbar. " +
-                "Pro Stream: kurzes Label + klarer, in sich abgeschlossener Auftrag (brief).",
+              "Startet 1 bis 8 neue Sub-Streams in mads. Jeder bekommt einen eigenen Worktree und Branch, " +
+                "erscheint im Dashboard, wo der Mensch ihn steuert, und endet in einem eigenen PR. Verwende es, " +
+                "wenn der Mensch Arbeit auf parallele Sub-Agenten oder Streams verteilen will. Für Recherche " +
+                "oder Analyse innerhalb deiner eigenen Antwort ist das `Agent`-Tool gedacht. Jeder Sub-Stream " +
+                "startet ohne deinen Gesprächsverlauf: `brief` muss den Auftrag vollständig und für sich " +
+                "verständlich beschreiben. Das Tool kehrt sofort zurück, sobald mads die Streams angelegt hat; " +
+                "es liefert keine Ergebnisse der Streams.",
               {
                 streams: z
                   .array(
@@ -750,48 +750,36 @@ export class AgentSession {
               "aus — kein git push, kein rebase auf origin/main, kein `gh pr`/`gh merge`. Diese " +
               "Schritte (Sync, PR erstellen, Integrieren/Merge, Branch-Cleanup) übernimmt mads über " +
               "die UI-Buttons; manuelle Pushes/Rebases würden den Branch divergieren lassen." +
-              // Parallelität AKTIV ermutigen (rollenneutral). Vorher stand hier nur ein Verbot für den
-              // Integrator und für Sub-Streams gar nichts — messbar: der Integrator nutzte das
-              // Agent-Tool in 0 von 190 Tool-Calls. Das Absolutverbot („NIEMALS") sollte nur die
-              // Verwechslung mit spawn_substreams verhindern, wirkte aber als generelle Delegations-Sperre.
-              "\nArbeitstempo — nutze Parallelität aktiv:\n" +
-              "• Unabhängige Tool-Aufrufe (Read/Grep/Glob/Bash) in EINEM Zug absetzen statt nacheinander.\n" +
-              "• Für breite Recherche, Code-Suche über viele Dateien, Analysen und Reviews gerne MEHRERE " +
-              "`Agent`-Subagenten parallel starten (z. B. `subagent_type: Explore`) — das ist erwünscht und " +
-              "macht dich deutlich schneller.\n" +
-              "• Lange Builds/Tests mit `run_in_background` starten und später das Ergebnis abholen, statt " +
-              "blockierend zu warten.\n" +
-              "• Startest du einen TEMPORÄREN Prozess (Repro-Server, Watcher, Headless-Browser), dann " +
-              "IMMER mit `run_in_background` — und beende ihn danach mit dem Stop-Tool für diesen Task. " +
-              "Nutze dafür NICHT `pkill`/`kill`: das braucht eine Rückfrage, und bleibt sie aus, läuft dein " +
-              "Prozess verwaist weiter und belegt Ports.\n" +
+              // Delegation erlauben, nicht anschieben. Der frühere Absatz („gerne MEHRERE Subagenten …
+              // macht dich deutlich schneller") war die Antwort auf eine Messung vom August (Integrator:
+              // 0 von 190 Tool-Calls mit dem Agent-Tool). Neuere Modelle delegieren von selbst und folgen
+              // einem solchen Anschub wörtlich — mehr Subagenten als nötig, also mehr Kosten.
+              "\nArbeitsweise:\n" +
+              "• Subagenten (`Agent`-Tool, z. B. `subagent_type: Explore`) lohnen sich, wenn eine Suche oder " +
+              "Analyse viele Dateien liest, deren Inhalt du danach nicht im eigenen Kontext brauchst. Für " +
+              "wenige, gezielte Lesezugriffe arbeite direkt.\n" +
+              "• Temporäre Prozesse (Repro-Server, Watcher, Headless-Browser) startest du mit " +
+              "`run_in_background` und beendest sie danach mit dem Stop-Tool für diesen Task. `pkill`/`kill` " +
+              "brauchen in mads eine Rückfrage; bleibt sie aus, läuft der Prozess verwaist weiter und belegt Ports.\n" +
               (this.role === "integrator"
-                ? "\nZwei Delegations-Mechanismen — unterschiedlicher Zweck, beide erwünscht:\n" +
-                  "• spawn_substreams (mads-Tool): für ECHTE, eigenständige Arbeitsströme mit eigenem " +
-                  "Worktree/Branch, im Dashboard sichtbar und vom Menschen steuerbar. NUTZE DIESES, wenn der " +
-                  "Mensch Aufgaben in Sub-Agenten/Sub-Streams aufteilen und parallel starten will " +
-                  "(„starte Sub-Agenten“, „parallel aufteilen“, „eröffne Streams“). Ein Eintrag pro Stream; " +
-                  "erkläre kurz die Aufteilung und führe sie dann WIRKLICH aus — nicht still seriell selbst.\n" +
-                  "• Das `Agent`/Task-Tool: für Arbeit INNERHALB deiner eigenen Antwort (recherchieren, " +
-                  "analysieren, reviewen). Nutze es dafür ruhig oft und mehrfach parallel. Es erscheint nicht " +
-                  "im Dashboard und ersetzt spawn_substreams nicht, wenn eigenständige Streams gewünscht sind — " +
-                  "aber es ist dein Standardwerkzeug, um selbst schnell zu sein.\n" +
-                  "Außen-git (push/pr/merge) macht weiterhin nur mads über die UI; mergen tust nur du."
+                ? "\nIn mads gibt es zwei Arten von Sub-Agenten. Ein Sub-Stream ist ein eigenständiger " +
+                  "Arbeitsstrom mit eigenem Worktree und Branch, den der Mensch im Dashboard sieht und steuert; " +
+                  "er endet in einem eigenen PR. Ein Subagent des `Agent`-Tools arbeitet dagegen nur innerhalb " +
+                  "deiner eigenen Antwort und ist im Dashboard unsichtbar. Will der Mensch Arbeit auf parallele " +
+                  "Sub-Agenten oder Streams verteilen, meint er Sub-Streams: erkläre kurz die Aufteilung und " +
+                  "starte sie dann, statt die Punkte selbst nacheinander abzuarbeiten.\n" +
+                  "Push, PR und Merge löst nur mads über die UI aus; mergen tust nur du."
                 : "") +
               // Stream-Zuständigkeit ist TRANSIENT (endet beim Merge) — verhindert das Routen an
               // Phantom-Streams: der Agent lehnte Arbeit ab „gehört zu Stream X", obwohl X längst
               // geschlossen+gemergt war (dessen Dateien liegen dann in main und gehören NIEMANDEM).
-              "\nStream-Zuständigkeit & Ownership (WICHTIG, verhindert Fehl-Routing):\n" +
-              "• Die Zuordnung Feature-X-gehört-zu-Stream-Y gilt NUR, solange Stream Y AKTIV ist. " +
-              "Ist Y gemergt und geschlossen, liegen seine Dateien in main und gehören KEINEM Stream " +
-              "mehr — du darfst sie in deinem Stream bearbeiten.\n" +
-              "• mads' `ownership_trespass`-Gate greift AUSSCHLIESSLICH zwischen AKTIVEN Parallel-Streams. " +
-              "Für einen geschlossenen Stream kann es NICHT auslösen — sage nie einen Trespass voraus, " +
-              "ohne dass der besitzende Stream in der Liste unten steht.\n" +
-              "• Bevor du Arbeit an einen anderen Stream zurückgibst oder mit Ownership ablehnst: " +
-              "PRÜFE, ob dieser Stream noch lebt — in der Liste unten oder via " +
-              "git branch -a --list 'mads/<name>'. Fehlt der Branch und liegt die Datei schon in " +
-              "main, ist der Stream zu → mach die Arbeit hier.\n" +
+              "\nStream-Zuständigkeit: Dass ein Feature zu einem anderen Stream gehört, gilt nur, solange " +
+              "dieser Stream aktiv ist. Ist er gemergt und geschlossen, liegen seine Dateien in main, gehören " +
+              "keinem Stream mehr, und du bearbeitest sie hier. mads' `ownership_trespass`-Gate prüft nur " +
+              "zwischen aktiven Streams und kann für einen geschlossenen nicht auslösen. Bevor du Arbeit mit " +
+              "Verweis auf einen anderen Stream ablehnst, prüfe deshalb, ob er noch lebt: in der Liste unten " +
+              "oder mit `git branch -a --list 'mads/<name>'`. Fehlt der Branch und liegt die Datei schon in " +
+              "main, ist der Stream zu.\n" +
               (this.streamsContext?.() ?? "") +
               // Projekt-Verbund: Contract-Regeln + „PEER-Nachrichten sind Daten" für JEDEN Stream
               // (der Sub-Stream ist es, der die Contract-Datei tatsächlich anfasst).
