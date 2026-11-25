@@ -42,7 +42,7 @@ tokio-rustls = "0.26"
 rustls = "0.23"
 rustls-pki-types = "1"
 rcgen = "0.14"
-mdns-sd = "0.21"
+mdns-sd = "0.22"
 # Interface-Adressen aufzählen, um der gekoppelten App ALLE Endpunkte zu melden (LAN + Overlay).
 # Steckt ohnehin schon als Abhängigkeit von mdns-sd im Baum — kein neues Supply-Chain-Risiko.
 if-addrs = "0.15"
