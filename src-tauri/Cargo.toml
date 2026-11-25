@@ -50,4 +50,4 @@ futures-util = "0.3"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 argon2 = "0.6"
 rand = "0.10" # für Token-/PIN-CSPRNG (SysRng)
-qrcode = { version = "0.14", default-features = false, features = ["svg"] } # nur SVG-Render, KEINE image-Kette
+qrcode = { version = "0.15", default-features = false, features = ["svg"] } # nur SVG-Render, KEINE image-Kette
