@@ -47,7 +47,7 @@ mdns-sd = "0.21"
 # Steckt ohnehin schon als Abhängigkeit von mdns-sd im Baum — kein neues Supply-Chain-Risiko.
 if-addrs = "0.15"
 futures-util = "0.3"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 argon2 = "0.6"
 rand = "0.10" # für Token-/PIN-CSPRNG (SysRng)
 qrcode = { version = "0.14", default-features = false, features = ["svg"] } # nur SVG-Render, KEINE image-Kette
